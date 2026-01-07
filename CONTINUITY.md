@@ -4,9 +4,16 @@ Goal (incl. success criteria):
 - Add requested UX enhancements: cascading filter options, calendar week timeline view across active jobs, and hybrid schedule work-week toggle.
 - Provide direct email/SMS actions when messaging subcontractors in the Subs tab.
 - Improve mobile schedule view width/usability and fix iOS photo upload "Use Photo" failure (invalid image error).
+- Align Community Specs UI/structure to subdivision spec expectations from `BrelandData/Grove Subdivision Specs.pdf`.
+- Incorporate spec data from `BrelandData/Grove Sub Specs.xlsx`.
+- Populate subcontractor list data from `BrelandData/Sub List Braden.xlsx`.
+- Cross-check subcontractor list with `BrelandData/Sub List Braden-2.xlsx`.
+- Incorporate scheduling cover sheet workflow from `BrelandData/Cover Sheets.xlsm`.
+- Align schedule templates/UX to `BrelandData/Sample Construction Schedule.xlsx` and builder feedback about exterior work overlap.
+- Keep exterior work manual/ad hoc with quick scheduling UI.
 
 Constraints/Assumptions:
-- Workspace: `/Users/bradencarlson/Documents/BuildingSchedule`; sandbox write only here; network restricted.
+- Workspace: `/Users/bradencarlson/Documents/BuildingSchedule`; sandbox: danger-full-access; network enabled; approval policy: never.
 - Use ASCII in edits; avoid reverting unrelated changes.
 - Community creation replaces blocks with sequential lots; lots assigned by product type and builder ranges.
 - Admin-configurable product types/plans/agencies/custom fields drive new flows.
@@ -14,8 +21,11 @@ Constraints/Assumptions:
 Key decisions:
 - UNCONFIRMED: Whether to create `robust-coalescing-tulip.md` plan file referenced in `buildflow-enhancements.md`.
 - Planned: Keep backward compatibility by tolerating legacy `block` fields on lots/communities while new flow uses `lot_number` only.
+- User wants 24/7 public access for remote testing.
+- GitHub: `bradencarlson0/buildflow`, public, use GitHub CLI.
 
 State:
+- Pending commit/push for long-press drag rescheduling and shared reschedule helper updates.
 
 Done:
 - Read repo structure and `buildflow-enhancements.md`.
@@ -47,31 +57,51 @@ Done:
 - Added persistent bottom nav styling for improved clickability while scrolling.
 - Added Calendar Week Timeline view in Calendar tab.
 - Updated Schedule Inspection modal with existing vs new inspector selection.
-
-Now:
-- Verify mobile schedule view change on device.
-- Re-test iOS job photo upload in Lot Photos tab after routing to modal flow.
-- Confirm new Netlify URL and proceed with remaining app tasks.
-- Push latest changes to GitHub to trigger Netlify redeploy.
-
-Next:
-- Validate calendar and sales filter behavior after cascade changes.
-- Verify timeline rendering in lot detail and calendar week timeline.
-
-Open questions (UNCONFIRMED if needed):
-- Does the user still want `robust-coalescing-tulip.md` generated from the spec text?
-- Confirm if the failing flow was Lot > Photos tab Take/Upload (now routed to modal), and whether it works after this change.
-
-Key decisions:
-- User wants 24/7 public access for remote testing.
-- GitHub: `bradencarlson0/buildflow`, public, use GitHub CLI.
-
-Done:
 - Initialized git repo and created initial commit.
 - Created and pushed GitHub repo: `https://github.com/bradencarlson0/buildflow`.
 - Netlify deploy: `https://incandescent-dusk-f13a67.netlify.app`.
 - Renamed Netlify site: `https://builderschedule.netlify.app`.
 - Provided 24/7 public hosting guidance and completed deployment.
+- Pushed latest changes to GitHub (commit: 3bfebae).
+- Compared `Sub List Braden.xlsx` vs `Sub List Braden-2.xlsx`; found 3 added rows and one trade label change.
+- Updated schedule templates to match the sample construction schedule and added flexible exterior gating.
+- Added week timeline drag-and-drop rescheduling support with visual drop highlights.
+- Replaced seed subcontractor list with merged Excel data + trade mappings; renamed IBP category to include wire shelving.
+- Removed auto-scheduled exterior tasks from the base template; added an exterior quick-add modal for ad hoc scheduling.
+- Updated exterior task sub assignment to fall back to all subs when no trade match is found.
+- Pushed latest schedule/sub list/template updates (commit: 17e2e73).
+- Confirmed `BrelandData/` stays local and is not pushed.
+- Added shared reschedule preview/apply helper and updated reschedule modal to use it.
+- Added long-press drag rescheduling in Lot > Schedule work-week timeline (with drop highlighting + dependency checks).
+
+Now:
+- Commit and push latest reschedule/drag changes.
+- Verify mobile schedule view change on device.
+- Re-test iOS job photo upload in Lot Photos tab after routing to modal flow.
+- Confirm new Netlify URL and proceed with remaining app tasks.
+- Confirm Netlify redeploy completed and verify the new calendar/inspection updates on the hosted URL.
+- Review subdivision specs PDF and update community specs workflow to match expectations.
+- Review Grove specs Excel file and map it into community specs.
+- Review scheduling cover sheet Excel macro file and map it into app workflow.
+- Verify exterior ad hoc scheduling flow in the lot schedule view.
+- Re-test exterior task sub dropdown with the trade fallback.
+
+Next:
+- Confirm scope for drag/drop scheduling (week view only, or across all schedule views).
+- Validate calendar and sales filter behavior after cascade changes.
+- Verify timeline rendering in lot detail and calendar week timeline.
+- Decide on spec categories/template and implement community specs updates.
+- Decide how Grove specs should seed community specs (template vs import).
+- Define cover sheet fields and implement export/print flow for subs.
+- Validate new schedule template + drag rescheduling UX against real usage.
+
+Open questions (UNCONFIRMED if needed):
+- Does the user still want `robust-coalescing-tulip.md` generated from the spec text?
+- Confirm if the failing flow was Lot > Photos tab Take/Upload (now routed to modal), and whether it works after this change.
+- Confirm preferred community spec format (categories/sections, required vs optional, template vs freeform).
+- Confirm whether Grove specs should be auto-applied to specific community or stored as reusable template.
+- Confirm how cover sheets should be generated (PDF export, email attachment, or in-app print view).
+- Confirm scope for drag/drop scheduling (week view only, or across all schedule views).
 
 Working set (files/ids/commands):
 - `buildflow-enhancements.md`
@@ -83,3 +113,9 @@ Working set (files/ids/commands):
 - `src/lib/storage.js`
 - `src/lib/utils.js` (new)
 - `CONTINUITY.md`
+- `BrelandData/Grove Subdivision Specs.pdf`
+- `BrelandData/Grove Sub Specs.xlsx`
+- `BrelandData/Sub List Braden.xlsx`
+- `BrelandData/Sub List Braden-2.xlsx`
+- `BrelandData/Cover Sheets.xlsm`
+- `BrelandData/Sample Construction Schedule.xlsx`

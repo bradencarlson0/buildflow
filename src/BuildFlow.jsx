@@ -83,6 +83,203 @@ const EXTERIOR_TASK_LIBRARY = [
   { id: 'custom', name: 'Custom', trade: 'other', duration: 1 },
 ]
 
+const bySortOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || String(a.name ?? '').localeCompare(String(b.name ?? ''))
+
+const buildReschedulePreview = ({ lot, task, targetDateIso, org }) => {
+  const out = { affected: [], oldCompletion: null, newCompletion: null, dependency_violation: false, earliest_start: null, normalized_date: '' }
+  if (!targetDateIso || !task?.scheduled_start) return out
+  const { getNextWorkDay, addWorkDays, subtractWorkDays } = makeWorkdayHelpers(org)
+
+  const normalizedDate = (() => {
+    const next = getNextWorkDay(targetDateIso) ?? parseISODate(targetDateIso)
+    return next ? formatISODate(next) : targetDateIso
+  })()
+  out.normalized_date = normalizedDate
+
+  const durationMinus1 = Math.max(0, Number(task.duration ?? 0) - 1)
+  let earliest = getNextWorkDay(task.scheduled_start) ?? parseISODate(task.scheduled_start)
+
+  for (const dep of task.dependencies ?? []) {
+    const pred = (lot.tasks ?? []).find((t) => t.id === dep.depends_on_task_id)
+    if (!pred?.scheduled_start || !pred?.scheduled_end) continue
+    const lag = Math.max(0, Number(dep.lag_days ?? 0) || 0)
+
+    if (dep.type === 'FS') {
+      const d = addWorkDays(pred.scheduled_end, 1 + lag)
+      if (d && (!earliest || d > earliest)) earliest = d
+    } else if (dep.type === 'SS') {
+      const d = addWorkDays(pred.scheduled_start, lag)
+      if (d && (!earliest || d > earliest)) earliest = d
+    } else if (dep.type === 'FF') {
+      const requiredEnd = addWorkDays(pred.scheduled_end, lag)
+      const d = requiredEnd ? subtractWorkDays(requiredEnd, durationMinus1) : null
+      if (d && (!earliest || d > earliest)) earliest = d
+    } else if (dep.type === 'SF') {
+      const requiredEnd = addWorkDays(pred.scheduled_start, lag)
+      const d = requiredEnd ? subtractWorkDays(requiredEnd, durationMinus1) : null
+      if (d && (!earliest || d > earliest)) earliest = d
+    }
+  }
+
+  const earliestStart = earliest ? formatISODate(getNextWorkDay(earliest) ?? earliest) : null
+  out.earliest_start = earliestStart
+  if (earliestStart && parseISODate(normalizedDate) && parseISODate(earliestStart) && parseISODate(normalizedDate) < parseISODate(earliestStart)) {
+    out.dependency_violation = true
+    return out
+  }
+
+  const workdayDiff = (fromIso, toIso) => {
+    const from = parseISODate(fromIso)
+    const to = parseISODate(toIso)
+    if (!from || !to) return 0
+    if (to.getTime() === from.getTime()) return 0
+
+    let cursor = fromIso
+    let delta = 0
+    const limit = 4000
+
+    if (to > from) {
+      while (cursor !== toIso && delta < limit) {
+        cursor = formatISODate(addWorkDays(cursor, 1))
+        delta += 1
+      }
+      return delta
+    }
+
+    while (cursor !== toIso && delta > -limit) {
+      cursor = formatISODate(subtractWorkDays(cursor, 1))
+      delta -= 1
+    }
+    return delta
+  }
+
+  const shiftDays = workdayDiff(task.scheduled_start, normalizedDate)
+  const tasks = (lot.tasks ?? []).slice().sort(bySortOrder)
+
+  const oldCompletion = (() => {
+    let max = null
+    for (const t of tasks) {
+      const d = parseISODate(t.scheduled_end)
+      if (!d) continue
+      if (!max || d > max) max = d
+    }
+    return max ? formatISODate(max) : null
+  })()
+  out.oldCompletion = oldCompletion
+
+  if (shiftDays === 0) {
+    out.newCompletion = oldCompletion
+    return out
+  }
+
+  const shiftIso = (iso, delta) => {
+    if (!iso || !delta) return iso
+    if (delta > 0) return formatISODate(addWorkDays(iso, delta))
+    return formatISODate(subtractWorkDays(iso, Math.abs(delta)))
+  }
+
+  const movedTrack = task.track
+  const movedSort = task.sort_order ?? 0
+  const byId = new Map()
+  const affected = []
+
+  for (const t of tasks) {
+    if (!t?.scheduled_start || !t?.scheduled_end) continue
+    if (t.status === 'complete') continue
+    const isAfter = (t.sort_order ?? 0) > movedSort
+    const shouldShift =
+      t.id === task.id ||
+      (t.track === movedTrack && isAfter) ||
+      (t.dependencies ?? []).some((d) => d.depends_on_task_id === task.id)
+
+    if (!shouldShift) continue
+
+    const newStart = shiftIso(t.scheduled_start, shiftDays)
+    const newEnd = shiftIso(t.scheduled_end, shiftDays)
+    byId.set(t.id, { start: newStart, end: newEnd })
+    affected.push({
+      task_id: t.id,
+      task_name: t.name,
+      old_start: t.scheduled_start,
+      new_start: newStart,
+      old_end: t.scheduled_end,
+      new_end: newEnd,
+      track: t.track,
+    })
+  }
+
+  const maxEndFor = (filterFn) => {
+    let max = null
+    for (const t of tasks) {
+      if (!filterFn(t)) continue
+      const endIso = byId.get(t.id)?.end ?? t.scheduled_end
+      if (!endIso) continue
+      const d = parseISODate(endIso)
+      if (!d) continue
+      if (!max || d > max) max = d
+    }
+    return max
+  }
+
+  const blockingEnd = maxEndFor((t) => t.track !== 'final' && t.blocks_final !== false)
+  const finalStart = blockingEnd ? addWorkDays(formatISODate(blockingEnd), 1) : null
+
+  if (finalStart) {
+    let cursor = finalStart
+    const finalTasks = tasks.filter((t) => t.track === 'final').sort(bySortOrder)
+    for (const ft of finalTasks) {
+      if (ft.status === 'complete') {
+        const end = parseISODate(ft.scheduled_end)
+        if (end && cursor && end >= cursor) cursor = addWorkDays(end, 1)
+        continue
+      }
+      const startIso = formatISODate(cursor)
+      const endDate = addWorkDays(cursor, Math.max(0, Number(ft.duration ?? 0) - 1))
+      const endIso = endDate ? formatISODate(endDate) : ft.scheduled_end
+
+      const prevStart = byId.get(ft.id)?.start ?? ft.scheduled_start
+      const prevEnd = byId.get(ft.id)?.end ?? ft.scheduled_end
+      byId.set(ft.id, { start: startIso, end: endIso })
+
+      if (prevStart !== startIso || prevEnd !== endIso) {
+        const existing = affected.find((a) => a.task_id === ft.id)
+        if (existing) {
+          existing.new_start = startIso
+          existing.new_end = endIso
+        } else {
+          affected.push({
+            task_id: ft.id,
+            task_name: ft.name,
+            old_start: ft.scheduled_start,
+            new_start: startIso,
+            old_end: ft.scheduled_end,
+            new_end: endIso,
+            track: ft.track,
+          })
+        }
+      }
+
+      cursor = endDate ? addWorkDays(endDate, 1) : cursor
+    }
+  }
+
+  out.affected = affected.slice().sort((a, b) => (a.task_id === task.id ? -1 : 0) || String(a.old_start).localeCompare(String(b.old_start)))
+
+  const newCompletion = (() => {
+    let max = null
+    for (const t of tasks) {
+      const endIso = byId.get(t.id)?.end ?? t.scheduled_end
+      const d = parseISODate(endIso)
+      if (!d) continue
+      if (!max || d > max) max = d
+    }
+    return max ? formatISODate(max) : null
+  })()
+  out.newCompletion = newCompletion
+
+  return out
+}
+
 const getWeatherFromCode = (code) => {
   const n = Number(code)
   if (n === 0) return { condition: 'Clear', icon: Sun }
@@ -2081,6 +2278,79 @@ export default function BuildFlow() {
     const conflict = task.sub_id ? getSubConflictPreview({ subId: task.sub_id, dateIso: normalized, movingLotId: lot.id }) : null
     if (conflict?.conflict) return { status: 'conflict', normalized, earliest, conflict }
     return { status: 'valid', normalized, earliest, conflict }
+  }
+
+  const applyReschedule = ({ lot, task, targetDateIso, reason, notifySubs, preview }) => {
+    if (!lot || !task) return { status: 'invalid' }
+    const computed = preview ?? buildReschedulePreview({ lot, task, targetDateIso, org })
+    const normalizedDate = computed.normalized_date || ''
+    if (!normalizedDate) return { status: 'invalid' }
+    if (computed.dependency_violation) return { status: 'invalid', earliest: computed.earliest_start }
+
+    const hasShift = (computed.affected ?? []).some((a) => a.old_start !== a.new_start || a.old_end !== a.new_end)
+    if (!hasShift) return { status: 'noop', newStartDate: normalizedDate, preview: computed }
+
+    const affectedById = new Map((computed.affected ?? []).map((a) => [a.task_id, a]))
+    const community = communitiesById.get(lot.community_id) ?? null
+    const impacted = (computed.affected ?? []).filter((a) => a.old_start !== a.new_start)
+
+    updateLot(lot.id, (current) => {
+      const now = new Date().toISOString()
+      const nextTasks = (current.tasks ?? []).map((t) => {
+        const hit = affectedById.get(t.id)
+        if (!hit) return t
+        return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
+      })
+      const currentTask = (current.tasks ?? []).find((t) => t.id === task.id) ?? task
+      return {
+        ...current,
+        tasks: nextTasks,
+        schedule_changes: [
+          ...(current.schedule_changes ?? []),
+          {
+            id: uuid(),
+            task_id: task.id,
+            old_start: currentTask.scheduled_start,
+            new_start: normalizedDate,
+            reason: reason?.trim() || null,
+            notified: Boolean(notifySubs),
+            changed_at: now,
+          },
+        ],
+      }
+    })
+
+    pushNotification({
+      type: 'schedule_change',
+      title: `Schedule Changed - ${community?.name ?? ''} ${lotCode(lot)}`,
+      body: `${task.name}\n${formatShortDate(task.scheduled_start)} → ${formatShortDate(normalizedDate)}${reason ? `\nReason: ${reason.trim()}` : ''}`,
+      entity_type: 'task',
+      entity_id: task.id,
+      lot_id: lot.id,
+      priority: 'normal',
+    })
+
+    if (notifySubs && impacted.length > 0) {
+      const messages = buildScheduleChangeMessages({
+        lot,
+        community,
+        impactedTasks: impacted,
+        changeReason: reason?.trim() || 'Task rescheduled',
+      })
+      addMessages(messages)
+    }
+
+    if (!isOnline) {
+      enqueueSyncOp({
+        type: 'task_dates',
+        lot_id: lot.id,
+        entity_type: 'task',
+        entity_id: task.id,
+        summary: `Task rescheduled (${lotCode(lot)} - ${task.name})`,
+      })
+    }
+
+    return { status: 'applied', newStartDate: normalizedDate, preview: computed }
   }
 
   const calendarAssignmentsForDate = (dateIso) => {
@@ -4098,6 +4368,13 @@ export default function BuildFlow() {
                           org={org}
                           scale={scheduleTimelineScale}
                           onSelectTask={(taskId) => setTaskModal({ lot_id: selectedLot.id, task_id: taskId })}
+                          onRescheduleTask={({ task, targetDateIso, preview }) => {
+                            if (!selectedLot || !task) return
+                            const outcome = applyReschedule({ lot: selectedLot, task, targetDateIso, preview })
+                            if (outcome.status === 'invalid') {
+                              alert(`Dependency violation. Earliest allowed start is ${formatShortDate(outcome.earliest)}.`)
+                            }
+                          }}
                         />
                       </div>
                     ) : (
@@ -5944,63 +6221,7 @@ export default function BuildFlow() {
             initialDate={rescheduleModal.initial_date ?? null}
             onClose={() => setRescheduleModal(null)}
             onApply={({ newStartDate, reason, notifySubs, preview }) => {
-              updateLot(lot.id, (current) => {
-                const now = new Date().toISOString()
-                const nextTasks = (current.tasks ?? []).map((t) => {
-                  const hit = (preview?.affected ?? []).find((a) => a.task_id === t.id)
-                  if (!hit) return t
-                  return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
-                })
-
-                return {
-                  ...current,
-                  tasks: nextTasks,
-                  schedule_changes: [
-                    ...(current.schedule_changes ?? []),
-                    {
-                      id: uuid(),
-                      task_id: task.id,
-                      old_start: task.scheduled_start,
-                      new_start: newStartDate,
-                      reason: reason?.trim() || null,
-                      notified: Boolean(notifySubs),
-                      changed_at: now,
-                    },
-                  ],
-                }
-              })
-
-              pushNotification({
-                type: 'schedule_change',
-                title: `Schedule Changed - ${community?.name ?? ''} ${lotCode(lot)}`,
-                body: `${task.name}\n${formatShortDate(task.scheduled_start)} → ${formatShortDate(newStartDate)}${reason ? `\nReason: ${reason.trim()}` : ''}`,
-                entity_type: 'task',
-                entity_id: task.id,
-                lot_id: lot.id,
-                priority: 'normal',
-              })
-
-              if (notifySubs && (preview?.affected ?? []).length > 0) {
-                const impacted = (preview?.affected ?? []).filter((a) => a.old_start !== a.new_start)
-                const messages = buildScheduleChangeMessages({
-                  lot,
-                  community,
-                  impactedTasks: impacted,
-                  changeReason: reason?.trim() || 'Task rescheduled',
-                })
-                addMessages(messages)
-              }
-
-              if (!isOnline) {
-                enqueueSyncOp({
-                  type: 'task_dates',
-                  lot_id: lot.id,
-                  entity_type: 'task',
-                  entity_id: task.id,
-                  summary: `Task rescheduled (${lotCode(lot)} - ${task.name})`,
-                })
-              }
-
+              applyReschedule({ lot, task, targetDateIso: newStartDate, reason, notifySubs, preview })
               setRescheduleModal(null)
             }}
           />
@@ -7375,15 +7596,17 @@ function AddExteriorTaskModal({ lot, org, subcontractors, onClose, onSave }) {
     }))
   }, [presetId, presets])
 
-  const subsForTrade = useMemo(
-    () =>
-      (subcontractors ?? [])
-        .filter((s) => s.trade === draft.trade || (s.secondary_trades ?? []).includes(draft.trade))
-        .sort((a, b) => String(a.company_name).localeCompare(String(b.company_name))),
-    [draft.trade, subcontractors],
+  const allSubs = useMemo(
+    () => (subcontractors ?? []).slice().sort((a, b) => String(a.company_name).localeCompare(String(b.company_name))),
+    [subcontractors],
   )
-
-  const validSubIds = useMemo(() => new Set(subsForTrade.map((s) => s.id)), [subsForTrade])
+  const matchingSubs = useMemo(
+    () => allSubs.filter((s) => s.trade === draft.trade || (s.secondary_trades ?? []).includes(draft.trade)),
+    [allSubs, draft.trade],
+  )
+  const subsForSelect = matchingSubs.length > 0 ? matchingSubs : allSubs
+  const showingAllSubs = matchingSubs.length === 0 && allSubs.length > 0
+  const validSubIds = useMemo(() => new Set(subsForSelect.map((s) => s.id)), [subsForSelect])
   const effectiveSubId = validSubIds.has(draft.sub_id) ? draft.sub_id : ''
 
   const normalizedStart = useMemo(() => {
@@ -7534,12 +7757,18 @@ function AddExteriorTaskModal({ lot, org, subcontractors, onClose, onSave }) {
             className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
           >
             <option value="">Unassigned</option>
-            {subsForTrade.map((s) => (
+            {subsForSelect.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.company_name}
               </option>
             ))}
           </select>
+          {showingAllSubs ? (
+            <p className="text-xs text-gray-600 mt-1">No subs match this trade yet — showing all subs.</p>
+          ) : null}
+          {!showingAllSubs && subsForSelect.length === 0 ? (
+            <p className="text-xs text-gray-600 mt-1">No subcontractors available yet.</p>
+          ) : null}
         </label>
       </div>
     </Modal>
@@ -7678,204 +7907,12 @@ function DelayModal({ lot, task, org, onClose, onApply }) {
 }
 
 function RescheduleTaskModal({ lot, task, community, org, isOnline, initialDate, onClose, onApply }) {
-  const { getNextWorkDay, addWorkDays, subtractWorkDays } = makeWorkdayHelpers(org)
   const [date, setDate] = useState(initialDate ?? task.scheduled_start ?? '')
   const [reason, setReason] = useState('')
   const [notifySubs, setNotifySubs] = useState(false)
 
-  const normalizedDate = useMemo(() => {
-    if (!date) return ''
-    const next = getNextWorkDay(date) ?? parseISODate(date)
-    return next ? formatISODate(next) : date
-  }, [date, getNextWorkDay])
-
-  const preview = useMemo(() => {
-    const out = { affected: [], oldCompletion: null, newCompletion: null, dependency_violation: false, earliest_start: null }
-    if (!normalizedDate || !task?.scheduled_start) return out
-
-    const durationMinus1 = Math.max(0, Number(task.duration ?? 0) - 1)
-
-    const earliestStart = (() => {
-      let earliest = getNextWorkDay(task.scheduled_start) ?? parseISODate(task.scheduled_start)
-      for (const dep of task.dependencies ?? []) {
-        const pred = (lot.tasks ?? []).find((t) => t.id === dep.depends_on_task_id)
-        if (!pred?.scheduled_start || !pred?.scheduled_end) continue
-        const lag = Math.max(0, Number(dep.lag_days ?? 0) || 0)
-
-        if (dep.type === 'FS') {
-          const d = addWorkDays(pred.scheduled_end, 1 + lag)
-          if (d && (!earliest || d > earliest)) earliest = d
-        } else if (dep.type === 'SS') {
-          const d = addWorkDays(pred.scheduled_start, lag)
-          if (d && (!earliest || d > earliest)) earliest = d
-        } else if (dep.type === 'FF') {
-          const requiredEnd = addWorkDays(pred.scheduled_end, lag)
-          const d = requiredEnd ? subtractWorkDays(requiredEnd, durationMinus1) : null
-          if (d && (!earliest || d > earliest)) earliest = d
-        } else if (dep.type === 'SF') {
-          const requiredEnd = addWorkDays(pred.scheduled_start, lag)
-          const d = requiredEnd ? subtractWorkDays(requiredEnd, durationMinus1) : null
-          if (d && (!earliest || d > earliest)) earliest = d
-        }
-      }
-
-      const normalized = earliest ? formatISODate(getNextWorkDay(earliest) ?? earliest) : null
-      return normalized
-    })()
-
-    if (earliestStart && parseISODate(normalizedDate) && parseISODate(earliestStart) && parseISODate(normalizedDate) < parseISODate(earliestStart)) {
-      return { ...out, dependency_violation: true, earliest_start: earliestStart }
-    }
-
-    const workdayDiff = (fromIso, toIso) => {
-      const from = parseISODate(fromIso)
-      const to = parseISODate(toIso)
-      if (!from || !to) return 0
-      if (to.getTime() === from.getTime()) return 0
-
-      let cursor = fromIso
-      let delta = 0
-      const limit = 4000
-
-      if (to > from) {
-        while (cursor !== toIso && delta < limit) {
-          cursor = formatISODate(addWorkDays(cursor, 1))
-          delta += 1
-        }
-        return delta
-      }
-
-      while (cursor !== toIso && delta > -limit) {
-        cursor = formatISODate(subtractWorkDays(cursor, 1))
-        delta -= 1
-      }
-      return delta
-    }
-
-    const shiftDays = workdayDiff(task.scheduled_start, normalizedDate)
-    const shiftIso = (iso, delta) => {
-      if (!iso || !delta) return iso
-      if (delta > 0) return formatISODate(addWorkDays(iso, delta))
-      return formatISODate(subtractWorkDays(iso, Math.abs(delta)))
-    }
-
-    const tasks = (lot.tasks ?? []).slice().sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
-    const movedTrack = task.track
-    const movedSort = task.sort_order ?? 0
-
-    const oldCompletion = (() => {
-      let max = null
-      for (const t of tasks) {
-        const d = parseISODate(t.scheduled_end)
-        if (!d) continue
-        if (!max || d > max) max = d
-      }
-      return max ? formatISODate(max) : null
-    })()
-
-    const byId = new Map()
-    const affected = []
-
-    for (const t of tasks) {
-      if (!t?.scheduled_start || !t?.scheduled_end) continue
-      if (t.status === 'complete') continue
-      const isAfter = (t.sort_order ?? 0) > movedSort
-      const shouldShift =
-        t.id === task.id ||
-        (t.track === movedTrack && isAfter) ||
-        (t.dependencies ?? []).some((d) => d.depends_on_task_id === task.id)
-
-      if (!shouldShift) continue
-
-      const newStart = shiftIso(t.scheduled_start, shiftDays)
-      const newEnd = shiftIso(t.scheduled_end, shiftDays)
-      byId.set(t.id, { start: newStart, end: newEnd })
-      affected.push({
-        task_id: t.id,
-        task_name: t.name,
-        old_start: t.scheduled_start,
-        new_start: newStart,
-        old_end: t.scheduled_end,
-        new_end: newEnd,
-        track: t.track,
-      })
-    }
-
-    const maxEndFor = (filterFn) => {
-      let max = null
-      for (const t of tasks) {
-        if (!filterFn(t)) continue
-        const endIso = byId.get(t.id)?.end ?? t.scheduled_end
-        if (!endIso) continue
-        const d = parseISODate(endIso)
-        if (!d) continue
-        if (!max || d > max) max = d
-      }
-      return max
-    }
-
-    const blockingEnd = maxEndFor((t) => t.track !== 'final' && t.blocks_final !== false)
-    const finalStartBase = blockingEnd
-    const finalStart = finalStartBase ? addWorkDays(formatISODate(finalStartBase), 1) : null
-
-    if (finalStart) {
-      let cursor = finalStart
-      const finalTasks = tasks.filter((t) => t.track === 'final').sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
-      for (const ft of finalTasks) {
-        if (ft.status === 'complete') {
-          const end = parseISODate(ft.scheduled_end)
-          if (end && cursor && end >= cursor) cursor = addWorkDays(end, 1)
-          continue
-        }
-        const startIso = formatISODate(cursor)
-        const endDate = addWorkDays(cursor, Math.max(0, Number(ft.duration ?? 0) - 1))
-        const endIso = endDate ? formatISODate(endDate) : ft.scheduled_end
-
-        const prevStart = byId.get(ft.id)?.start ?? ft.scheduled_start
-        const prevEnd = byId.get(ft.id)?.end ?? ft.scheduled_end
-        byId.set(ft.id, { start: startIso, end: endIso })
-
-        if (prevStart !== startIso || prevEnd !== endIso) {
-          const existing = affected.find((a) => a.task_id === ft.id)
-          if (existing) {
-            existing.new_start = startIso
-            existing.new_end = endIso
-          } else {
-            affected.push({
-              task_id: ft.id,
-              task_name: ft.name,
-              old_start: ft.scheduled_start,
-              new_start: startIso,
-              old_end: ft.scheduled_end,
-              new_end: endIso,
-              track: ft.track,
-            })
-          }
-        }
-
-        cursor = endDate ? addWorkDays(endDate, 1) : cursor
-      }
-    }
-
-    const newCompletion = (() => {
-      let max = null
-      for (const t of tasks) {
-        const endIso = byId.get(t.id)?.end ?? t.scheduled_end
-        const d = parseISODate(endIso)
-        if (!d) continue
-        if (!max || d > max) max = d
-      }
-      return max ? formatISODate(max) : null
-    })()
-
-    return {
-      affected: affected.slice().sort((a, b) => (a.task_id === task.id ? -1 : 0) || String(a.old_start).localeCompare(String(b.old_start))),
-      oldCompletion,
-      newCompletion,
-      dependency_violation: false,
-      earliest_start: earliestStart,
-    }
-  }, [normalizedDate, lot.tasks, task, getNextWorkDay, addWorkDays, subtractWorkDays])
+  const preview = useMemo(() => buildReschedulePreview({ lot, task, targetDateIso: date, org }), [date, lot, task, org])
+  const normalizedDate = preview.normalized_date || ''
 
   const oldStart = task.scheduled_start ?? ''
   const canApply = Boolean(normalizedDate) && !preview.dependency_violation && task.status !== 'complete'
@@ -8870,19 +8907,43 @@ function PhotoTimelineModal({ lot, onClose, onTakePhoto }) {
   )
 }
 
-function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelectTask }) {
+function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelectTask, onRescheduleTask }) {
   const tasks = (lot.tasks ?? []).slice().sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)))
   if (tasks.length === 0) {
     return <p className="text-sm text-gray-500">No scheduled tasks yet.</p>
   }
 
   const [isCompact, setIsCompact] = useState(() => (typeof window !== 'undefined' ? window.innerWidth < 640 : false))
+  const [draggingTaskId, setDraggingTaskId] = useState(null)
+  const [dragTargetIso, setDragTargetIso] = useState(null)
+  const [dragStatus, setDragStatus] = useState(null)
+  const dragStateRef = useRef({
+    active: false,
+    pointerId: null,
+    timer: null,
+    startX: 0,
+    startY: 0,
+    lastX: 0,
+    lastY: 0,
+    taskId: null,
+    rowRect: null,
+    pointerType: '',
+  })
+  const suppressClickRef = useRef(false)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
     const onResize = () => setIsCompact(window.innerWidth < 640)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (dragStateRef.current.timer) {
+        clearTimeout(dragStateRef.current.timer)
+      }
+    }
   }, [])
 
   const allDates = tasks.flatMap((t) => [t.scheduled_start, t.scheduled_end]).filter(Boolean).sort()
@@ -8969,6 +9030,149 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
       })
     : tasks
 
+  const clearDragState = () => {
+    const state = dragStateRef.current
+    if (state.timer) clearTimeout(state.timer)
+    state.active = false
+    state.pointerId = null
+    state.timer = null
+    state.taskId = null
+    state.rowRect = null
+    state.pointerType = ''
+    setDraggingTaskId(null)
+    setDragTargetIso(null)
+    setDragStatus(null)
+  }
+
+  const updateDragTarget = (task, clientX, rowRect) => {
+    if (!useWorkWeek || !rowRect?.width || weekDayIsos.length === 0) return
+    const ratio = (clientX - rowRect.left) / rowRect.width
+    const clamped = Math.max(0, Math.min(1, ratio))
+    const index = Math.max(0, Math.min(weekDayIsos.length - 1, Math.floor(clamped * weekDayIsos.length)))
+    const iso = weekDayIsos[index]
+    if (!iso) return
+    if (dragTargetIso === iso && dragStatus?.taskId === task.id) return
+    const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
+    const status = preview.dependency_violation ? 'invalid' : 'valid'
+    setDragTargetIso(iso)
+    setDragStatus({ status, preview, taskId: task.id })
+  }
+
+  const handleTaskClick = (taskId) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    onSelectTask?.(taskId)
+  }
+
+  const handleTaskPointerDown = (task, e) => {
+    if (!useWorkWeek || !onRescheduleTask || task.status === 'complete') return
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    const rowRect = e.currentTarget.parentElement?.getBoundingClientRect()
+    if (!rowRect) return
+
+    const state = dragStateRef.current
+    if (state.timer) clearTimeout(state.timer)
+    state.active = false
+    state.pointerId = e.pointerId
+    state.startX = e.clientX
+    state.startY = e.clientY
+    state.lastX = e.clientX
+    state.lastY = e.clientY
+    state.taskId = task.id
+    state.rowRect = rowRect
+    state.pointerType = e.pointerType
+
+    const targetEl = e.currentTarget
+    const pointerId = e.pointerId
+    const delay = e.pointerType === 'touch' ? 240 : 120
+    state.timer = setTimeout(() => {
+      state.timer = null
+      state.active = true
+      setDraggingTaskId(task.id)
+      updateDragTarget(task, state.lastX, rowRect)
+      if (targetEl?.setPointerCapture) {
+        try {
+          targetEl.setPointerCapture(pointerId)
+        } catch {}
+      }
+    }, delay)
+  }
+
+  const handleTaskPointerMove = (task, e) => {
+    const state = dragStateRef.current
+    if (state.taskId !== task.id) return
+    state.lastX = e.clientX
+    state.lastY = e.clientY
+    const dx = Math.abs(state.lastX - state.startX)
+    const dy = Math.abs(state.lastY - state.startY)
+
+    if (!state.active) {
+      if (state.pointerType !== 'touch' && (dx > 4 || dy > 4)) {
+        if (state.timer) clearTimeout(state.timer)
+        state.timer = null
+        state.active = true
+        setDraggingTaskId(task.id)
+        updateDragTarget(task, state.lastX, state.rowRect)
+        if (e.currentTarget?.setPointerCapture && state.pointerId !== null) {
+          try {
+            e.currentTarget.setPointerCapture(state.pointerId)
+          } catch {}
+        }
+      } else if (state.pointerType === 'touch' && (dx > 8 || dy > 8)) {
+        if (state.timer) clearTimeout(state.timer)
+        state.timer = null
+      }
+      return
+    }
+
+    e.preventDefault()
+    updateDragTarget(task, state.lastX, state.rowRect)
+  }
+
+  const handleTaskPointerUp = (task, e) => {
+    const state = dragStateRef.current
+    if (state.timer) clearTimeout(state.timer)
+    state.timer = null
+
+    if (!state.active) return
+    state.active = false
+
+    const dropIso = dragTargetIso
+    const dropStatus = dragStatus?.taskId === task.id ? dragStatus : null
+    const preview = dropStatus?.preview ?? (dropIso ? buildReschedulePreview({ lot, task, targetDateIso: dropIso, org }) : null)
+
+    suppressClickRef.current = true
+    setTimeout(() => {
+      suppressClickRef.current = false
+    }, 250)
+
+    if (dropIso && preview) {
+      if (preview.dependency_violation) {
+        alert(`Dependency violation. Earliest allowed start is ${formatShortDate(preview.earliest_start)}.`)
+      } else {
+        onRescheduleTask?.({ task, targetDateIso: dropIso, preview })
+      }
+    }
+
+    if (state.pointerId !== null && e.currentTarget?.releasePointerCapture) {
+      try {
+        e.currentTarget.releasePointerCapture(state.pointerId)
+      } catch {}
+    }
+
+    clearDragState()
+  }
+
+  const handleTaskPointerCancel = () => {
+    clearDragState()
+  }
+
+  useEffect(() => {
+    if (!useWorkWeek) clearDragState()
+  }, [useWorkWeek])
+
   return (
     <div className="overflow-x-auto border rounded-xl">
       {useWorkWeek ? (
@@ -8976,6 +9180,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
           <div>
             <p className="text-xs text-gray-500 uppercase tracking-wide">Work Week</p>
             <p className="text-sm font-semibold">{weekLabel}</p>
+            {onRescheduleTask ? <p className="text-[11px] text-gray-500">Long-press a task to drag.</p> : null}
           </div>
           <div className="flex gap-2">
             <button
@@ -9034,6 +9239,16 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
           visibleTasks.map((task) => {
           const sub = subcontractors.find((s) => s.id === task.sub_id) ?? null
           const status = deriveTaskStatus(task, lot.tasks, lot.inspections)
+          const isDragging = draggingTaskId === task.id
+          const canDrag = useWorkWeek && Boolean(onRescheduleTask) && task.status !== 'complete'
+          const dropIndex = dragTargetIso ? weekDayIndexByIso.get(dragTargetIso) : null
+          const dropStatus = isDragging ? dragStatus : null
+          const dropCls =
+            dropStatus?.status === 'invalid'
+              ? 'bg-red-100/70'
+              : dropStatus?.status === 'valid'
+                ? 'bg-green-100/70'
+                : ''
 
           const startDate = parseISODate(task.scheduled_start)
           const endDate = parseISODate(task.scheduled_end)
@@ -9089,10 +9304,22 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
                     style={{ left: `${((i + 1) / columnCount) * 100}%` }}
                   />
                 ))}
+                {canDrag && isDragging && dropIndex !== null ? (
+                  <div
+                    className={`absolute top-0 bottom-0 ${dropCls} pointer-events-none`}
+                    style={{ left: `${(dropIndex / columnCount) * 100}%`, width: `${100 / columnCount}%` }}
+                  />
+                ) : null}
                 <button
                   type="button"
-                  onClick={() => onSelectTask?.(task.id)}
-                  className="absolute top-2 h-10 rounded-lg flex items-center px-2 shadow-sm cursor-pointer"
+                  onClick={() => handleTaskClick(task.id)}
+                  onPointerDown={canDrag ? (e) => handleTaskPointerDown(task, e) : undefined}
+                  onPointerMove={canDrag ? (e) => handleTaskPointerMove(task, e) : undefined}
+                  onPointerUp={canDrag ? (e) => handleTaskPointerUp(task, e) : undefined}
+                  onPointerCancel={canDrag ? handleTaskPointerCancel : undefined}
+                  className={`absolute top-2 h-10 rounded-lg flex items-center px-2 shadow-sm ${
+                    canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+                  }`}
                   style={{
                     left: `${leftPercent}%`,
                     width: `${Math.max(widthPercent, 3)}%`,
