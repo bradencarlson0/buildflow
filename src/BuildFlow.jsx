@@ -8993,7 +8993,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     cursor = addCalendarDays(cursor, 7)
   }
 
-  const { isWorkDay, getNextWorkDay } = makeWorkdayHelpers(org)
+  const { isWorkDay, getNextWorkDay, addWorkDays } = makeWorkdayHelpers(org)
   const getPrevWorkDay = (dateLike) => {
     const d = parseISODate(dateLike)
     if (!d) return null
@@ -9050,7 +9050,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     pending: '#D1D5DB',
   }
 
-  const visibleTasks = useWorkWeek
+  const baseVisibleTasks = useWorkWeek
     ? tasks.filter((task) => {
         const startDate = parseISODate(task.scheduled_start)
         const endDate = parseISODate(task.scheduled_end)
@@ -9061,6 +9061,9 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
         return !(endWork < weekStart || startWork > weekEnd)
       })
     : tasks
+  const pinnedDragTask = useWorkWeek && draggingTaskId ? tasks.find((t) => t.id === draggingTaskId) ?? null : null
+  const showPinnedDrag = Boolean(pinnedDragTask && !baseVisibleTasks.some((t) => t.id === pinnedDragTask.id))
+  const visibleTasks = showPinnedDrag ? [pinnedDragTask, ...baseVisibleTasks] : baseVisibleTasks
 
   const clearDragState = () => {
     const state = dragStateRef.current
@@ -9332,6 +9335,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
           const sub = subcontractors.find((s) => s.id === task.sub_id) ?? null
           const status = deriveTaskStatus(task, lot.tasks, lot.inspections)
           const isDragging = draggingTaskId === task.id
+          const isPinnedDragRow = showPinnedDrag && pinnedDragTask?.id === task.id
           const canDrag = useWorkWeek && Boolean(onRescheduleTask) && task.status !== 'complete'
           const dropIndex = dragTargetIso ? weekDayIndexByIso.get(dragTargetIso) : null
           const dropStatus = isDragging ? dragStatus : null
@@ -9353,8 +9357,16 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
           let endLabel = task.scheduled_end
 
           if (useWorkWeek) {
-            const startWork = isWorkDay(startDate) ? startDate : getNextWorkDay(startDate)
-            const endWork = isWorkDay(endDate) ? endDate : getPrevWorkDay(endDate)
+            let startWork = null
+            let endWork = null
+            if (isDragging && dragTargetIso) {
+              startWork = getNextWorkDay(dragTargetIso) ?? parseISODate(dragTargetIso)
+              const dragEnd = startWork ? addWorkDays(startWork, Math.max(0, Number(task.duration ?? 0) - 1)) : null
+              endWork = dragEnd ?? startWork
+            } else {
+              startWork = isWorkDay(startDate) ? startDate : getNextWorkDay(startDate)
+              endWork = isWorkDay(endDate) ? endDate : getPrevWorkDay(endDate)
+            }
             if (!startWork || !endWork || endWork < startWork) return null
             const clampedStart = startWork < weekStart ? weekStart : startWork
             const clampedEnd = endWork > weekEnd ? weekEnd : endWork
@@ -9377,7 +9389,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
           }
 
           return (
-            <div key={task.id} className="flex border-b hover:bg-gray-50 group">
+            <div key={task.id} className={`flex border-b hover:bg-gray-50 group ${isPinnedDragRow ? 'bg-blue-50/40' : ''}`}>
               <div
                 className="shrink-0 p-2 border-r sticky left-0 z-20 bg-white group-hover:bg-gray-50"
                 style={{ width: taskColWidth, minWidth: taskColWidth }}
