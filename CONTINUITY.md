@@ -45,15 +45,14 @@ Done:
 - Added step 5 community wizard blocker list and used it to gate Create.
 - Added product type pills in community lots grid/list/kanban.
 - Added persistent bottom nav styling for improved clickability while scrolling.
+- Added Calendar Week Timeline view in Calendar tab.
+- Updated Schedule Inspection modal with existing vs new inspector selection.
 
 Now:
-- Add calendar week timeline view summarizing active jobs and tasks for the week.
-- Update schedule inspection modal to let users pick existing inspectors from a dropdown or enter a new inspector when scheduling.
 - Verify mobile schedule view change on device.
 - Re-test iOS job photo upload in Lot Photos tab after routing to modal flow.
-- Provide steps for 24/7 public hosting (static) for remote testing.
-- Guide Netlify deployment (repo selection vs manual deploy).
-- Push project to GitHub (new repo) for hosting/deploy.
+- Confirm new Netlify URL and proceed with remaining app tasks.
+- Push latest changes to GitHub to trigger Netlify redeploy.
 
 Next:
 - Validate calendar and sales filter behavior after cascade changes.
@@ -62,12 +61,17 @@ Next:
 Open questions (UNCONFIRMED if needed):
 - Does the user still want `robust-coalescing-tulip.md` generated from the spec text?
 - Confirm if the failing flow was Lot > Photos tab Take/Upload (now routed to modal), and whether it works after this change.
-- GitHub username/org, repo name, and public vs private?
-- Use GitHub CLI if available and logged in, or manual remote setup?
-- Which host should be used for deployment (Netlify, Vercel, Cloudflare Pages)?
 
 Key decisions:
 - User wants 24/7 public access for remote testing.
+- GitHub: `bradencarlson0/buildflow`, public, use GitHub CLI.
+
+Done:
+- Initialized git repo and created initial commit.
+- Created and pushed GitHub repo: `https://github.com/bradencarlson0/buildflow`.
+- Netlify deploy: `https://incandescent-dusk-f13a67.netlify.app`.
+- Renamed Netlify site: `https://builderschedule.netlify.app`.
+- Provided 24/7 public hosting guidance and completed deployment.
 
 Working set (files/ids/commands):
 - `buildflow-enhancements.md`

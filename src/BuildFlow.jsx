@@ -232,6 +232,15 @@ const STATUS_BADGE = {
   pending: { label: '○ Pending', cls: 'bg-gray-50 text-gray-600 border-gray-200' },
 }
 
+const TASK_STATUS_COLORS = {
+  complete: '#22C55E',
+  in_progress: '#3B82F6',
+  delayed: '#EF4444',
+  blocked: '#F97316',
+  ready: '#8B5CF6',
+  pending: '#D1D5DB',
+}
+
 const TaskStatusBadge = ({ status }) => {
   const entry = STATUS_BADGE[status] ?? STATUS_BADGE.pending
   return <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-lg border ${entry.cls}`}>{entry.label}</span>
@@ -1867,6 +1876,67 @@ export default function BuildFlow() {
     return dates
   }, [weekStartIso])
 
+  const weekTimelineRows = useMemo(() => {
+    const weekStart = parseISODate(weekDates[0])
+    const weekEnd = parseISODate(weekDates[6])
+    if (!weekStart || !weekEnd) return []
+    const weekStartIso = formatISODate(weekStart)
+    const rows = []
+
+    for (const lot of activeLots) {
+      if (calendarFilters.communityId !== 'all' && lot.community_id !== calendarFilters.communityId) continue
+      const community = communitiesById.get(lot.community_id) ?? null
+      const tasks = []
+
+      for (const task of lot.tasks ?? []) {
+        if (!task?.scheduled_start || !task?.scheduled_end) continue
+        const status = deriveTaskStatus(task, lot.tasks, lot.inspections)
+        if (calendarFilters.trade !== 'all' && task.trade !== calendarFilters.trade) continue
+        if (calendarFilters.subId !== 'all' && task.sub_id !== calendarFilters.subId) continue
+        if (!calendarFilters.showDelayed && status === 'delayed') continue
+
+        const start = parseISODate(task.scheduled_start)
+        const end = parseISODate(task.scheduled_end)
+        if (!start || !end) continue
+        if (end < weekStart || start > weekEnd) continue
+
+        const clampedStart = start < weekStart ? weekStart : start
+        const clampedEnd = end > weekEnd ? weekEnd : end
+        const clampedStartIso = formatISODate(clampedStart)
+        const clampedEndIso = formatISODate(clampedEnd)
+        const startIndex = Math.max(0, Math.min(6, daysBetweenCalendar(clampedStartIso, weekStartIso)))
+        const duration = Math.max(1, daysBetweenCalendar(clampedEndIso, clampedStartIso) + 1)
+        const leftPercent = (startIndex / 7) * 100
+        const widthPercent = (duration / 7) * 100
+        const sub = (app.subcontractors ?? []).find((s) => s.id === task.sub_id) ?? null
+
+        tasks.push({
+          id: task.id,
+          task,
+          status,
+          sub,
+          leftPercent,
+          widthPercent,
+          duration,
+          startIso: clampedStartIso,
+          endIso: clampedEndIso,
+        })
+      }
+
+      if (tasks.length > 0) {
+        tasks.sort((a, b) => String(a.task.scheduled_start).localeCompare(String(b.task.scheduled_start)))
+        rows.push({ lot, community, tasks })
+      }
+    }
+
+    return rows.sort((a, b) => {
+      const aComm = String(a.community?.name ?? '')
+      const bComm = String(b.community?.name ?? '')
+      if (aComm !== bComm) return aComm.localeCompare(bComm)
+      return Number(a.lot.lot_number ?? 0) - Number(b.lot.lot_number ?? 0)
+    })
+  }, [activeLots, app.subcontractors, calendarFilters, communitiesById, weekDates])
+
   const monthGrid = useMemo(() => {
     const base = parseISODate(calendarDate) ?? parseISODate(todayIso)
     if (!base) return { monthStartIso: todayIso, gridStartIso: todayIso, cells: [] }
@@ -2759,6 +2829,8 @@ export default function BuildFlow() {
                       ? 'Day'
                       : calendarView === 'week'
                         ? 'Week'
+                        : calendarView === 'week_timeline'
+                          ? 'Week Timeline'
                         : calendarView === 'month'
                           ? 'Month'
                           : 'By Sub'}
@@ -2767,6 +2839,8 @@ export default function BuildFlow() {
                     {calendarView === 'day'
                       ? formatLongDate(calendarDate)
                       : calendarView === 'week'
+                        ? `${formatShortDate(weekDates[0])} – ${formatShortDate(weekDates[6])}`
+                        : calendarView === 'week_timeline'
                         ? `${formatShortDate(weekDates[0])} – ${formatShortDate(weekDates[6])}`
                         : calendarView === 'month'
                           ? (parseISODate(calendarDate) ?? new Date()).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
@@ -2784,39 +2858,40 @@ export default function BuildFlow() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
-                <select value={calendarView} onChange={(e) => setCalendarView(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
-                  <option value="day">Day</option>
-                  <option value="week">Week</option>
-                  <option value="month">Month</option>
-                  <option value="sub">By Sub</option>
-                </select>
-                <button
-                  onClick={() => {
-                    const base = parseISODate(calendarDate)
-                    if (!base) return
-                    if (calendarView === 'day') setCalendarDate(formatISODate(addCalendarDays(base, -1)))
-                    else if (calendarView === 'week' || calendarView === 'sub') setCalendarDate(formatISODate(addCalendarDays(base, -7)))
-                    else {
-                      const prevMonth = new Date(base.getFullYear(), base.getMonth() - 1, 1)
-                      setCalendarDate(formatISODate(prevMonth))
-                    }
-                  }}
+                <div className="grid grid-cols-3 gap-2">
+                  <select value={calendarView} onChange={(e) => setCalendarView(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
+                    <option value="day">Day</option>
+                    <option value="week">Week</option>
+                    <option value="week_timeline">Week Timeline</option>
+                    <option value="month">Month</option>
+                    <option value="sub">By Sub</option>
+                  </select>
+                  <button
+                    onClick={() => {
+                      const base = parseISODate(calendarDate)
+                      if (!base) return
+                      if (calendarView === 'day') setCalendarDate(formatISODate(addCalendarDays(base, -1)))
+                      else if (calendarView === 'week' || calendarView === 'week_timeline' || calendarView === 'sub') setCalendarDate(formatISODate(addCalendarDays(base, -7)))
+                      else {
+                        const prevMonth = new Date(base.getFullYear(), base.getMonth() - 1, 1)
+                        setCalendarDate(formatISODate(prevMonth))
+                      }
+                    }}
                   className="px-3 py-3 border rounded-xl text-sm font-semibold bg-white"
                 >
                   Prev
                 </button>
-                <button
-                  onClick={() => {
-                    const base = parseISODate(calendarDate)
-                    if (!base) return
-                    if (calendarView === 'day') setCalendarDate(formatISODate(addCalendarDays(base, 1)))
-                    else if (calendarView === 'week' || calendarView === 'sub') setCalendarDate(formatISODate(addCalendarDays(base, 7)))
-                    else {
-                      const nextMonth = new Date(base.getFullYear(), base.getMonth() + 1, 1)
-                      setCalendarDate(formatISODate(nextMonth))
-                    }
-                  }}
+                  <button
+                    onClick={() => {
+                      const base = parseISODate(calendarDate)
+                      if (!base) return
+                      if (calendarView === 'day') setCalendarDate(formatISODate(addCalendarDays(base, 1)))
+                      else if (calendarView === 'week' || calendarView === 'week_timeline' || calendarView === 'sub') setCalendarDate(formatISODate(addCalendarDays(base, 7)))
+                      else {
+                        const nextMonth = new Date(base.getFullYear(), base.getMonth() + 1, 1)
+                        setCalendarDate(formatISODate(nextMonth))
+                      }
+                    }}
                   className="px-3 py-3 border rounded-xl text-sm font-semibold bg-white"
                 >
                   Next
@@ -2974,6 +3049,83 @@ export default function BuildFlow() {
                 </>
               )
             })()}
+
+            {calendarView === 'week_timeline' && (
+              <Card>
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <p className="font-semibold">Week Timeline</p>
+                    <p className="text-xs text-gray-500">
+                      {formatShortDate(weekDates[0])} – {formatShortDate(weekDates[6])}
+                    </p>
+                  </div>
+                  <p className="text-xs text-gray-500">{weekTimelineRows.length} active lot(s)</p>
+                </div>
+                <div className="overflow-x-auto border rounded-xl">
+                  <div style={{ minWidth: '760px' }}>
+                    <div className="flex border-b bg-gray-50 sticky top-0">
+                      <div className="w-44 shrink-0 p-3 font-semibold border-r">Lot</div>
+                      <div className="flex-1 flex">
+                        {weekDates.map((iso) => (
+                          <div key={iso} className="flex-1 p-2 text-center text-xs font-medium border-r last:border-r-0">
+                            <div className="text-[10px] uppercase text-gray-500">
+                              {parseISODate(iso)?.toLocaleDateString('en-US', { weekday: 'short' })}
+                            </div>
+                            <div className="text-xs font-semibold">{formatShortDate(iso)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {weekTimelineRows.length === 0 ? (
+                      <div className="p-4 text-sm text-gray-500">No scheduled tasks this week.</div>
+                    ) : (
+                      weekTimelineRows.map((row) => {
+                        const lineHeight = 22
+                        const padding = 6
+                        const rowHeight = Math.max(1, row.tasks.length) * lineHeight + padding * 2
+                        return (
+                          <div key={row.lot.id} className="flex border-b">
+                            <div className="w-44 shrink-0 p-2 border-r">
+                              <p className="text-sm font-semibold">{lotCode(row.lot)}</p>
+                              <p className="text-xs text-gray-500">{row.community?.name ?? ''}</p>
+                            </div>
+                            <div className="flex-1 relative" style={{ height: rowHeight }}>
+                              {weekDates.map((_, i) => (
+                                <div
+                                  key={i}
+                                  className="absolute top-0 bottom-0 border-r border-gray-100"
+                                  style={{ left: `${((i + 1) / 7) * 100}%` }}
+                                />
+                              ))}
+                              {row.tasks.map((entry, idx) => {
+                                const top = padding + idx * lineHeight
+                                return (
+                                  <button
+                                    key={entry.id}
+                                    type="button"
+                                    onClick={() => setTaskModal({ lot_id: row.lot.id, task_id: entry.task.id })}
+                                    className="absolute h-5 rounded-md px-2 text-[10px] text-white font-semibold truncate shadow-sm"
+                                    style={{
+                                      top,
+                                      left: `${entry.leftPercent}%`,
+                                      width: `${Math.max(entry.widthPercent, 3)}%`,
+                                      backgroundColor: TASK_STATUS_COLORS[entry.status] || TASK_STATUS_COLORS.pending,
+                                    }}
+                                    title={`${entry.task.name}\n${formatShortDate(entry.startIso)} - ${formatShortDate(entry.endIso)}\n${entry.sub?.company_name ?? 'Unassigned'}`}
+                                  >
+                                    {entry.task.name}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              </Card>
+            )}
 
             {(calendarView === 'week' || calendarView === 'sub') && (
               <Card>
@@ -7526,6 +7678,7 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
   const [type, setType] = useState(defaultType)
   const [scheduledDate, setScheduledDate] = useState(task.scheduled_end ?? '')
   const [scheduledTime, setScheduledTime] = useState('10:00 AM')
+  const [inspectorMode, setInspectorMode] = useState(() => (inspectorOptions.length > 0 ? 'existing' : 'new'))
   const [selectedInspectorId, setSelectedInspectorId] = useState(defaultInspector.id ?? '')
   const [inspector, setInspector] = useState({
     name: defaultInspector.name ?? '',
@@ -7536,6 +7689,7 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
   const [notes, setNotes] = useState('')
 
   useEffect(() => {
+    if (inspectorMode !== 'existing') return
     if (!selectedInspectorId) return
     const selected = inspectorOptions.find((i) => i.id === selectedInspectorId)
     if (!selected) return
@@ -7546,7 +7700,14 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
       email: selected.email ?? '',
       agency_id: selected.agency_id ?? '',
     }))
-  }, [selectedInspectorId])
+  }, [inspectorMode, inspectorOptions, selectedInspectorId])
+
+  useEffect(() => {
+    if (inspectorOptions.length > 0) return
+    if (inspectorMode === 'new') return
+    setInspectorMode('new')
+    setSelectedInspectorId('')
+  }, [inspectorMode, inspectorOptions.length])
 
   const typeLabel = INSPECTION_TYPES.find((t) => t.code === type)?.label ?? type
 
@@ -7619,19 +7780,58 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
 
         <div className="space-y-2">
           <p className="text-sm font-semibold">Inspector</p>
-          {inspectorOptions.length > 0 ? (
-            <select
-              value={selectedInspectorId}
-              onChange={(e) => setSelectedInspectorId(e.target.value)}
-              className="w-full px-3 py-3 border rounded-xl text-sm"
-            >
-              <option value="">Select inspector...</option>
-              {inspectorOptions.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.name || 'Inspector'}
-                </option>
-              ))}
-            </select>
+          <div className="flex items-center gap-4 text-sm">
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="radio"
+                name="inspection-inspector-mode"
+                checked={inspectorMode === 'existing'}
+                disabled={inspectorOptions.length === 0}
+                onChange={() => {
+                  setInspectorMode('existing')
+                  const next = inspectorOptions[0] ?? null
+                  setSelectedInspectorId(next?.id ?? '')
+                  setInspector({
+                    name: next?.name ?? '',
+                    phone: next?.phone ?? '',
+                    email: next?.email ?? '',
+                    agency_id: next?.agency_id ?? '',
+                  })
+                }}
+              />
+              Use existing
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="radio"
+                name="inspection-inspector-mode"
+                checked={inspectorMode === 'new'}
+                onChange={() => {
+                  setInspectorMode('new')
+                  setSelectedInspectorId('')
+                  setInspector({ name: '', phone: '', email: '', agency_id: '' })
+                }}
+              />
+              New inspector
+            </label>
+          </div>
+          {inspectorMode === 'existing' ? (
+            inspectorOptions.length > 0 ? (
+              <select
+                value={selectedInspectorId}
+                onChange={(e) => setSelectedInspectorId(e.target.value)}
+                className="w-full px-3 py-3 border rounded-xl text-sm"
+              >
+                <option value="">Select inspector...</option>
+                {inspectorOptions.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.name || 'Inspector'}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-xs text-gray-500">No saved inspectors yet.</p>
+            )
           ) : null}
           <input
             value={inspector.name}
