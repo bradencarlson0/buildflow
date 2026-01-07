@@ -87,8 +87,8 @@ const scheduleWithDependencies = (tasks, trackStartLike, orgSettings, scheduledD
 }
 
 const getDriedInDate = (allTasks, scheduledDatesById) => {
-  const windowsTask = allTasks.find((t) => String(t.name).toLowerCase().includes('windows'))
-  const roofTask = allTasks.find((t) => String(t.name).toLowerCase().includes('roofing'))
+  const windowsTask = allTasks.find((t) => String(t.name).toLowerCase().includes('window'))
+  const roofTask = allTasks.find((t) => String(t.name).toLowerCase().includes('roof'))
   const windowsDates = windowsTask ? scheduledDatesById.get(windowsTask.id) : null
   if (windowsDates) return windowsDates.end
   const roofDates = roofTask ? scheduledDatesById.get(roofTask.id) : null
@@ -137,6 +137,7 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
       inspection_id: null,
       is_outdoor: Boolean(tt.is_outdoor),
       is_critical_path: false,
+      blocks_final: tt.blocks_final !== false,
       lead_time_days: tt.lead_time_days ?? 0,
       photos: [],
       notes: [],
@@ -187,9 +188,9 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
     scheduleWithDependencies(exteriorTasks, trackStart, orgSettings, scheduledDatesById)
   }
 
-  const interiorEnd = maxDateLike(interiorTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
-  const exteriorEnd = maxDateLike(exteriorTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
-  const finalStartBase = maxDateLike([interiorEnd, exteriorEnd])
+  const blockingTasks = created.filter((t) => t.track !== 'final' && t.blocks_final !== false)
+  const blockingEnd = maxDateLike(blockingTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const finalStartBase = blockingEnd
   const finalStart = finalStartBase ? addWorkDays(finalStartBase, 1) : null
   if (finalStart) scheduleSequential(finalTasks, finalStart, orgSettings, scheduledDatesById)
 
@@ -200,7 +201,10 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
   }
 
   // Mark basic critical path: all sequential phases + the slower of interior/exterior + final
-  const bottleneckTrack = interiorEnd && exteriorEnd && interiorEnd > exteriorEnd ? 'interior' : 'exterior'
+  const blockingInteriorEnd = maxDateLike(interiorTasks.filter((t) => t.blocks_final !== false).map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const blockingExteriorEnd = maxDateLike(exteriorTasks.filter((t) => t.blocks_final !== false).map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const bottleneckTrack =
+    !blockingExteriorEnd || (blockingInteriorEnd && blockingInteriorEnd >= blockingExteriorEnd) ? 'interior' : 'exterior'
   for (const task of created) {
     task.is_critical_path =
       task.track === 'foundation' || task.track === 'structure' || task.track === 'final' || task.track === bottleneckTrack
@@ -353,9 +357,13 @@ export const previewDelayImpact = (lot, taskId, delayDays, orgSettings) => {
     return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end }
   })
 
-  const newInteriorEnd = getTrackEndDate(shiftedTasks, 'interior')
-  const newExteriorEnd = getTrackEndDate(shiftedTasks, 'exterior')
-  const newFinalStartBase = maxDateLike([newInteriorEnd, newExteriorEnd])
+  const newBlockingEnd = maxDateLike(
+    shiftedTasks
+      .filter((t) => t.track !== 'final' && t.blocks_final !== false)
+      .map((t) => t.scheduled_end)
+      .filter(Boolean),
+  )
+  const newFinalStartBase = newBlockingEnd
   const newFinalStart = newFinalStartBase ? addWorkDays(newFinalStartBase, 1) : null
 
   const finalTasks = shiftedTasks.filter((t) => t.track === 'final').sort(bySortOrder)
@@ -434,9 +442,12 @@ export const applyDelayCascade = (lot, taskId, delayDays, reason, notes, orgSett
   }
 
   // Final track waits on bottleneck
-  const interiorEnd = getTrackEndDate(sorted, 'interior')
-  const exteriorEnd = getTrackEndDate(sorted, 'exterior')
-  const finalStartBase = maxDateLike([interiorEnd, exteriorEnd])
+  const finalStartBase = maxDateLike(
+    sorted
+      .filter((t) => t.track !== 'final' && t.blocks_final !== false)
+      .map((t) => t.scheduled_end)
+      .filter(Boolean),
+  )
   const newFinalStart = finalStartBase ? addWorkDays(finalStartBase, 1) : null
 
   const finalTasks = sorted.filter((t) => t.track === 'final').sort(bySortOrder)

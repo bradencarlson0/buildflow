@@ -72,6 +72,17 @@ const DALLAS = {
   timezone: 'America/Chicago',
 }
 
+const EXTERIOR_TASK_LIBRARY = [
+  { id: 'siding', name: 'Siding', trade: 'siding', duration: 5 },
+  { id: 'brick', name: 'Exterior Brick/Stone', trade: 'siding', duration: 4 },
+  { id: 'paint', name: 'Exterior Paint', trade: 'paint', duration: 3 },
+  { id: 'gutters', name: 'Gutters', trade: 'gutters', duration: 1 },
+  { id: 'flatwork', name: 'Concrete Flatwork', trade: 'concrete', duration: 3 },
+  { id: 'landscaping', name: 'Landscaping', trade: 'landscaping', duration: 3 },
+  { id: 'garage_door', name: 'Garage Door', trade: 'garage_door', duration: 1 },
+  { id: 'custom', name: 'Custom', trade: 'other', duration: 1 },
+]
+
 const getWeatherFromCode = (code) => {
   const n = Number(code)
   if (n === 0) return { condition: 'Clear', icon: Sun }
@@ -445,6 +456,7 @@ export default function BuildFlow() {
   const [taskModal, setTaskModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
+  const [addExteriorTaskModal, setAddExteriorTaskModal] = useState(null)
   const [scheduleInspectionModal, setScheduleInspectionModal] = useState(null)
   const [inspectionResultModal, setInspectionResultModal] = useState(null)
   const [photoCaptureModal, setPhotoCaptureModal] = useState(null)
@@ -3058,6 +3070,7 @@ export default function BuildFlow() {
                     <p className="text-xs text-gray-500">
                       {formatShortDate(weekDates[0])} – {formatShortDate(weekDates[6])}
                     </p>
+                    <p className="text-[11px] text-gray-500">Drag tasks to reschedule within the week.</p>
                   </div>
                   <p className="text-xs text-gray-500">{weekTimelineRows.length} active lot(s)</p>
                 </div>
@@ -3083,13 +3096,72 @@ export default function BuildFlow() {
                         const lineHeight = 22
                         const padding = 6
                         const rowHeight = Math.max(1, row.tasks.length) * lineHeight + padding * 2
+                        const drop = calendarDropTarget?.date ? calendarDropTarget : null
+                        const dropCls =
+                          drop?.status === 'invalid'
+                            ? 'bg-red-100/60'
+                            : drop?.status === 'conflict'
+                              ? 'bg-yellow-100/70'
+                              : drop?.status === 'valid'
+                                ? 'bg-green-100/70'
+                                : ''
                         return (
                           <div key={row.lot.id} className="flex border-b">
                             <div className="w-44 shrink-0 p-2 border-r">
                               <p className="text-sm font-semibold">{lotCode(row.lot)}</p>
                               <p className="text-xs text-gray-500">{row.community?.name ?? ''}</p>
                             </div>
-                            <div className="flex-1 relative" style={{ height: rowHeight }}>
+                            <div
+                              className="flex-1 relative"
+                              style={{ height: rowHeight }}
+                              onDragOver={(e) => {
+                                if (!draggingCalendarTask) return
+                                e.preventDefault()
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                const ratio = rect.width ? (e.clientX - rect.left) / rect.width : 0
+                                const index = Math.max(0, Math.min(6, Math.floor(ratio * 7)))
+                                const iso = weekDates[index]
+                                if (!iso) return
+                                const lot = lotsById.get(draggingCalendarTask.lot_id) ?? null
+                                const task = lot?.tasks?.find((t) => t.id === draggingCalendarTask.task_id) ?? null
+                                if (!lot || !task) return
+                                const status = getCalendarDropStatus({ lot, task, targetDateIso: iso })
+                                if (calendarDropTarget?.date === iso && calendarDropTarget?.status === status.status) return
+                                setCalendarDropTarget({ date: iso, ...status })
+                              }}
+                              onDragLeave={(e) => {
+                                if (!e.currentTarget.contains(e.relatedTarget)) setCalendarDropTarget(null)
+                              }}
+                              onDrop={(e) => {
+                                if (!draggingCalendarTask) return
+                                e.preventDefault()
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                const ratio = rect.width ? (e.clientX - rect.left) / rect.width : 0
+                                const index = Math.max(0, Math.min(6, Math.floor(ratio * 7)))
+                                const iso = weekDates[index]
+                                if (!iso) return
+                                const lot = lotsById.get(draggingCalendarTask.lot_id) ?? null
+                                const task = lot?.tasks?.find((t) => t.id === draggingCalendarTask.task_id) ?? null
+                                if (!lot || !task) return
+                                const status = getCalendarDropStatus({ lot, task, targetDateIso: iso })
+                                if (status.status === 'invalid') {
+                                  alert(`Dependency violation. Earliest allowed start is ${formatShortDate(status.earliest)}.`)
+                                  setCalendarDropTarget(null)
+                                  setDraggingCalendarTask(null)
+                                  return
+                                }
+                                setRescheduleModal({ lot_id: lot.id, task_id: task.id, initial_date: status.normalized })
+                                setCalendarDropTarget(null)
+                                setDraggingCalendarTask(null)
+                              }}
+                            >
+                              {weekDates.map((iso, i) => (
+                                <div
+                                  key={iso}
+                                  className={`absolute top-0 bottom-0 ${drop?.date === iso ? dropCls : ''} pointer-events-none`}
+                                  style={{ left: `${(i / 7) * 100}%`, width: `${100 / 7}%` }}
+                                />
+                              ))}
                               {weekDates.map((_, i) => (
                                 <div
                                   key={i}
@@ -3104,6 +3176,16 @@ export default function BuildFlow() {
                                     key={entry.id}
                                     type="button"
                                     onClick={() => setTaskModal({ lot_id: row.lot.id, task_id: entry.task.id })}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.dataTransfer.setData('text/plain', `${row.lot.id}:${entry.task.id}`)
+                                      e.dataTransfer.effectAllowed = 'move'
+                                      setDraggingCalendarTask({ lot_id: row.lot.id, task_id: entry.task.id })
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggingCalendarTask(null)
+                                      setCalendarDropTarget(null)
+                                    }}
                                     className="absolute h-5 rounded-md px-2 text-[10px] text-white font-semibold truncate shadow-sm"
                                     style={{
                                       top,
@@ -3111,7 +3193,7 @@ export default function BuildFlow() {
                                       width: `${Math.max(entry.widthPercent, 3)}%`,
                                       backgroundColor: TASK_STATUS_COLORS[entry.status] || TASK_STATUS_COLORS.pending,
                                     }}
-                                    title={`${entry.task.name}\n${formatShortDate(entry.startIso)} - ${formatShortDate(entry.endIso)}\n${entry.sub?.company_name ?? 'Unassigned'}`}
+                                    title={`Drag to reschedule\n${entry.task.name}\n${formatShortDate(entry.startIso)} - ${formatShortDate(entry.endIso)}\n${entry.sub?.company_name ?? 'Unassigned'}`}
                                   >
                                     {entry.task.name}
                                   </button>
@@ -3959,15 +4041,24 @@ export default function BuildFlow() {
                         <p className="text-sm text-gray-500">Predicted Completion</p>
                         <p className="font-semibold">{lotEta(selectedLot)}</p>
                       </div>
-                      <button
-                        onClick={() => exportLotScheduleCsv(selectedLot)}
-                        className="px-3 py-2 rounded-xl bg-white border border-gray-200 text-sm font-semibold"
-                        disabled={!isOnline}
-                        title={!isOnline ? 'Requires connection to export' : 'Export schedule to CSV'}
-                      >
-                        <Download className="w-4 h-4 inline mr-1" />
-                        Export
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setAddExteriorTaskModal({ lot_id: selectedLot.id })}
+                          className="px-3 py-2 rounded-xl bg-blue-50 border border-blue-200 text-sm font-semibold text-blue-700"
+                        >
+                          <Plus className="w-4 h-4 inline mr-1" />
+                          Exterior Task
+                        </button>
+                        <button
+                          onClick={() => exportLotScheduleCsv(selectedLot)}
+                          className="px-3 py-2 rounded-xl bg-white border border-gray-200 text-sm font-semibold"
+                          disabled={!isOnline}
+                          title={!isOnline ? 'Requires connection to export' : 'Export schedule to CSV'}
+                        >
+                          <Download className="w-4 h-4 inline mr-1" />
+                          Export
+                        </button>
+                      </div>
                     </div>
 
                     <div className="flex gap-2">
@@ -5755,6 +5846,26 @@ export default function BuildFlow() {
         )
       })()}
 
+      {addExteriorTaskModal && (() => {
+        const lot = lotsById.get(addExteriorTaskModal.lot_id) ?? null
+        if (!lot) return null
+        return (
+          <AddExteriorTaskModal
+            lot={lot}
+            org={org}
+            subcontractors={app.subcontractors ?? []}
+            onClose={() => setAddExteriorTaskModal(null)}
+            onSave={(task) => {
+              updateLot(lot.id, (current) => ({
+                ...current,
+                tasks: [...(current.tasks ?? []), task],
+              }))
+              setAddExteriorTaskModal(null)
+            }}
+          />
+        )
+      })()}
+
       {delayModal && (() => {
         const lot = lotsById.get(delayModal.lot_id) ?? null
         const task = lot?.tasks?.find((t) => t.id === delayModal.task_id) ?? null
@@ -7240,6 +7351,201 @@ function TaskModal({
   )
 }
 
+function AddExteriorTaskModal({ lot, org, subcontractors, onClose, onSave }) {
+  const presets = EXTERIOR_TASK_LIBRARY
+  const defaultPreset = presets[0] ?? { id: 'custom', name: 'Custom', trade: 'other', duration: 1 }
+  const [presetId, setPresetId] = useState(defaultPreset.id)
+  const [draft, setDraft] = useState(() => ({
+    name: defaultPreset.name,
+    trade: defaultPreset.trade,
+    duration: defaultPreset.duration,
+    start_date: formatISODate(new Date()),
+    sub_id: '',
+  }))
+  const { getNextWorkDay, addWorkDays } = makeWorkdayHelpers(org)
+
+  useEffect(() => {
+    const preset = presets.find((p) => p.id === presetId)
+    if (!preset || preset.id === 'custom') return
+    setDraft((prev) => ({
+      ...prev,
+      name: preset.name,
+      trade: preset.trade,
+      duration: preset.duration,
+    }))
+  }, [presetId, presets])
+
+  const subsForTrade = useMemo(
+    () =>
+      (subcontractors ?? [])
+        .filter((s) => s.trade === draft.trade || (s.secondary_trades ?? []).includes(draft.trade))
+        .sort((a, b) => String(a.company_name).localeCompare(String(b.company_name))),
+    [draft.trade, subcontractors],
+  )
+
+  const validSubIds = useMemo(() => new Set(subsForTrade.map((s) => s.id)), [subsForTrade])
+  const effectiveSubId = validSubIds.has(draft.sub_id) ? draft.sub_id : ''
+
+  const normalizedStart = useMemo(() => {
+    if (!draft.start_date) return ''
+    const next = getNextWorkDay(draft.start_date) ?? parseISODate(draft.start_date)
+    return next ? formatISODate(next) : draft.start_date
+  }, [draft.start_date, getNextWorkDay])
+
+  const durationValue = Math.max(1, Number(draft.duration) || 1)
+  const endDate = normalizedStart ? formatISODate(addWorkDays(normalizedStart, durationValue - 1)) : ''
+  const canSave = Boolean(draft.name.trim()) && Boolean(normalizedStart)
+
+  return (
+    <Modal
+      title="Add Exterior Task"
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose} className="flex-1">
+            Cancel
+          </SecondaryButton>
+          <PrimaryButton
+            onClick={() => {
+              if (!canSave) return
+              const maxSort = Math.max(0, ...(lot.tasks ?? []).map((t) => Number(t.sort_order ?? 0) || 0))
+              const now = new Date().toISOString()
+              onSave?.({
+                id: uuid(),
+                lot_id: lot.id,
+                name: draft.name.trim(),
+                description: null,
+                trade: draft.trade,
+                phase: 'exterior',
+                track: 'exterior',
+                sub_id: effectiveSubId || null,
+                duration: durationValue,
+                scheduled_start: normalizedStart,
+                scheduled_end: endDate,
+                actual_start: null,
+                actual_end: null,
+                dependencies: [],
+                status: 'pending',
+                delay_days: 0,
+                delay_reason: null,
+                delay_notes: null,
+                delay_logged_at: null,
+                delay_logged_by: null,
+                requires_inspection: false,
+                inspection_type: null,
+                inspection_id: null,
+                is_outdoor: true,
+                is_critical_path: false,
+                blocks_final: false,
+                lead_time_days: 0,
+                photos: [],
+                notes: [],
+                sort_order: maxSort + 1,
+                created_at: now,
+                updated_at: now,
+              })
+            }}
+            className="flex-1"
+            disabled={!canSave}
+          >
+            Add Task
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <Card className="bg-gray-50">
+          <p className="text-sm text-gray-600">
+            {lotCode(lot)} • Exterior work is scheduled ad hoc
+          </p>
+        </Card>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Preset</span>
+          <select
+            value={presetId}
+            onChange={(e) => setPresetId(e.target.value)}
+            className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
+          >
+            {presets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Task Name</span>
+          <input
+            value={draft.name}
+            onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+            placeholder="Exterior Paint"
+          />
+        </label>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="text-sm font-semibold">Trade</span>
+            <select
+              value={draft.trade}
+              onChange={(e) => setDraft((prev) => ({ ...prev, trade: e.target.value, sub_id: '' }))}
+              className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
+            >
+              {TRADES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-sm font-semibold">Duration (days)</span>
+            <input
+              type="number"
+              min="1"
+              value={draft.duration}
+              onChange={(e) => setDraft((prev) => ({ ...prev, duration: e.target.value }))}
+              className="mt-1 w-full px-3 py-3 border rounded-xl"
+            />
+          </label>
+        </div>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Start Date</span>
+          <input
+            type="date"
+            value={draft.start_date}
+            onChange={(e) => setDraft((prev) => ({ ...prev, start_date: e.target.value }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+          />
+          {normalizedStart && normalizedStart !== draft.start_date ? (
+            <p className="text-xs text-gray-600 mt-1">Adjusted to next workday: {formatShortDate(normalizedStart)}</p>
+          ) : null}
+          {endDate ? <p className="text-xs text-gray-600 mt-1">Ends: {formatShortDate(endDate)}</p> : null}
+        </label>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Assign Sub (optional)</span>
+          <select
+            value={effectiveSubId}
+            onChange={(e) => setDraft((prev) => ({ ...prev, sub_id: e.target.value }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
+          >
+            <option value="">Unassigned</option>
+            {subsForTrade.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.company_name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </Modal>
+  )
+}
+
 function DelayModal({ lot, task, org, onClose, onApply }) {
   const [days, setDays] = useState(1)
   const [reason, setReason] = useState('')
@@ -7495,12 +7801,12 @@ function RescheduleTaskModal({ lot, task, community, org, isOnline, initialDate,
       })
     }
 
-    const maxEndInTrack = (track) => {
+    const maxEndFor = (filterFn) => {
       let max = null
       for (const t of tasks) {
+        if (!filterFn(t)) continue
         const endIso = byId.get(t.id)?.end ?? t.scheduled_end
         if (!endIso) continue
-        if (t.track !== track) continue
         const d = parseISODate(endIso)
         if (!d) continue
         if (!max || d > max) max = d
@@ -7508,9 +7814,8 @@ function RescheduleTaskModal({ lot, task, community, org, isOnline, initialDate,
       return max
     }
 
-    const interiorEnd = maxEndInTrack('interior')
-    const exteriorEnd = maxEndInTrack('exterior')
-    const finalStartBase = interiorEnd && exteriorEnd ? (interiorEnd > exteriorEnd ? interiorEnd : exteriorEnd) : interiorEnd ?? exteriorEnd
+    const blockingEnd = maxEndFor((t) => t.track !== 'final' && t.blocks_final !== false)
+    const finalStartBase = blockingEnd
     const finalStart = finalStartBase ? addWorkDays(formatISODate(finalStartBase), 1) : null
 
     if (finalStart) {
