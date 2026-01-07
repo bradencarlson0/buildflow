@@ -30,8 +30,7 @@ State:
 - New request: freeze left task column and date header in schedule timeline while scrolling (both work week and week views).
 - New request: make Month Overview show more descriptive visuals of activity.
 - Latest schedule timeline and month overview updates committed and pushed.
-- New request: keep dragged task visible when flipping weeks by pinning it as the top row.
-- Uncommitted updates in `src/BuildFlow.jsx` for pinned drag row in Work Week timeline.
+- Dragged task stays visible when flipping weeks by pinning it as the top row.
 
 Done:
 - Read repo structure and `buildflow-enhancements.md`.
@@ -83,7 +82,8 @@ Done:
 - Added cross-week drag auto-flip logic and sticky schedule headers/columns.
 - Enhanced Month Overview day cells with task/inspection summaries.
 - Committed and pushed schedule timeline + Month Overview updates (commit: 1563446).
-- Added pinned drag row support for cross-week dragging (uncommitted).
+- Added pinned drag row support for cross-week dragging.
+- Committed and pushed pinned drag row update (commit: 383bde5).
 
 Now:
 - Verify mobile schedule view change on device.
