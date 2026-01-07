@@ -3618,8 +3618,13 @@ export default function BuildFlow() {
                   {monthGrid.cells.map(({ iso, offset }) => {
                     const d = parseISODate(iso)
                     const inMonth = d ? d.getMonth() === (parseISODate(monthGrid.monthStartIso)?.getMonth() ?? d.getMonth()) : false
-                    const workCount = calendarAssignmentsForDate(iso).length
-                    const inspCount = calendarInspectionsForDate(iso).length
+                    const assignments = calendarAssignmentsForDate(iso)
+                    const inspections = calendarInspectionsForDate(iso)
+                    const workCount = assignments.length
+                    const inspCount = inspections.length
+                    const totalCount = workCount + inspCount
+                    const previewTasks = assignments.slice(0, 2)
+                    const hasActivity = totalCount > 0
                     return (
                       <button
                         key={iso}
@@ -3627,19 +3632,45 @@ export default function BuildFlow() {
                           setCalendarDate(iso)
                           setCalendarView('day')
                         }}
-                        className={`aspect-square rounded-xl border text-left p-2 ${inMonth ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100 text-gray-400'}`}
+                        className={`aspect-square rounded-xl border text-left p-2 overflow-hidden ${
+                          inMonth
+                            ? hasActivity
+                              ? 'bg-blue-50/40 border-blue-200'
+                              : 'bg-white border-gray-200'
+                            : 'bg-gray-50 border-gray-100 text-gray-400'
+                        }`}
                         title={offset === 0 ? 'Month start' : ''}
                       >
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-semibold">{d ? d.getDate() : ''}</span>
-                          {(workCount + inspCount) > 0 ? (
-                            <span className="text-[10px] font-semibold text-blue-700">{workCount + inspCount}</span>
+                          {hasActivity ? (
+                            <span className="text-[10px] font-semibold text-blue-700 bg-white border border-blue-100 rounded-full px-1.5 py-0.5">
+                              {totalCount}
+                            </span>
                           ) : null}
                         </div>
-                        {(workCount + inspCount) > 0 ? (
-                          <div className="mt-2 flex gap-1">
-                            {workCount > 0 ? <span className="w-2 h-2 rounded-full bg-blue-500" /> : null}
-                            {inspCount > 0 ? <span className="w-2 h-2 rounded-full bg-orange-500" /> : null}
+                        {hasActivity ? (
+                          <div className="mt-2 space-y-1">
+                            {previewTasks.map(({ lot, task, status }) => (
+                              <div key={`${lot.id}-${task.id}`} className="flex items-center gap-1 text-[10px] text-gray-700">
+                                <span
+                                  className="w-1.5 h-1.5 rounded-full"
+                                  style={{ backgroundColor: TASK_STATUS_COLORS[status] || '#3B82F6' }}
+                                />
+                                <span className="truncate">{lotCode(lot)} • {task.name}</span>
+                              </div>
+                            ))}
+                            {calendarFilters.showInspections && inspCount > 0 ? (
+                              <div className="flex items-center gap-1 text-[10px] text-orange-700">
+                                <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                                <span className="truncate">
+                                  {inspCount} inspection{inspCount === 1 ? '' : 's'}
+                                </span>
+                              </div>
+                            ) : null}
+                            {workCount > previewTasks.length ? (
+                              <p className="text-[10px] text-gray-500">+{workCount - previewTasks.length} more</p>
+                            ) : null}
                           </div>
                         ) : null}
                       </button>
@@ -8928,6 +8959,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     taskId: null,
     rowRect: null,
     pointerType: '',
+    lastFlipAt: 0,
   })
   const suppressClickRef = useRef(false)
 
@@ -9039,23 +9071,70 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     state.taskId = null
     state.rowRect = null
     state.pointerType = ''
+    state.lastFlipAt = 0
     setDraggingTaskId(null)
     setDragTargetIso(null)
     setDragStatus(null)
   }
 
-  const updateDragTarget = (task, clientX, rowRect) => {
-    if (!useWorkWeek || !rowRect?.width || weekDayIsos.length === 0) return
+  const getIsoForWeek = (clientX, rowRect, baseWeekStart) => {
+    if (!rowRect?.width || !baseWeekStart) return null
     const ratio = (clientX - rowRect.left) / rowRect.width
     const clamped = Math.max(0, Math.min(1, ratio))
     const index = Math.max(0, Math.min(weekDayIsos.length - 1, Math.floor(clamped * weekDayIsos.length)))
-    const iso = weekDayIsos[index]
+    const isoDate = addCalendarDays(baseWeekStart, index)
+    return isoDate ? formatISODate(isoDate) : null
+  }
+
+  const updateDragTarget = (task, clientX, rowRect) => {
+    if (!useWorkWeek || !rowRect?.width || weekDayIsos.length === 0) return
+    const iso = getIsoForWeek(clientX, rowRect, weekStart)
     if (!iso) return
     if (dragTargetIso === iso && dragStatus?.taskId === task.id) return
     const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
     const status = preview.dependency_violation ? 'invalid' : 'valid'
     setDragTargetIso(iso)
     setDragStatus({ status, preview, taskId: task.id })
+  }
+
+  const maybeFlipWeek = (task, clientX, rowRect) => {
+    if (!useWorkWeek || !rowRect) return false
+    const edge = 36
+    const now = Date.now()
+    const state = dragStateRef.current
+    if (now - state.lastFlipAt < 380) return false
+
+    if (clientX >= rowRect.right - edge && canGoNext) {
+      const next = addCalendarDays(weekStart, 7)
+      if (!next) return false
+      state.lastFlipAt = now
+      setActiveWeekStartIso(formatISODate(next))
+      const iso = getIsoForWeek(clientX, rowRect, next)
+      if (iso) {
+        const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
+        const status = preview.dependency_violation ? 'invalid' : 'valid'
+        setDragTargetIso(iso)
+        setDragStatus({ status, preview, taskId: task.id })
+      }
+      return true
+    }
+
+    if (clientX <= rowRect.left + edge && canGoPrev) {
+      const prev = addCalendarDays(weekStart, -7)
+      if (!prev) return false
+      state.lastFlipAt = now
+      setActiveWeekStartIso(formatISODate(prev))
+      const iso = getIsoForWeek(clientX, rowRect, prev)
+      if (iso) {
+        const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
+        const status = preview.dependency_violation ? 'invalid' : 'valid'
+        setDragTargetIso(iso)
+        setDragStatus({ status, preview, taskId: task.id })
+      }
+      return true
+    }
+
+    return false
   }
 
   const handleTaskClick = (taskId) => {
@@ -9083,6 +9162,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     state.taskId = task.id
     state.rowRect = rowRect
     state.pointerType = e.pointerType
+    state.lastFlipAt = 0
 
     const targetEl = e.currentTarget
     const pointerId = e.pointerId
@@ -9128,7 +9208,8 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     }
 
     e.preventDefault()
-    updateDragTarget(task, state.lastX, state.rowRect)
+    const flipped = maybeFlipWeek(task, state.lastX, state.rowRect)
+    if (!flipped) updateDragTarget(task, state.lastX, state.rowRect)
   }
 
   const handleTaskPointerUp = (task, e) => {
@@ -9173,14 +9254,22 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     if (!useWorkWeek) clearDragState()
   }, [useWorkWeek])
 
+  useEffect(() => {
+    const state = dragStateRef.current
+    if (!useWorkWeek || !state.active || !draggingTaskId || !state.rowRect) return
+    const task = tasks.find((t) => t.id === draggingTaskId)
+    if (!task) return
+    updateDragTarget(task, state.lastX, state.rowRect)
+  }, [activeWeekStartIso, useWorkWeek, tasks, draggingTaskId])
+
   return (
-    <div className="overflow-x-auto border rounded-xl">
+    <div className="overflow-auto border rounded-xl max-h-[70vh]">
       {useWorkWeek ? (
         <div className="flex items-center justify-between gap-3 border-b bg-white px-3 py-2">
           <div>
             <p className="text-xs text-gray-500 uppercase tracking-wide">Work Week</p>
             <p className="text-sm font-semibold">{weekLabel}</p>
-            {onRescheduleTask ? <p className="text-[11px] text-gray-500">Long-press a task to drag.</p> : null}
+            {onRescheduleTask ? <p className="text-[11px] text-gray-500">Long-press to drag. Pull to the edge to switch weeks.</p> : null}
           </div>
           <div className="flex gap-2">
             <button
@@ -9213,8 +9302,11 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
         </div>
       ) : null}
       <div style={{ minWidth: `${minGridWidth}px` }}>
-        <div className="flex border-b bg-gray-50 sticky top-0">
-          <div className="shrink-0 p-3 font-semibold border-r" style={{ width: taskColWidth, minWidth: taskColWidth }}>
+        <div className="flex border-b bg-gray-50 sticky top-0 z-30">
+          <div
+            className="shrink-0 p-3 font-semibold border-r sticky left-0 z-40 bg-gray-50"
+            style={{ width: taskColWidth, minWidth: taskColWidth }}
+          >
             Task
           </div>
           <div className="flex-1 flex">
@@ -9285,8 +9377,11 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
           }
 
           return (
-            <div key={task.id} className="flex border-b hover:bg-gray-50">
-              <div className="shrink-0 p-2 border-r" style={{ width: taskColWidth, minWidth: taskColWidth }}>
+            <div key={task.id} className="flex border-b hover:bg-gray-50 group">
+              <div
+                className="shrink-0 p-2 border-r sticky left-0 z-20 bg-white group-hover:bg-gray-50"
+                style={{ width: taskColWidth, minWidth: taskColWidth }}
+              >
                 <button
                   type="button"
                   onClick={() => onSelectTask?.(task.id)}

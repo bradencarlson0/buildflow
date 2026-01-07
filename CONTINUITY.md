@@ -26,6 +26,10 @@ Key decisions:
 
 State:
 - Latest long-press drag rescheduling changes committed and pushed.
+- New request: allow drag across Work Week boundaries (auto flip to next/prev week while dragging).
+- New request: freeze left task column and date header in schedule timeline while scrolling (both work week and week views).
+- New request: make Month Overview show more descriptive visuals of activity.
+- Uncommitted updates in `src/BuildFlow.jsx` for cross-week drag, sticky headers/columns, and month overview visuals.
 
 Done:
 - Read repo structure and `buildflow-enhancements.md`.
@@ -74,8 +78,11 @@ Done:
 - Added shared reschedule preview/apply helper and updated reschedule modal to use it.
 - Added long-press drag rescheduling in Lot > Schedule work-week timeline (with drop highlighting + dependency checks).
 - Committed and pushed reschedule/drag updates (commit: 292fbc1).
+- Added cross-week drag auto-flip logic and sticky schedule headers/columns (uncommitted).
+- Enhanced Month Overview day cells with task/inspection summaries (uncommitted).
 
 Now:
+- Commit and push latest schedule timeline and month overview improvements.
 - Verify mobile schedule view change on device.
 - Re-test iOS job photo upload in Lot Photos tab after routing to modal flow.
 - Confirm new Netlify URL and proceed with remaining app tasks.
