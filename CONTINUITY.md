@@ -25,7 +25,7 @@ Key decisions:
 - GitHub: `bradencarlson0/buildflow`, public, use GitHub CLI.
 
 State:
-- Pending commit/push for long-press drag rescheduling and shared reschedule helper updates.
+- Latest long-press drag rescheduling changes committed and pushed.
 
 Done:
 - Read repo structure and `buildflow-enhancements.md`.
@@ -73,9 +73,9 @@ Done:
 - Confirmed `BrelandData/` stays local and is not pushed.
 - Added shared reschedule preview/apply helper and updated reschedule modal to use it.
 - Added long-press drag rescheduling in Lot > Schedule work-week timeline (with drop highlighting + dependency checks).
+- Committed and pushed reschedule/drag updates (commit: 292fbc1).
 
 Now:
-- Commit and push latest reschedule/drag changes.
 - Verify mobile schedule view change on device.
 - Re-test iOS job photo upload in Lot Photos tab after routing to modal flow.
 - Confirm new Netlify URL and proceed with remaining app tasks.
