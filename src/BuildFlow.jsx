@@ -4480,9 +4480,6 @@ export default function BuildFlow() {
                           Trade: {TRADES.find((t) => t.id === sub.trade)?.label ?? sub.trade} • Capacity: {sub.max_concurrent_lots}
                         </p>
                       </div>
-                      <div className="text-sm font-semibold bg-yellow-50 border border-yellow-200 text-yellow-800 px-2 py-1 rounded-lg">
-                        ★ {sub.rating}
-                      </div>
                     </div>
                     <div className="mt-3 flex items-center justify-between">
                       <a
