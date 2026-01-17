@@ -416,7 +416,7 @@ function Modal({ title, onClose, children, footer }) {
   useEffect(() => lockBodyScroll(), [])
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center">
+    <div className="fixed inset-0 bg-black/40 z-[70] flex items-end sm:items-center justify-center">
       <div className="w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-lg">{title}</h2>
@@ -3782,7 +3782,7 @@ export default function BuildFlow() {
                       return (
                         <div key={b.id}>
                           <p className="text-sm font-semibold text-gray-700 mb-2">Block {b.label}</p>
-                          <div className="grid grid-cols-6 gap-2">
+                          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
                             {lots.map((lot) => {
                               const status =
                                 lot.status === 'complete'
@@ -3807,7 +3807,7 @@ export default function BuildFlow() {
                                 >
                                   <p className="text-sm font-semibold">{lot.lot_number}</p>
                                   <div className="mt-1">
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/80 text-gray-700 border border-white/60">
+                                    <span className="inline-block max-w-full px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/80 text-gray-700 border border-white/60 truncate">
                                       {productLabel}
                                     </span>
                                   </div>
@@ -3820,7 +3820,7 @@ export default function BuildFlow() {
                       )
                     })
                   ) : (
-                    <div className="grid grid-cols-6 gap-2">
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
                       {app.lots
                         .filter((l) => l.community_id === selectedCommunity.id)
                         .map((lot) => {
@@ -3847,7 +3847,7 @@ export default function BuildFlow() {
                             >
                               <p className="text-sm font-semibold">{lot.lot_number}</p>
                               <div className="mt-1">
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/80 text-gray-700 border border-white/60">
+                                <span className="inline-block max-w-full px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/80 text-gray-700 border border-white/60 truncate">
                                   {productLabel}
                                 </span>
                               </div>
