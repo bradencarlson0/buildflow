@@ -60,7 +60,12 @@ const migrateAppState = (state) => {
     custom_fields: state.org?.custom_fields ?? [],
   }
 
-  return { ...state, org, communities, lots }
+  const contactLibrary = {
+    builders: state.contact_library?.builders ?? [],
+    realtors: state.contact_library?.realtors ?? [],
+  }
+
+  return { ...state, org, communities, lots, contact_library: contactLibrary }
 }
 
 export const loadAppState = (fallbackState) => {

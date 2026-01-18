@@ -762,6 +762,9 @@ export default function BuildFlow() {
   const plans = app.plans ?? []
   const agencies = app.agencies ?? []
   const templates = app.templates ?? []
+  const contactLibrary = app.contact_library ?? { builders: [], realtors: [] }
+  const contactLibraryBuilders = contactLibrary.builders ?? []
+  const contactLibraryRealtors = contactLibrary.realtors ?? []
   const { businessDaysBetweenInclusive, getNextWorkDay, addWorkDays, subtractWorkDays } = makeWorkdayHelpers(org)
   const todayIso = formatISODate(new Date())
 
@@ -896,6 +899,14 @@ export default function BuildFlow() {
     setApp((prev) => {
       const nextCommunities = (prev.communities ?? []).map((c) => (c.id === communityId ? updater(c, prev) : c))
       return { ...prev, communities: nextCommunities }
+    })
+  }
+
+  const updateContactLibrary = (updater) => {
+    setApp((prev) => {
+      const current = prev.contact_library ?? { builders: [], realtors: [] }
+      const next = updater(current)
+      return { ...prev, contact_library: next }
     })
   }
 
@@ -2393,10 +2404,18 @@ export default function BuildFlow() {
     { id: 'product_types', label: 'Product Types', description: 'Define categories, build days, and templates.', count: productTypes.length },
     { id: 'plans', label: 'Plans', description: 'Attach floor plans to product types.', count: plans.length },
     { id: 'agencies', label: 'Agencies', description: 'Configure inspection agencies and types.', count: agencies.length },
+    {
+      id: 'contact_library',
+      label: 'Contact Library',
+      description: 'Save realtor and builder contacts for reuse.',
+      count: (contactLibraryRealtors.length || 0) + (contactLibraryBuilders.length || 0),
+    },
     { id: 'custom_fields', label: 'Custom Fields', description: 'Extra fields for lot start and reporting.', count: (org.custom_fields ?? []).length },
   ]
 
   const [communityWizardStep, setCommunityWizardStep] = useState(1)
+  const [realtorPersonaId, setRealtorPersonaId] = useState('')
+  const [builderPersonaId, setBuilderPersonaId] = useState('')
   const createDraftRealtor = () => ({ id: uuid(), name: '', phone: '', email: '', company: '' })
   const createDraftInspector = () => ({ id: uuid(), name: '', phone: '', email: '', agency_id: '' })
   const createDraftBuilder = (index = 0) => ({
@@ -2482,6 +2501,71 @@ export default function BuildFlow() {
     return rangeString.split(',').map((part) => part.trim()).filter(Boolean)
   }
 
+  const isBlankRealtor = (realtor) =>
+    !String(realtor?.name ?? '').trim() &&
+    !String(realtor?.phone ?? '').trim() &&
+    !String(realtor?.email ?? '').trim() &&
+    !String(realtor?.company ?? '').trim()
+
+  const isBlankBuilder = (builder) =>
+    !String(builder?.name ?? '').trim() &&
+    !String(builder?.phone ?? '').trim() &&
+    !String(builder?.email ?? '').trim()
+
+  const addRealtorFromLibrary = (personaId) => {
+    const persona = contactLibraryRealtors.find((r) => r.id === personaId)
+    if (!persona) return
+    setCommunityDraft((d) => {
+      const nextRealtors = [...(d.realtors ?? [])]
+      const blankIndex = nextRealtors.findIndex((r) => isBlankRealtor(r))
+      const payload = {
+        name: persona.name ?? '',
+        phone: persona.phone ?? '',
+        email: persona.email ?? '',
+        company: persona.company ?? '',
+      }
+
+      if (blankIndex >= 0) {
+        const existing = nextRealtors[blankIndex]
+        nextRealtors[blankIndex] = { ...existing, ...payload }
+      } else {
+        nextRealtors.push({ id: uuid(), ...payload })
+      }
+
+      return { ...d, realtors: nextRealtors }
+    })
+  }
+
+  const addBuilderFromLibrary = (personaId) => {
+    const persona = contactLibraryBuilders.find((b) => b.id === personaId)
+    if (!persona) return
+    setCommunityDraft((d) => {
+      const nextBuilders = [...(d.builders ?? [])]
+      const blankIndex = nextBuilders.findIndex((b) => isBlankBuilder(b))
+      const targetIndex = blankIndex >= 0 ? blankIndex : nextBuilders.length
+      const existing = blankIndex >= 0 ? nextBuilders[blankIndex] : { id: uuid(), lot_ranges: '' }
+      const color =
+        persona.color ||
+        existing.color ||
+        (BUILDER_COLORS[targetIndex % BUILDER_COLORS.length] ?? '#3B82F6')
+
+      const payload = {
+        name: persona.name ?? '',
+        phone: persona.phone ?? '',
+        email: persona.email ?? '',
+        color,
+      }
+
+      if (blankIndex >= 0) {
+        nextBuilders[blankIndex] = { ...existing, ...payload }
+      } else {
+        nextBuilders.push({ ...existing, ...payload })
+      }
+
+      return { ...d, builders: nextBuilders }
+    })
+  }
+
   const updateProductTypeLots = (targetId, nextLots, removeFromOthers = true) => {
     setCommunityDraft((d) => {
       const lotCount = Math.max(1, Number(d.lot_count) || 1)
@@ -2542,6 +2626,8 @@ export default function BuildFlow() {
     setCommunityWizardStep(1)
     setProductTypeRangeDrafts({})
     setBuilderRangeDrafts({})
+    setRealtorPersonaId('')
+    setBuilderPersonaId('')
     setCommunityDraft({
       name: '',
       street: '',
@@ -4715,7 +4801,7 @@ export default function BuildFlow() {
                   <p className="text-xs text-gray-500 uppercase tracking-wide">Admin</p>
                   <h3 className="text-lg font-semibold">Company Settings</h3>
                   <p className="text-sm text-gray-600 mt-1">
-                    Manage product types, plans, agencies, and custom fields used across BuildFlow.
+                    Manage product types, plans, agencies, contacts, and custom fields used across BuildFlow.
                   </p>
                 </div>
                 <div className="text-right text-xs text-gray-500">
@@ -5045,6 +5131,195 @@ export default function BuildFlow() {
                         ))}
                       </div>
                     )}
+                  </Card>
+                )}
+
+                {adminSection === 'contact_library' && (
+                  <Card className="space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-semibold">Contact Library</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Save realtors and builders/superintendents for quick add in new communities.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold">Realtors</p>
+                          <button
+                            onClick={() =>
+                              updateContactLibrary((current) => ({
+                                ...current,
+                                realtors: [...(current.realtors ?? []), { id: uuid(), name: '', phone: '', email: '', company: '' }],
+                              }))
+                            }
+                            className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                          >
+                            + Add
+                          </button>
+                        </div>
+                        {contactLibraryRealtors.length === 0 ? (
+                          <p className="text-xs text-gray-600">No saved realtors yet.</p>
+                        ) : (
+                          contactLibraryRealtors.map((r) => (
+                            <div key={r.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+                              <input
+                                value={r.name ?? ''}
+                                onChange={(e) =>
+                                  updateContactLibrary((current) => ({
+                                    ...current,
+                                    realtors: (current.realtors ?? []).map((x) => (x.id === r.id ? { ...x, name: e.target.value } : x)),
+                                  }))
+                                }
+                                className="w-full px-3 py-2 border rounded-xl"
+                                placeholder="Name"
+                              />
+                              <input
+                                value={r.company ?? ''}
+                                onChange={(e) =>
+                                  updateContactLibrary((current) => ({
+                                    ...current,
+                                    realtors: (current.realtors ?? []).map((x) => (x.id === r.id ? { ...x, company: e.target.value } : x)),
+                                  }))
+                                }
+                                className="w-full px-3 py-2 border rounded-xl"
+                                placeholder="Company"
+                              />
+                              <div className="grid grid-cols-2 gap-2">
+                                <input
+                                  value={r.phone ?? ''}
+                                  onChange={(e) =>
+                                    updateContactLibrary((current) => ({
+                                      ...current,
+                                      realtors: (current.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: e.target.value } : x)),
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2 border rounded-xl"
+                                  placeholder="Phone"
+                                />
+                                <input
+                                  value={r.email ?? ''}
+                                  onChange={(e) =>
+                                    updateContactLibrary((current) => ({
+                                      ...current,
+                                      realtors: (current.realtors ?? []).map((x) => (x.id === r.id ? { ...x, email: e.target.value } : x)),
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2 border rounded-xl"
+                                  placeholder="Email"
+                                />
+                              </div>
+                              <button
+                                onClick={() =>
+                                  updateContactLibrary((current) => ({
+                                    ...current,
+                                    realtors: (current.realtors ?? []).filter((x) => x.id !== r.id),
+                                  }))
+                                }
+                                className="text-xs text-red-600"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold">Builders / Superintendents</p>
+                          <button
+                            onClick={() =>
+                              updateContactLibrary((current) => ({
+                                ...current,
+                                builders: [
+                                  ...(current.builders ?? []),
+                                  {
+                                    id: uuid(),
+                                    name: '',
+                                    phone: '',
+                                    email: '',
+                                    color: BUILDER_COLORS[(current.builders ?? []).length % BUILDER_COLORS.length] ?? '#3B82F6',
+                                  },
+                                ],
+                              }))
+                            }
+                            className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                          >
+                            + Add
+                          </button>
+                        </div>
+                        {contactLibraryBuilders.length === 0 ? (
+                          <p className="text-xs text-gray-600">No saved builders yet.</p>
+                        ) : (
+                          contactLibraryBuilders.map((b) => (
+                            <div key={b.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+                              <div className="grid grid-cols-2 gap-2">
+                                <input
+                                  value={b.name ?? ''}
+                                  onChange={(e) =>
+                                    updateContactLibrary((current) => ({
+                                      ...current,
+                                      builders: (current.builders ?? []).map((x) => (x.id === b.id ? { ...x, name: e.target.value } : x)),
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2 border rounded-xl"
+                                  placeholder="Name"
+                                />
+                                <input
+                                  type="color"
+                                  value={b.color || '#3B82F6'}
+                                  onChange={(e) =>
+                                    updateContactLibrary((current) => ({
+                                      ...current,
+                                      builders: (current.builders ?? []).map((x) => (x.id === b.id ? { ...x, color: e.target.value } : x)),
+                                    }))
+                                  }
+                                  className="w-full h-10 border rounded-xl"
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <input
+                                  value={b.phone ?? ''}
+                                  onChange={(e) =>
+                                    updateContactLibrary((current) => ({
+                                      ...current,
+                                      builders: (current.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: e.target.value } : x)),
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2 border rounded-xl"
+                                  placeholder="Phone"
+                                />
+                                <input
+                                  value={b.email ?? ''}
+                                  onChange={(e) =>
+                                    updateContactLibrary((current) => ({
+                                      ...current,
+                                      builders: (current.builders ?? []).map((x) => (x.id === b.id ? { ...x, email: e.target.value } : x)),
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2 border rounded-xl"
+                                  placeholder="Email"
+                                />
+                              </div>
+                              <button
+                                onClick={() =>
+                                  updateContactLibrary((current) => ({
+                                    ...current,
+                                    builders: (current.builders ?? []).filter((x) => x.id !== b.id),
+                                  }))
+                                }
+                                className="text-xs text-red-600"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
                   </Card>
                 )}
 
@@ -5537,13 +5812,37 @@ export default function BuildFlow() {
               <Card className="bg-gray-50">
                 <div className="flex items-center justify-between mb-2">
                   <p className="font-semibold">Realtors</p>
-                  <button
-                    onClick={() => setCommunityDraft((d) => ({ ...d, realtors: [...(d.realtors ?? []), createDraftRealtor()] }))}
-                    className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
-                  >
-                    + Add
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {contactLibraryRealtors.length > 0 ? (
+                      <select
+                        value={realtorPersonaId}
+                        onChange={(e) => {
+                          const nextId = e.target.value
+                          if (!nextId) return
+                          addRealtorFromLibrary(nextId)
+                          setRealtorPersonaId('')
+                        }}
+                        className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                      >
+                        <option value="">Add from library...</option>
+                        {contactLibraryRealtors.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {(r.name ?? 'Unnamed') + (r.company ? ` - ${r.company}` : '')}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      onClick={() => setCommunityDraft((d) => ({ ...d, realtors: [...(d.realtors ?? []), createDraftRealtor()] }))}
+                      className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                    >
+                      + Add
+                    </button>
+                  </div>
                 </div>
+                {contactLibraryRealtors.length === 0 ? (
+                  <p className="text-xs text-gray-500">No saved realtors yet. Add them in Admin &gt; Contact Library.</p>
+                ) : null}
                 <div className="space-y-2">
                   {(communityDraft.realtors ?? []).map((r) => (
                     <div key={r.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
@@ -5773,18 +6072,42 @@ export default function BuildFlow() {
               <Card className="bg-gray-50">
                 <div className="flex items-center justify-between mb-2">
                   <p className="font-semibold">Builders / Superintendents</p>
-                  <button
-                    onClick={() =>
-                      setCommunityDraft((d) => ({
-                        ...d,
-                        builders: [...(d.builders ?? []), createDraftBuilder((d.builders ?? []).length)],
-                      }))
-                    }
-                    className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
-                  >
-                    + Add
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {contactLibraryBuilders.length > 0 ? (
+                      <select
+                        value={builderPersonaId}
+                        onChange={(e) => {
+                          const nextId = e.target.value
+                          if (!nextId) return
+                          addBuilderFromLibrary(nextId)
+                          setBuilderPersonaId('')
+                        }}
+                        className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                      >
+                        <option value="">Add from library...</option>
+                        {contactLibraryBuilders.map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {(b.name ?? 'Unnamed') + (b.email ? ` - ${b.email}` : '')}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      onClick={() =>
+                        setCommunityDraft((d) => ({
+                          ...d,
+                          builders: [...(d.builders ?? []), createDraftBuilder((d.builders ?? []).length)],
+                        }))
+                      }
+                      className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                    >
+                      + Add
+                    </button>
+                  </div>
                 </div>
+                {contactLibraryBuilders.length === 0 ? (
+                  <p className="text-xs text-gray-500">No saved builders yet. Add them in Admin &gt; Contact Library.</p>
+                ) : null}
                 <div className="space-y-2">
                   {(communityDraft.builders ?? []).map((b) => {
                     const assignedLots = normalizeRange(b.lot_ranges, draftLotCount)
@@ -6547,6 +6870,8 @@ export default function BuildFlow() {
           <CommunityContactsModal
             community={community}
             agencies={availableAgencies}
+            contactLibraryRealtors={contactLibraryRealtors}
+            contactLibraryBuilders={contactLibraryBuilders}
             onClose={() => setCommunityContactsModalId(null)}
             onSave={({ builders, realtors, inspectors }) => {
               updateCommunity(community.id, (c) => ({
@@ -10100,7 +10425,14 @@ function CommunitySpecBulkModal({ community, productTypes, plans, onClose, onSav
   )
 }
 
-function CommunityContactsModal({ community, agencies, onClose, onSave }) {
+function CommunityContactsModal({
+  community,
+  agencies,
+  contactLibraryRealtors = [],
+  contactLibraryBuilders = [],
+  onClose,
+  onSave,
+}) {
   const lotCount = community?.lot_count ?? 0
   const [draft, setDraft] = useState(() => ({
     builders: (community.builders ?? []).map((b, idx) => ({
@@ -10127,6 +10459,8 @@ function CommunityContactsModal({ community, agencies, onClose, onSave }) {
     })),
   }))
   const [builderRangeDrafts, setBuilderRangeDrafts] = useState({})
+  const [realtorPersonaId, setRealtorPersonaId] = useState('')
+  const [builderPersonaId, setBuilderPersonaId] = useState('')
 
   const buildRangeNumbers = (startValue, endValue) => {
     const startNum = Number.parseInt(startValue, 10)
@@ -10139,6 +10473,71 @@ function CommunityContactsModal({ community, agencies, onClose, onSave }) {
     const rangeString = toRangeString(lots)
     if (!rangeString) return []
     return rangeString.split(',').map((part) => part.trim()).filter(Boolean)
+  }
+
+  const isBlankRealtor = (realtor) =>
+    !String(realtor?.name ?? '').trim() &&
+    !String(realtor?.phone ?? '').trim() &&
+    !String(realtor?.email ?? '').trim() &&
+    !String(realtor?.company ?? '').trim()
+
+  const isBlankBuilder = (builder) =>
+    !String(builder?.name ?? '').trim() &&
+    !String(builder?.phone ?? '').trim() &&
+    !String(builder?.email ?? '').trim()
+
+  const addRealtorFromLibrary = (personaId) => {
+    const persona = contactLibraryRealtors.find((r) => r.id === personaId)
+    if (!persona) return
+    setDraft((d) => {
+      const nextRealtors = [...(d.realtors ?? [])]
+      const blankIndex = nextRealtors.findIndex((r) => isBlankRealtor(r))
+      const payload = {
+        name: persona.name ?? '',
+        phone: persona.phone ?? '',
+        email: persona.email ?? '',
+        company: persona.company ?? '',
+      }
+
+      if (blankIndex >= 0) {
+        const existing = nextRealtors[blankIndex]
+        nextRealtors[blankIndex] = { ...existing, ...payload }
+      } else {
+        nextRealtors.push({ id: uuid(), ...payload })
+      }
+
+      return { ...d, realtors: nextRealtors }
+    })
+  }
+
+  const addBuilderFromLibrary = (personaId) => {
+    const persona = contactLibraryBuilders.find((b) => b.id === personaId)
+    if (!persona) return
+    setDraft((d) => {
+      const nextBuilders = [...(d.builders ?? [])]
+      const blankIndex = nextBuilders.findIndex((b) => isBlankBuilder(b))
+      const targetIndex = blankIndex >= 0 ? blankIndex : nextBuilders.length
+      const existing = blankIndex >= 0 ? nextBuilders[blankIndex] : { id: uuid(), lot_ranges: '' }
+      const color =
+        persona.color ||
+        existing.color ||
+        (BUILDER_COLORS[targetIndex % BUILDER_COLORS.length] ?? '#3B82F6')
+
+      const payload = {
+        name: persona.name ?? '',
+        phone: persona.phone ?? '',
+        email: persona.email ?? '',
+        color,
+      }
+
+      if (blankIndex >= 0) {
+        nextBuilders[blankIndex] = { ...existing, ...payload }
+      } else {
+        nextBuilders.push({ ...existing, ...payload })
+      }
+
+      return { ...d, builders: nextBuilders }
+    })
   }
 
   const updateBuilderLots = (targetId, nextLots, removeFromOthers = true) => {
@@ -10229,18 +10628,42 @@ function CommunityContactsModal({ community, agencies, onClose, onSave }) {
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <p className="font-semibold">Builders</p>
-            <button
-              onClick={() =>
-                setDraft((d) => ({
-                  ...d,
-                  builders: [...(d.builders ?? []), { id: uuid(), name: '', phone: '', email: '', color: '#3B82F6', lot_ranges: '' }],
-                }))
-              }
-              className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
-            >
-              + Add
-            </button>
+            <div className="flex items-center gap-2">
+              {contactLibraryBuilders.length > 0 ? (
+                <select
+                  value={builderPersonaId}
+                  onChange={(e) => {
+                    const nextId = e.target.value
+                    if (!nextId) return
+                    addBuilderFromLibrary(nextId)
+                    setBuilderPersonaId('')
+                  }}
+                  className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                >
+                  <option value="">Add from library...</option>
+                  {contactLibraryBuilders.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {(b.name ?? 'Unnamed') + (b.email ? ` - ${b.email}` : '')}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button
+                onClick={() =>
+                  setDraft((d) => ({
+                    ...d,
+                    builders: [...(d.builders ?? []), { id: uuid(), name: '', phone: '', email: '', color: '#3B82F6', lot_ranges: '' }],
+                  }))
+                }
+                className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+              >
+                + Add
+              </button>
+            </div>
           </div>
+          {contactLibraryBuilders.length === 0 ? (
+            <p className="text-xs text-gray-500">No saved builders yet. Add them in Admin &gt; Contact Library.</p>
+          ) : null}
           {(draft.builders ?? []).map((b) => (
             <div key={b.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
               {(() => {
@@ -10410,18 +10833,42 @@ function CommunityContactsModal({ community, agencies, onClose, onSave }) {
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <p className="font-semibold">Realtors</p>
-            <button
-              onClick={() =>
-                setDraft((d) => ({
-                  ...d,
-                  realtors: [...(d.realtors ?? []), { id: uuid(), name: '', phone: '', email: '', company: '' }],
-                }))
-              }
-              className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
-            >
-              + Add
-            </button>
+            <div className="flex items-center gap-2">
+              {contactLibraryRealtors.length > 0 ? (
+                <select
+                  value={realtorPersonaId}
+                  onChange={(e) => {
+                    const nextId = e.target.value
+                    if (!nextId) return
+                    addRealtorFromLibrary(nextId)
+                    setRealtorPersonaId('')
+                  }}
+                  className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                >
+                  <option value="">Add from library...</option>
+                  {contactLibraryRealtors.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {(r.name ?? 'Unnamed') + (r.company ? ` - ${r.company}` : '')}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button
+                onClick={() =>
+                  setDraft((d) => ({
+                    ...d,
+                    realtors: [...(d.realtors ?? []), { id: uuid(), name: '', phone: '', email: '', company: '' }],
+                  }))
+                }
+                className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+              >
+                + Add
+              </button>
+            </div>
           </div>
+          {contactLibraryRealtors.length === 0 ? (
+            <p className="text-xs text-gray-500">No saved realtors yet. Add them in Admin &gt; Contact Library.</p>
+          ) : null}
           {(draft.realtors ?? []).map((r) => (
             <div key={r.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
               <input

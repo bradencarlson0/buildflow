@@ -1077,6 +1077,19 @@ export const createSeedState = () => {
     },
   ]
 
+  const contact_library = {
+    builders: [
+      {
+        id: 'contact-builder-austin',
+        name: 'Austin Morris',
+        phone: '615-585-1534',
+        email: 'austin@brelandcompanies.com',
+        color: '#3B82F6',
+      },
+    ],
+    realtors: [],
+  }
+
   const productTypesById = new Map(product_types.map((pt) => [pt.id, pt]))
   const lots = []
   for (const community of communities) {
@@ -1131,6 +1144,7 @@ export const createSeedState = () => {
     inspection_checklists: INSPECTION_CHECKLISTS,
     subcontractors: subs,
     communities,
+    contact_library,
     lots,
     messages: [],
     notifications: [],
