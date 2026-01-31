@@ -4,6 +4,135 @@ import { uuid } from './uuid.js'
 
 const bySortOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || String(a.name).localeCompare(String(b.name))
 
+const shiftByWorkdays = (iso, delta, helpers) => {
+  if (!iso || !delta) return iso
+  if (delta > 0) return formatISODate(helpers.addWorkDays(iso, delta))
+  return formatISODate(helpers.subtractWorkDays(iso, Math.abs(delta)))
+}
+
+const workdayDiff = (fromIso, toIso, helpers) => {
+  const from = parseISODate(fromIso)
+  const to = parseISODate(toIso)
+  if (!from || !to) return 0
+  if (to.getTime() === from.getTime()) return 0
+
+  let cursor = fromIso
+  let delta = 0
+  const limit = 4000
+
+  if (to > from) {
+    while (cursor !== toIso && delta < limit) {
+      cursor = formatISODate(helpers.addWorkDays(cursor, 1))
+      delta += 1
+    }
+    return delta
+  }
+
+  while (cursor !== toIso && delta > -limit) {
+    cursor = formatISODate(helpers.subtractWorkDays(cursor, 1))
+    delta -= 1
+  }
+  return delta
+}
+
+export const buildReschedulePreview = ({ lot, task, targetDateIso, org }) => {
+  const out = { affected: [], oldCompletion: null, newCompletion: null, dependency_violation: false, earliest_start: null, normalized_date: '' }
+  if (!targetDateIso || !task?.scheduled_start) return out
+  const helpers = makeWorkdayHelpers(org)
+  const { getNextWorkDay } = helpers
+
+  const normalizedDate = (() => {
+    const next = getNextWorkDay(targetDateIso) ?? parseISODate(targetDateIso)
+    return next ? formatISODate(next) : targetDateIso
+  })()
+  out.normalized_date = normalizedDate
+
+  const durationMinus1 = Math.max(0, Number(task.duration ?? 0) - 1)
+  let earliest = getNextWorkDay(task.scheduled_start) ?? parseISODate(task.scheduled_start)
+
+  for (const dep of task.dependencies ?? []) {
+    const pred = (lot.tasks ?? []).find((t) => t.id === dep.depends_on_task_id)
+    if (!pred?.scheduled_start || !pred?.scheduled_end) continue
+    const lag = Math.max(0, Number(dep.lag_days ?? 0) || 0)
+
+    if (dep.type === 'FS') {
+      const d = helpers.addWorkDays(pred.scheduled_end, 1 + lag)
+      if (d && (!earliest || d > earliest)) earliest = d
+    } else if (dep.type === 'SS') {
+      const d = helpers.addWorkDays(pred.scheduled_start, lag)
+      if (d && (!earliest || d > earliest)) earliest = d
+    } else if (dep.type === 'FF') {
+      const requiredEnd = helpers.addWorkDays(pred.scheduled_end, lag)
+      const d = requiredEnd ? helpers.subtractWorkDays(requiredEnd, durationMinus1) : null
+      if (d && (!earliest || d > earliest)) earliest = d
+    } else if (dep.type === 'SF') {
+      const requiredEnd = helpers.addWorkDays(pred.scheduled_start, lag)
+      const d = requiredEnd ? helpers.subtractWorkDays(requiredEnd, durationMinus1) : null
+      if (d && (!earliest || d > earliest)) earliest = d
+    }
+  }
+
+  const earliestStart = earliest ? formatISODate(getNextWorkDay(earliest) ?? earliest) : null
+  out.earliest_start = earliestStart
+  if (earliestStart && parseISODate(normalizedDate) && parseISODate(earliestStart) && parseISODate(normalizedDate) < parseISODate(earliestStart)) {
+    out.dependency_violation = true
+    return out
+  }
+
+  const shiftDays = workdayDiff(task.scheduled_start, normalizedDate, helpers)
+  const tasks = (lot.tasks ?? []).slice().sort(bySortOrder)
+
+  const oldCompletion = maxDateLike(tasks.map((t) => t.scheduled_end).filter(Boolean))
+  out.oldCompletion = oldCompletion ? formatISODate(oldCompletion) : null
+
+  if (shiftDays === 0) {
+    out.newCompletion = out.oldCompletion
+    return out
+  }
+
+  const movedTrack = task.track
+  const movedSort = task.sort_order ?? 0
+  const byId = new Map()
+  const affected = []
+
+  for (const t of tasks) {
+    if (!t?.scheduled_start || !t?.scheduled_end) continue
+    if (t.status === 'complete') continue
+    const isAfter = (t.sort_order ?? 0) > movedSort
+    const shouldShift =
+      t.id === task.id ||
+      (t.track === movedTrack && isAfter) ||
+      (t.dependencies ?? []).some((d) => d.depends_on_task_id === task.id)
+
+    if (!shouldShift) continue
+
+    const newStart = shiftByWorkdays(t.scheduled_start, shiftDays, helpers)
+    const newEnd = shiftByWorkdays(t.scheduled_end, shiftDays, helpers)
+    byId.set(t.id, { start: newStart, end: newEnd })
+    affected.push({
+      task_id: t.id,
+      task_name: t.name,
+      old_start: t.scheduled_start,
+      new_start: newStart,
+      old_end: t.scheduled_end,
+      new_end: newEnd,
+      track: t.track,
+    })
+  }
+
+  out.affected = affected.slice().sort((a, b) => (a.task_id === task.id ? -1 : 0) || String(a.old_start).localeCompare(String(b.old_start)))
+
+  const completion = maxDateLike(
+    tasks.map((t) => {
+      const hit = byId.get(t.id)
+      return hit?.end ?? t.scheduled_end
+    }),
+  )
+  out.newCompletion = completion ? formatISODate(completion) : null
+
+  return out
+}
+
 const maxDateLike = (dateLikes) => {
   let max = null
   for (const like of dateLikes) {
@@ -12,6 +141,16 @@ const maxDateLike = (dateLikes) => {
     if (!max || d > max) max = d
   }
   return max
+}
+
+const minDateLike = (dateLikes) => {
+  let min = null
+  for (const like of dateLikes) {
+    const d = parseISODate(like)
+    if (!d) continue
+    if (!min || d < min) min = d
+  }
+  return min
 }
 
 export const getTradeLabel = (tradeId) => {
@@ -140,6 +279,7 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
       blocks_final: tt.blocks_final !== false,
       lead_time_days: tt.lead_time_days ?? 0,
       photos: [],
+      documents: [],
       notes: [],
       sort_order: tt.sort_order ?? 0,
       created_at: new Date().toISOString(),
@@ -309,6 +449,303 @@ export const assignSubsToTasks = (tasks, subs, existingLots) => {
 
 export const getTrackEndDate = (tasks, track) =>
   maxDateLike((tasks ?? []).filter((t) => t.track === track).map((t) => t.scheduled_end).filter(Boolean))
+
+const buildDurationShift = (lot, taskId, nextDuration, orgSettings) => {
+  const helpers = makeWorkdayHelpers(orgSettings)
+  const tasks = (lot?.tasks ?? []).slice()
+  const target = tasks.find((t) => t.id === taskId)
+  if (!target || !target.scheduled_start || !target.scheduled_end) {
+    return { affected: [], nextDatesById: new Map(), oldCompletion: null, newCompletion: null, newEnd: null, duration: 0 }
+  }
+
+  const duration = Math.max(1, Number(nextDuration) || 1)
+  const oldDuration = Math.max(
+    1,
+    helpers.businessDaysBetweenInclusive(target.scheduled_start, target.scheduled_end) || Number(target.duration ?? 1) || 1,
+  )
+  const delta = duration - oldDuration
+  const newEnd = formatISODate(helpers.addWorkDays(target.scheduled_start, duration - 1))
+
+  const sorted = tasks.slice().sort(bySortOrder)
+  const nextDatesById = new Map()
+  const affected = []
+
+  const shouldShift = (t) => {
+    if (t.id === target.id) return true
+    if (t.status === 'complete') return false
+    const isAfter = (t.sort_order ?? 0) > (target.sort_order ?? 0)
+    if (t.track === target.track && isAfter) return true
+    return (t.dependencies ?? []).some((d) => d.depends_on_task_id === target.id)
+  }
+
+  for (const t of sorted) {
+    if (!t?.scheduled_start || !t?.scheduled_end) continue
+    if (!shouldShift(t)) continue
+    if (t.id === target.id) {
+      if (t.scheduled_end !== newEnd) {
+        nextDatesById.set(t.id, { start: t.scheduled_start, end: newEnd })
+        affected.push({
+          task_id: t.id,
+          task_name: t.name,
+          old_start: t.scheduled_start,
+          new_start: t.scheduled_start,
+          old_end: t.scheduled_end,
+          new_end: newEnd,
+          track: t.track,
+        })
+      }
+      continue
+    }
+    if (delta === 0) continue
+    const newStart = shiftByWorkdays(t.scheduled_start, delta, helpers)
+    const newTaskEnd = shiftByWorkdays(t.scheduled_end, delta, helpers)
+    nextDatesById.set(t.id, { start: newStart, end: newTaskEnd })
+    affected.push({
+      task_id: t.id,
+      task_name: t.name,
+      old_start: t.scheduled_start,
+      new_start: newStart,
+      old_end: t.scheduled_end,
+      new_end: newTaskEnd,
+      track: t.track,
+    })
+  }
+
+  const resolveStart = (t) => nextDatesById.get(t.id)?.start ?? t.scheduled_start
+  const resolveEnd = (t) => nextDatesById.get(t.id)?.end ?? t.scheduled_end
+
+  const oldCompletion = maxDateLike(sorted.map((t) => t.scheduled_end).filter(Boolean))
+
+  const blockingEnd = maxDateLike(
+    sorted
+      .filter((t) => t.track !== 'final' && t.blocks_final !== false)
+      .map((t) => resolveEnd(t))
+      .filter(Boolean),
+  )
+  const newFinalStartBase = blockingEnd
+  const newFinalStart = newFinalStartBase ? formatISODate(helpers.addWorkDays(newFinalStartBase, 1)) : null
+  const finalTasks = sorted.filter((t) => t.track === 'final').sort(bySortOrder)
+  if (newFinalStart && finalTasks.length) {
+    const firstFinal = finalTasks[0]
+    const currentFinalStart = resolveStart(firstFinal)
+    if (currentFinalStart) {
+      const shift = workdayDiff(currentFinalStart, newFinalStart, helpers)
+      if (shift !== 0) {
+        for (const ft of finalTasks) {
+          const baseStart = resolveStart(ft)
+          const baseEnd = resolveEnd(ft)
+          if (!baseStart || !baseEnd) continue
+          const bumpedStart = shiftByWorkdays(baseStart, shift, helpers)
+          const bumpedEnd = shiftByWorkdays(baseEnd, shift, helpers)
+          nextDatesById.set(ft.id, { start: bumpedStart, end: bumpedEnd })
+          if (!affected.some((a) => a.task_id === ft.id)) {
+            affected.push({
+              task_id: ft.id,
+              task_name: ft.name,
+              old_start: ft.scheduled_start,
+              new_start: bumpedStart,
+              old_end: ft.scheduled_end,
+              new_end: bumpedEnd,
+              track: ft.track,
+            })
+          }
+        }
+      }
+    }
+  }
+
+  const newCompletion = maxDateLike(sorted.map((t) => resolveEnd(t)).filter(Boolean))
+
+  return {
+    affected,
+    nextDatesById,
+    oldCompletion,
+    newCompletion,
+    newEnd,
+    duration,
+  }
+}
+
+export const previewDurationChange = (lot, taskId, nextDuration, orgSettings) => {
+  const shift = buildDurationShift(lot, taskId, nextDuration, orgSettings)
+  return {
+    affected: shift.affected,
+    oldCompletion: shift.oldCompletion,
+    newCompletion: shift.newCompletion,
+    newEnd: shift.newEnd,
+  }
+}
+
+export const applyDurationChange = (lot, taskId, nextDuration, orgSettings) => {
+  const shift = buildDurationShift(lot, taskId, nextDuration, orgSettings)
+  const affectedById = shift.nextDatesById
+  if (!lot) return lot
+
+  const now = new Date().toISOString()
+  const nextTasks = (lot.tasks ?? []).map((t) => {
+    const hit = affectedById.get(t.id)
+    const next = hit
+      ? { ...t, scheduled_start: hit.start, scheduled_end: hit.end, updated_at: now }
+      : { ...t }
+    if (t.id === taskId) {
+      next.duration = shift.duration
+    }
+    return next
+  })
+
+  return { ...lot, tasks: nextTasks }
+}
+
+export const canParallelizeTasks = (lot, taskIds) => {
+  const selected = new Set(taskIds ?? [])
+  const blocked = []
+  for (const task of lot?.tasks ?? []) {
+    if (!selected.has(task.id)) continue
+    for (const dep of task.dependencies ?? []) {
+      if (selected.has(dep.depends_on_task_id)) {
+        blocked.push({ task_id: task.id, depends_on_task_id: dep.depends_on_task_id })
+      }
+    }
+  }
+  return {
+    ok: blocked.length === 0,
+    blocked,
+    reason: blocked.length ? 'Selected tasks have dependencies between them.' : '',
+  }
+}
+
+export const buildParallelStartPlan = (lot, taskIds, orgSettings, options = {}) => {
+  const selected = Array.from(new Set(taskIds ?? [])).filter(Boolean)
+  if (!lot || selected.length === 0) {
+    return { status: 'invalid', blockedDependencies: [], previewsById: {}, targetStartIso: '' }
+  }
+
+  const originalById = new Map((lot.tasks ?? []).map((t) => [t.id, t]))
+  const baseTasks = (lot.tasks ?? []).map((t) => ({
+    ...t,
+    dependencies: (t.dependencies ?? []).map((d) => ({ ...d })),
+  }))
+  const workingLot = { ...lot, tasks: baseTasks }
+  const selectedSet = new Set(selected)
+
+  if (options.overrideDependencies) {
+    for (const task of workingLot.tasks) {
+      if (!selectedSet.has(task.id)) continue
+      task.dependencies = (task.dependencies ?? []).filter((d) => !selectedSet.has(d.depends_on_task_id))
+    }
+  }
+
+  const blockedDependencies = canParallelizeTasks(workingLot, selected).blocked ?? []
+  if (blockedDependencies.length > 0 && !options.overrideDependencies) {
+    return { status: 'blocked', blockedDependencies, previewsById: {}, targetStartIso: '' }
+  }
+
+  const selectedTasks = workingLot.tasks.filter((t) => selectedSet.has(t.id))
+  const targetDate = minDateLike(selectedTasks.map((t) => t.scheduled_start).filter(Boolean))
+  const targetStartIso = targetDate ? formatISODate(targetDate) : ''
+  if (!targetStartIso) {
+    return { status: 'invalid', blockedDependencies, previewsById: {}, targetStartIso: '' }
+  }
+
+  const previewsById = {}
+  const ordered = selectedTasks.slice().sort(bySortOrder)
+
+  for (const task of ordered) {
+    const preview = buildReschedulePreview({ lot: workingLot, task, targetDateIso: targetStartIso, org: orgSettings })
+    previewsById[task.id] = preview
+    if (preview.dependency_violation) {
+      return { status: 'invalid', blockedDependencies, previewsById, targetStartIso, earliest: preview.earliest_start }
+    }
+    const byId = new Map((preview.affected ?? []).map((a) => [a.task_id, a]))
+    workingLot.tasks = (workingLot.tasks ?? []).map((t) => {
+      const hit = byId.get(t.id)
+      if (!hit) return t
+      return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end }
+    })
+  }
+
+  const impacted = []
+  for (const task of workingLot.tasks ?? []) {
+    const original = originalById.get(task.id)
+    if (!original) continue
+    if (original.scheduled_start !== task.scheduled_start || original.scheduled_end !== task.scheduled_end) {
+      impacted.push({
+        task_id: task.id,
+        task_name: task.name,
+        old_start: original.scheduled_start,
+        new_start: task.scheduled_start,
+        old_end: original.scheduled_end,
+        new_end: task.scheduled_end,
+        track: task.track,
+      })
+    }
+  }
+
+  return {
+    status: 'ok',
+    blockedDependencies,
+    previewsById,
+    targetStartIso,
+    nextLot: workingLot,
+    impacted,
+  }
+}
+
+export const applyListReorder = (lot, dragTaskId, dropTaskId, orgSettings) => {
+  if (!lot || !dragTaskId || !dropTaskId || dragTaskId === dropTaskId) return lot
+  const tasks = (lot.tasks ?? []).map((t) => ({ ...t }))
+  const dragTask = tasks.find((t) => t.id === dragTaskId)
+  const dropTask = tasks.find((t) => t.id === dropTaskId)
+  if (!dragTask || !dropTask || dragTask.track !== dropTask.track) return lot
+  if (!dragTask.scheduled_start || !dropTask.scheduled_start) return lot
+
+  const { getNextWorkDay, addWorkDays } = makeWorkdayHelpers(orgSettings)
+  const normalizeStart = (iso) => {
+    const next = getNextWorkDay(iso) ?? parseISODate(iso)
+    return next ? formatISODate(next) : iso
+  }
+
+  const dragStart = normalizeStart(dragTask.scheduled_start)
+  const dropStart = normalizeStart(dropTask.scheduled_start)
+  const dragDuration = Math.max(1, Number(dragTask.duration ?? 1) || 1)
+  const dropDuration = Math.max(1, Number(dropTask.duration ?? 1) || 1)
+  const dragEnd = formatISODate(addWorkDays(dropStart, dragDuration - 1))
+  const dropEnd = formatISODate(addWorkDays(dragStart, dropDuration - 1))
+
+  const trackTasks = tasks.filter((t) => t.track === dragTask.track).sort(bySortOrder)
+  const orderById = new Map(trackTasks.map((t, idx) => [t.id, Number(t.sort_order ?? 0) || idx + 1]))
+  const dragOrder = orderById.get(dragTaskId)
+  const dropOrder = orderById.get(dropTaskId)
+
+  const now = new Date().toISOString()
+  const nextTasks = tasks.map((t) => {
+    if (t.id === dragTask.id) {
+      return {
+        ...t,
+        scheduled_start: dropStart,
+        scheduled_end: dragEnd,
+        sort_order: dropOrder ?? t.sort_order,
+        updated_at: now,
+      }
+    }
+    if (t.id === dropTask.id) {
+      return {
+        ...t,
+        scheduled_start: dragStart,
+        scheduled_end: dropEnd,
+        sort_order: dragOrder ?? t.sort_order,
+        updated_at: now,
+      }
+    }
+    if (dragOrder !== undefined && dropOrder !== undefined && t.track === dragTask.track) {
+      if (t.sort_order === dragOrder) return { ...t, sort_order: dropOrder }
+      if (t.sort_order === dropOrder) return { ...t, sort_order: dragOrder }
+    }
+    return t
+  })
+
+  return { ...lot, tasks: nextTasks }
+}
 
 export const previewDelayImpact = (lot, taskId, delayDays, orgSettings) => {
   const { addWorkDays } = makeWorkdayHelpers(orgSettings)

@@ -4,6 +4,7 @@ export const TRACKS = [
   { id: 'interior', label: 'Interior Track' },
   { id: 'exterior', label: 'Exterior Track' },
   { id: 'final', label: 'Final' },
+  { id: 'misc', label: 'Miscellaneous' },
 ]
 
 export const PHASES = [
@@ -15,6 +16,7 @@ export const PHASES = [
   { id: 'finishes', label: 'Finishes' },
   { id: 'exterior', label: 'Exterior' },
   { id: 'final', label: 'Final' },
+  { id: 'misc', label: 'Miscellaneous' },
 ]
 
 export const TRADES = [
@@ -200,12 +202,13 @@ export const OUTDOOR_TASK_NAMES = [
   'Windows/Doors',
   'Window & Door Install',
   'Siding',
+  'Siding/Soffit',
   'Exterior Brick/Stone',
   'Exterior Paint',
   'Gutters',
   'Concrete Flatwork',
   'Landscaping',
-  'Garage Door',
+  'Pest Control',
 ]
 
 export const MILESTONES = [
