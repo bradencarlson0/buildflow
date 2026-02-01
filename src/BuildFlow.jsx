@@ -5,6 +5,7 @@ import {
   Bell,
   Building2,
   Calendar,
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -234,11 +235,11 @@ const unlockBodyScroll = () => {
   modalScrollStyles = null
 }
 
-function Modal({ title, onClose, children, footer }) {
+function Modal({ title, onClose, children, footer, zIndex = 'z-[70]' }) {
   useEffect(() => lockBodyScroll(), [])
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-[70] flex items-end sm:items-center justify-center">
+    <div className={`fixed inset-0 bg-black/40 ${zIndex} flex items-end sm:items-center justify-center`}>
       <div className="w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-lg">{title}</h2>
@@ -399,6 +400,13 @@ const normalizeImageBlob = async (file) => {
 
 const normalizePhone = (phone) => String(phone ?? '').replace(/[^\d+]/g, '')
 
+const formatPhoneInput = (value) => {
+  const digits = String(value ?? '').replace(/\D/g, '').slice(0, 10)
+  if (digits.length <= 3) return digits
+  if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`
+}
+
 const buildSmsLink = (phone) => {
   const normalized = normalizePhone(phone)
   return normalized ? `sms:${normalized}` : ''
@@ -407,6 +415,19 @@ const buildSmsLink = (phone) => {
 const buildMailtoLink = (email) => {
   const address = String(email ?? '').trim()
   return address ? `mailto:${address}` : ''
+}
+
+const getSubPhone = (sub) => sub?.phone || sub?.primary_contact?.phone || sub?.office_phone || ''
+const getSubEmail = (sub) => sub?.email || sub?.primary_contact?.email || ''
+
+const mergeTradeOptions = (customTrades = []) => {
+  const map = new Map()
+  TRADES.forEach((t) => map.set(t.id, t))
+  ;(customTrades ?? []).forEach((t) => {
+    if (!t?.id || !t?.label) return
+    if (!map.has(t.id)) map.set(t.id, { id: t.id, label: t.label })
+  })
+  return Array.from(map.values())
 }
 
 const buildOutlookWebLink = (email) => {
@@ -424,16 +445,24 @@ const openExternalLink = (href, onClose) => {
 const openBlobInNewTab = async (blobId) => {
   if (!blobId) return
   try {
+    const win = window.open('', '_blank')
     const blob = await getBlob(blobId)
     if (!blob) return
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.target = '_blank'
-    a.rel = 'noopener noreferrer'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
+    if (win && !win.closed) {
+      win.location.href = url
+    } else {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer')
+      if (!opened) {
+        const a = document.createElement('a')
+        a.href = url
+        a.target = '_blank'
+        a.rel = 'noopener noreferrer'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      }
+    }
     setTimeout(() => URL.revokeObjectURL(url), 60_000)
   } catch (err) {
     console.error(err)
@@ -446,8 +475,8 @@ const BottomNav = ({ value, onChange }) => {
     { id: 'dashboard', label: 'Home', icon: LayoutGrid },
     { id: 'calendar', label: 'Calendar', icon: Calendar },
     { id: 'communities', label: 'Communities', icon: MapPin },
-    { id: 'sales', label: 'Sales', icon: DollarSign },
     { id: 'subs', label: 'Subs', icon: Users },
+    { id: 'sales', label: 'Sales', icon: DollarSign },
     { id: 'reports', label: 'Reports', icon: BarChart3 },
     { id: 'admin', label: 'Admin', icon: Lock },
   ]
@@ -591,6 +620,7 @@ export default function BuildFlow() {
   const [reportModal, setReportModal] = useState(false)
   const [scheduledReportModal, setScheduledReportModal] = useState(false)
   const [subContactModalId, setSubContactModalId] = useState(null)
+  const [editingSubId, setEditingSubId] = useState(null)
 
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
   const [weather, setWeather] = useState({ loading: true, forecast: [] })
@@ -2950,6 +2980,8 @@ export default function BuildFlow() {
       ? selectedCommunity.name
       : 'BuildFlow'
 
+  const tradeOptions = useMemo(() => mergeTradeOptions(app.custom_trades ?? []), [app.custom_trades])
+
   const adminSections = [
     { id: 'product_types', label: 'Product Types', description: 'Define categories, build days, and templates.', count: productTypes.length },
     { id: 'plans', label: 'Plans', description: 'Attach floor plans to product types.', count: plans.length },
@@ -2960,6 +2992,7 @@ export default function BuildFlow() {
       description: 'Save realtor and builder contacts for reuse.',
       count: (contactLibraryRealtors.length || 0) + (contactLibraryBuilders.length || 0),
     },
+    { id: 'trades', label: 'Trades', description: 'Manage custom trade types for subs and filters.', count: tradeOptions.length },
     { id: 'custom_fields', label: 'Custom Fields', description: 'Extra fields for lot start and reporting.', count: (org.custom_fields ?? []).length },
   ]
 
@@ -5243,7 +5276,15 @@ export default function BuildFlow() {
         {tab === 'subs' && !selectedLot && !selectedCommunity && (
           <div className="space-y-4">
             <Card>
-              <h3 className="font-semibold mb-3">Subcontractors</h3>
+              <div className="flex items-start justify-between gap-3">
+                <h3 className="font-semibold mb-3">Subcontractors</h3>
+                <button
+                  onClick={() => setEditingSubId('new')}
+                  className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
+                >
+                  + Add Sub
+                </button>
+              </div>
               <div className="space-y-2">
                 {app.subcontractors.map((sub) => (
                   <div key={sub.id} className="bg-gray-50 rounded-xl border border-gray-200 p-4">
@@ -5251,7 +5292,7 @@ export default function BuildFlow() {
                       <div>
                         <p className="font-semibold">{sub.company_name}</p>
                         <p className="text-xs text-gray-600 mt-1">
-                          Trade: {TRADES.find((t) => t.id === sub.trade)?.label ?? sub.trade} • Capacity: {sub.max_concurrent_lots}
+                          Trade: {tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade} • Capacity: {sub.max_concurrent_lots}
                         </p>
                       </div>
                     </div>
@@ -5267,13 +5308,29 @@ export default function BuildFlow() {
                           <Phone className="w-4 h-4" />
                           {sub.primary_contact.phone}
                         </a>
+                        {sub.primary_contact?.email ? (
+                          <a
+                            href={`mailto:${sub.primary_contact.email}`}
+                            className="text-xs text-blue-600 inline-flex items-center gap-1 mt-1"
+                          >
+                            {sub.primary_contact.email}
+                          </a>
+                        ) : null}
                       </div>
-                      <button
-                        onClick={() => setSubContactModalId(sub.id)}
-                        className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
-                      >
-                        Message
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setEditingSubId(sub.id)}
+                          className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => setSubContactModalId(sub.id)}
+                          className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
+                        >
+                          Message
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -5639,6 +5696,71 @@ export default function BuildFlow() {
                   </Card>
                 )}
 
+                {adminSection === 'trades' && (
+                  <Card className="space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-semibold">Trades</p>
+                        <p className="text-xs text-gray-500 mt-1">Add custom trades for subs and filters.</p>
+                      </div>
+                      <SecondaryButton
+                        onClick={() =>
+                          setApp((prev) => ({
+                            ...prev,
+                            custom_trades: [
+                              ...(prev.custom_trades ?? []),
+                              { id: uuid(), label: 'New Trade' },
+                            ],
+                          }))
+                        }
+                        className="h-10 w-full sm:w-auto"
+                      >
+                        + Add Trade
+                      </SecondaryButton>
+                    </div>
+                    <div className="space-y-3">
+                      {(app.custom_trades ?? []).length === 0 ? (
+                        <p className="text-sm text-gray-600">No custom trades added yet.</p>
+                      ) : (
+                        (app.custom_trades ?? []).map((trade) => (
+                          <div key={trade.id} className="bg-gray-50 border border-gray-200 rounded-xl p-3 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="block flex-1">
+                                <span className="text-xs text-gray-500">Label</span>
+                                <input
+                                  value={trade.label ?? ''}
+                                  onChange={(e) => {
+                                    const nextLabel = e.target.value
+                                    setApp((prev) => ({
+                                      ...prev,
+                                      custom_trades: (prev.custom_trades ?? []).map((x) =>
+                                        x.id === trade.id ? { ...x, label: nextLabel } : x,
+                                      ),
+                                    }))
+                                  }}
+                                  className="mt-1 w-full px-3 py-2 border rounded-xl"
+                                />
+                              </label>
+                              <button
+                                onClick={() =>
+                                  setApp((prev) => ({
+                                    ...prev,
+                                    custom_trades: (prev.custom_trades ?? []).filter((x) => x.id !== trade.id),
+                                  }))
+                                }
+                                className="text-xs text-red-600"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                            <p className="text-xs text-gray-500">ID: {trade.id}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </Card>
+                )}
+
                 {adminSection === 'plans' && (
                   <Card className="space-y-4">
                     <div className="flex items-start justify-between gap-3">
@@ -5886,7 +6008,7 @@ export default function BuildFlow() {
                                   onChange={(e) =>
                                     updateContactLibrary((current) => ({
                                       ...current,
-                                      realtors: (current.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: e.target.value } : x)),
+                                      realtors: (current.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                                     }))
                                   }
                                   className="w-full px-3 py-2 border rounded-xl"
@@ -5979,7 +6101,7 @@ export default function BuildFlow() {
                                   onChange={(e) =>
                                     updateContactLibrary((current) => ({
                                       ...current,
-                                      builders: (current.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: e.target.value } : x)),
+                                      builders: (current.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                                     }))
                                   }
                                   className="w-full px-3 py-2 border rounded-xl"
@@ -6567,7 +6689,7 @@ export default function BuildFlow() {
                           onChange={(e) =>
                             setCommunityDraft((d) => ({
                               ...d,
-                              realtors: (d.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: e.target.value } : x)),
+                              realtors: (d.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                             }))
                           }
                           className="w-full px-3 py-2 border rounded-xl"
@@ -6628,7 +6750,7 @@ export default function BuildFlow() {
                           onChange={(e) =>
                             setCommunityDraft((d) => ({
                               ...d,
-                              inspectors: (d.inspectors ?? []).map((x) => (x.id === i.id ? { ...x, phone: e.target.value } : x)),
+                              inspectors: (d.inspectors ?? []).map((x) => (x.id === i.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                             }))
                           }
                           className="w-full px-3 py-2 border rounded-xl"
@@ -6838,7 +6960,7 @@ export default function BuildFlow() {
                             onChange={(e) =>
                               setCommunityDraft((d) => ({
                                 ...d,
-                                builders: (d.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: e.target.value } : x)),
+                                builders: (d.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                               }))
                             }
                             className="w-full px-3 py-2 border rounded-xl"
@@ -7471,6 +7593,8 @@ export default function BuildFlow() {
         <PhotoViewerModal
           blobId={photoViewer.blobId}
           title={photoViewer.title}
+          photos={photoViewer.photos}
+          startIndex={photoViewer.startIndex ?? 0}
           onClose={() => setPhotoViewer(null)}
         />
       )}
@@ -7617,8 +7741,22 @@ export default function BuildFlow() {
         return (
           <PunchListModal
             lot={lot}
+            community={community}
             subcontractors={app.subcontractors}
             onClose={() => setPunchListLotId(null)}
+            onPreviewPhoto={(payload) => {
+              if (payload?.photos) {
+                setPhotoViewer({ photos: payload.photos, startIndex: payload.startIndex ?? 0, title: payload.title || 'Photos' })
+                return
+              }
+              if (payload?.blob_id) {
+                setPhotoViewer({ blobId: payload.blob_id, title: payload.caption || payload.location || 'Photo' })
+                return
+              }
+              if (payload?.photo?.blob_id) {
+                setPhotoViewer({ blobId: payload.photo.blob_id, title: payload.photo.caption || payload.photo.location || 'Photo' })
+              }
+            }}
             onUpdate={(nextPunchList) => {
               updateLot(lot.id, (l) => ({ ...l, punch_list: nextPunchList }))
               if (!isOnline) {
@@ -7643,7 +7781,6 @@ export default function BuildFlow() {
                 file,
               })
             }}
-            onMessageSub={(subId) => setMessageModal({ lot_id: lot.id, task_id: null, sub_id: subId })}
             onNotifyAssignment={(item) => {
               const sub = app.subcontractors.find((s) => s.id === item.sub_id) ?? null
               if (!sub) return
@@ -7980,6 +8117,52 @@ export default function BuildFlow() {
         const sub = (app.subcontractors ?? []).find((s) => s.id === subContactModalId) ?? null
         if (!sub) return null
         return <SubContactModal sub={sub} onClose={() => setSubContactModalId(null)} />
+      })()}
+
+      {editingSubId && (() => {
+        const sub =
+          editingSubId === 'new'
+            ? {
+                id: uuid(),
+                company_name: '',
+                trade: 'other',
+                secondary_trades: [],
+                primary_contact: { name: '', phone: '', email: '' },
+                additional_contacts: [],
+                office_phone: '',
+                insurance_expiration: null,
+                license_number: null,
+                w9_on_file: false,
+                crew_size: null,
+                max_concurrent_lots: 1,
+                is_preferred: false,
+                is_backup: false,
+                rating: 0,
+                total_jobs: 0,
+                on_time_pct: null,
+                delay_count: 0,
+                blackout_dates: [],
+                notes: '',
+                status: 'active',
+              }
+            : (app.subcontractors ?? []).find((s) => s.id === editingSubId) ?? null
+        if (!sub) return null
+        return (
+          <SubEditModal
+            sub={sub}
+            tradeOptions={tradeOptions}
+            onClose={() => setEditingSubId(null)}
+            onSave={(nextSub) => {
+              setApp((prev) => ({
+                ...prev,
+                subcontractors: editingSubId === 'new'
+                  ? [...(prev.subcontractors ?? []), nextSub]
+                  : (prev.subcontractors ?? []).map((s) => (s.id === nextSub.id ? nextSub : s)),
+              }))
+              setEditingSubId(null)
+            }}
+          />
+        )
       })()}
 
       {communityDocsCommunityId && (() => {
@@ -9411,7 +9594,7 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
           />
           <input
             value={inspector.phone}
-            onChange={(e) => setInspector((prev) => ({ ...prev, phone: e.target.value }))}
+            onChange={(e) => setInspector((prev) => ({ ...prev, phone: formatPhoneInput(e.target.value) }))}
             className="w-full px-3 py-3 border rounded-xl"
             placeholder="Phone"
           />
@@ -10074,10 +10257,19 @@ function PhotoSourceModal({ lot, task, onClose, onSelect }) {
   )
 }
 
-function PhotoViewerModal({ blobId, title, onClose }) {
+
+function PhotoViewerModal({ blobId, title, photos, startIndex = 0, onClose }) {
   const [url, setUrl] = useState(null)
+  const [photoUrls, setPhotoUrls] = useState({})
+  const [currentIndex, setCurrentIndex] = useState(startIndex)
+  const [zoomedIndex, setZoomedIndex] = useState(null)
+  const trackRef = useRef(null)
 
   useEffect(() => {
+    if (Array.isArray(photos) && photos.length > 0) {
+      setCurrentIndex(startIndex)
+      return
+    }
     let mounted = true
     let nextUrl = null
     const load = async () => {
@@ -10096,31 +10288,113 @@ function PhotoViewerModal({ blobId, title, onClose }) {
       mounted = false
       if (nextUrl) URL.revokeObjectURL(nextUrl)
     }
-  }, [blobId])
+  }, [blobId, photos, startIndex])
+
+  useEffect(() => {
+    if (!Array.isArray(photos) || photos.length == 0) return
+    let mounted = true
+    const urls = {}
+    const loadAll = async () => {
+      for (const photo of photos) {
+        if (!photo?.blob_id) continue
+        try {
+          const blob = await getBlob(photo.blob_id)
+          if (!mounted || !blob) continue
+          urls[photo.blob_id] = URL.createObjectURL(blob)
+        } catch (err) {
+          console.error(err)
+        }
+      }
+      if (mounted) setPhotoUrls(urls)
+    }
+    loadAll()
+    return () => {
+      mounted = false
+      Object.values(urls).forEach((entry) => URL.revokeObjectURL(entry))
+    }
+  }, [photos])
+
+  useEffect(() => {
+    if (!trackRef.current || !Array.isArray(photos) || photos.length == 0) return
+    const width = trackRef.current.clientWidth
+    trackRef.current.scrollTo({ left: width * startIndex, behavior: 'instant' })
+  }, [photos, startIndex])
+
+  const handleScroll = () => {
+    if (!trackRef.current || !Array.isArray(photos) || photos.length == 0) return
+    const width = trackRef.current.clientWidth
+    if (!width) return
+    const index = Math.round(trackRef.current.scrollLeft / width)
+    setCurrentIndex(Math.min(Math.max(index, 0), photos.length - 1))
+  }
+
+  const activePhoto = Array.isArray(photos) && photos.length > 0 ? photos[currentIndex] : null
+  const activeBlobId = activePhoto?.blob_id ?? blobId
 
   return (
     <Modal
-      title={title || 'Photo'}
+      title={title || activePhoto?.caption || 'Photo'}
       onClose={onClose}
+      zIndex="z-[90]"
       footer={
         <div className="flex gap-2">
           <SecondaryButton onClick={onClose} className="flex-1">
             Close
           </SecondaryButton>
-          <SecondaryButton onClick={() => openBlobInNewTab(blobId)} className="flex-1">
+          <SecondaryButton onClick={() => openBlobInNewTab(activeBlobId)} className="flex-1">
             Open Fullscreen
           </SecondaryButton>
         </div>
       }
     >
-      {url ? (
-        <div className="max-h-[70vh] overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-2" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-x pan-y' }}>
+      {Array.isArray(photos) && photos.length > 0 ? (
+        <div className="space-y-2">
+          <div
+            ref={trackRef}
+            onScroll={handleScroll}
+            className="flex overflow-x-auto snap-x snap-mandatory gap-2"
+            style={{ WebkitOverflowScrolling: 'touch' }}
+          >
+            {photos.map((photo, index) => {
+              const preview = photoUrls[photo.blob_id]
+              const zoomed = zoomedIndex === index
+              return (
+                <div key={photo.id ?? photo.blob_id ?? index} className="min-w-full snap-center">
+                  <div
+                    className="max-h-[70vh] overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-2"
+                    style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-x pan-y pinch-zoom' }}
+                    onClick={() => setZoomedIndex((prev) => (prev === index ? null : index))}
+                  >
+                    {preview ? (
+                      <img
+                        src={preview}
+                        alt={photo.caption || 'Photo'}
+                        className="rounded-xl bg-white"
+                        style={{ width: zoomed ? '180%' : '100%', height: 'auto' }}
+                      />
+                    ) : (
+                      <div className="bg-gray-100 rounded-xl p-6 text-center text-gray-600">Loading preview...</div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <div className="flex items-center justify-between text-xs text-gray-500">
+            <span>Swipe left/right to view more photos.</span>
+            <span>
+              {currentIndex + 1} / {photos.length}
+            </span>
+          </div>
+        </div>
+      ) : url ? (
+        <div className="max-h-[70vh] overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-2" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-x pan-y pinch-zoom' }}>
           <img src={url} alt={title || 'Photo'} className="w-full h-auto rounded-xl bg-white" />
         </div>
       ) : (
-        <div className="bg-gray-100 rounded-xl p-6 text-center text-gray-600">Loading preview…</div>
+        <div className="bg-gray-100 rounded-xl p-6 text-center text-gray-600">Loading preview...</div>
       )}
-      <p className="text-xs text-gray-500 mt-2">Pinch to zoom on mobile, or use the Open Fullscreen button.</p>
+      <p className="text-xs text-gray-500 mt-2">Tap a photo to zoom in/out. Open Fullscreen for native zoom.</p>
     </Modal>
   )
 }
@@ -11700,7 +11974,7 @@ function CommunityContactsModal({
                   onChange={(e) =>
                     setDraft((d) => ({
                       ...d,
-                      builders: (d.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: e.target.value } : x)),
+                      builders: (d.builders ?? []).map((x) => (x.id === b.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                     }))
                   }
                   className="w-full px-3 py-2 border rounded-xl"
@@ -11897,7 +12171,7 @@ function CommunityContactsModal({
                   onChange={(e) =>
                     setDraft((d) => ({
                       ...d,
-                      realtors: (d.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: e.target.value } : x)),
+                      realtors: (d.realtors ?? []).map((x) => (x.id === r.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                     }))
                   }
                   className="w-full px-3 py-2 border rounded-xl"
@@ -11959,7 +12233,7 @@ function CommunityContactsModal({
                   onChange={(e) =>
                     setDraft((d) => ({
                       ...d,
-                      inspectors: (d.inspectors ?? []).map((x) => (x.id === i.id ? { ...x, phone: e.target.value } : x)),
+                      inspectors: (d.inspectors ?? []).map((x) => (x.id === i.id ? { ...x, phone: formatPhoneInput(e.target.value) } : x)),
                     }))
                   }
                   className="w-full px-3 py-2 border rounded-xl"
@@ -12228,7 +12502,297 @@ function SubContactModal({ sub, onClose }) {
   )
 }
 
-function PunchListModal({ lot, subcontractors, onClose, onUpdate, onAddPunchPhoto, onMessageSub, onNotifyAssignment }) {
+function SubEditModal({ sub, tradeOptions, onClose, onSave }) {
+  const [draft, setDraft] = useState(() => ({
+    company_name: sub?.company_name ?? '',
+    contact_name: sub?.primary_contact?.name ?? '',
+    contact_phone: sub?.primary_contact?.phone ?? sub?.office_phone ?? '',
+    contact_email: sub?.primary_contact?.email ?? sub?.email ?? '',
+    trade: sub?.trade ?? 'other',
+    additional_contacts: Array.isArray(sub?.additional_contacts) ? sub.additional_contacts : [],
+  }))
+
+  return (
+    <Modal
+      title="Edit Sub Contact"
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose} className="flex-1">
+            Cancel
+          </SecondaryButton>
+          <PrimaryButton
+            onClick={() =>
+              onSave({
+                ...sub,
+                company_name: draft.company_name.trim() || sub?.company_name || '',
+                trade: draft.trade || sub?.trade || 'other',
+                primary_contact: {
+                  ...(sub?.primary_contact ?? {}),
+                  name: draft.contact_name.trim(),
+                  phone: draft.contact_phone.trim(),
+                  email: draft.contact_email.trim(),
+                },
+                additional_contacts: (draft.additional_contacts ?? [])
+                  .map((c) => ({
+                    ...c,
+                    name: String(c.name ?? '').trim(),
+                    phone: String(c.phone ?? '').trim(),
+                    email: String(c.email ?? '').trim(),
+                  }))
+                  .filter((c) => c.name || c.phone || c.email),
+              })
+            }
+            className="flex-1"
+          >
+            Save
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <label className="block">
+          <span className="text-xs text-gray-500">Company</span>
+          <input
+            value={draft.company_name}
+            onChange={(e) => setDraft((prev) => ({ ...prev, company_name: e.target.value }))}
+            className="mt-1 w-full px-3 py-2 border rounded-xl"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-gray-500">Contact Name</span>
+          <input
+            value={draft.contact_name}
+            onChange={(e) => setDraft((prev) => ({ ...prev, contact_name: e.target.value }))}
+            className="mt-1 w-full px-3 py-2 border rounded-xl"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-gray-500">Trade</span>
+          <select
+            value={draft.trade}
+            onChange={(e) => setDraft((prev) => ({ ...prev, trade: e.target.value }))}
+            className="mt-1 w-full px-3 py-2 border rounded-xl"
+          >
+            {(tradeOptions ?? TRADES).map((trade) => (
+              <option key={trade.id} value={trade.id}>
+                {trade.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-xs text-gray-500">Phone</span>
+          <input
+            value={draft.contact_phone}
+            onChange={(e) => setDraft((prev) => ({ ...prev, contact_phone: formatPhoneInput(e.target.value) }))}
+            className="mt-1 w-full px-3 py-2 border rounded-xl"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-gray-500">Email</span>
+          <input
+            type="email"
+            value={draft.contact_email}
+            onChange={(e) => setDraft((prev) => ({ ...prev, contact_email: e.target.value }))}
+            className="mt-1 w-full px-3 py-2 border rounded-xl"
+          />
+        </label>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">Additional Contacts</span>
+            <button
+              type="button"
+              onClick={() =>
+                setDraft((prev) => ({
+                  ...prev,
+                  additional_contacts: [
+                    ...(prev.additional_contacts ?? []),
+                    { id: uuid(), name: '', phone: '', email: '' },
+                  ],
+                }))
+              }
+              className="text-xs font-semibold text-blue-600"
+            >
+              + Add Contact
+            </button>
+          </div>
+          {(draft.additional_contacts ?? []).length === 0 ? (
+            <p className="text-xs text-gray-500">No additional contacts yet.</p>
+          ) : null}
+          <div className="space-y-2">
+            {(draft.additional_contacts ?? []).map((contact) => (
+              <div key={contact.id} className="border border-gray-200 rounded-xl p-2 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">Contact</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        additional_contacts: (prev.additional_contacts ?? []).filter((c) => c.id !== contact.id),
+                      }))
+                    }
+                    className="text-xs text-red-600"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <input
+                  value={contact.name ?? ''}
+                  onChange={(e) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      additional_contacts: (prev.additional_contacts ?? []).map((c) => (c.id === contact.id ? { ...c, name: e.target.value } : c)),
+                    }))
+                  }
+                  className="w-full px-3 py-2 border rounded-xl text-sm"
+                  placeholder="Name"
+                />
+                <input
+                  value={contact.phone ?? ''}
+                  onChange={(e) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      additional_contacts: (prev.additional_contacts ?? []).map((c) =>
+                        c.id === contact.id ? { ...c, phone: formatPhoneInput(e.target.value) } : c,
+                      ),
+                    }))
+                  }
+                  className="w-full px-3 py-2 border rounded-xl text-sm"
+                  placeholder="Phone"
+                />
+                <input
+                  type="email"
+                  value={contact.email ?? ''}
+                  onChange={(e) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      additional_contacts: (prev.additional_contacts ?? []).map((c) => (c.id === contact.id ? { ...c, email: e.target.value } : c)),
+                    }))
+                  }
+                  className="w-full px-3 py-2 border rounded-xl text-sm"
+                  placeholder="Email"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+
+const PUNCH_CATEGORY_DEFS = [
+  { id: 'foundation', label: 'Foundation' },
+  { id: 'interior', label: 'Interior Task' },
+  { id: 'exterior', label: 'Exterior Task' },
+  { id: 'final', label: 'Final' },
+  { id: 'misc', label: 'Misc' },
+]
+// Punch photo uploads are intentionally disabled for now (kept for future enablement).
+const ENABLE_PUNCH_PHOTOS = false
+
+const normalizeTaskCategoryId = (task) => {
+  const raw = task?.category ?? task?.category_id ?? task?.track ?? task?.phase ?? ''
+  const value = String(raw ?? '').toLowerCase()
+  if (value === 'foundation') return 'foundation'
+  if (value === 'interior') return 'interior'
+  if (value === 'exterior') return 'exterior'
+  if (value === 'final') return 'final'
+  if (value === 'misc') return 'misc'
+  if (value.includes('foundation')) return 'foundation'
+  if (value.includes('interior')) return 'interior'
+  if (value.includes('exterior')) return 'exterior'
+  if (value.includes('final')) return 'final'
+  if (value.includes('misc')) return 'misc'
+  return null
+}
+
+const normalizePunchCategoryId = (value) => {
+  const v = String(value ?? '').toLowerCase()
+  if (v.includes('foundation')) return 'foundation'
+  if (v.includes('interior')) return 'interior'
+  if (v.includes('exterior')) return 'exterior'
+  if (v.includes('final')) return 'final'
+  if (v.includes('misc')) return 'misc'
+  return 'misc'
+}
+
+const punchCategoryLabelForItem = (item) => {
+  const raw = item?.category ?? ''
+  const id = normalizePunchCategoryId(raw)
+  return PUNCH_CATEGORY_DEFS.find((c) => c.id === id)?.label ?? 'Misc'
+}
+
+const punchTaskTypeForItem = (item) => {
+  const raw = item?.task_type || item?.subcategory || item?.trade || ''
+  const value = String(raw ?? '').trim()
+  return value || 'Custom'
+}
+
+const buildPunchTaskTypeOptionsByCategory = (tasks) => {
+  const map = Object.fromEntries(PUNCH_CATEGORY_DEFS.map((c) => [c.id, new Set()]))
+  const addAll = (categoryId, items) => {
+    if (!map[categoryId] || !Array.isArray(items)) return
+    items.forEach((item) => map[categoryId].add(item))
+  }
+  const exteriorItems = PUNCH_CATEGORIES.find((c) => c.id === 'exterior')?.items ?? []
+  const interiorItems = [
+    ...(PUNCH_CATEGORIES.find((c) => c.id === 'interior')?.items ?? []),
+    ...(PUNCH_CATEGORIES.find((c) => c.id === 'mechanical')?.items ?? []),
+    ...(PUNCH_CATEGORIES.find((c) => c.id === 'doors_windows')?.items ?? []),
+  ]
+  const finalItems = PUNCH_CATEGORIES.find((c) => c.id === 'final')?.items ?? []
+  addAll('exterior', exteriorItems)
+  addAll('interior', interiorItems)
+  addAll('final', finalItems)
+
+  ;(tasks ?? []).forEach((task) => {
+    const categoryId = normalizeTaskCategoryId(task)
+    if (!categoryId || !task?.name) return
+    if (!map[categoryId]) map[categoryId] = new Set()
+    map[categoryId].add(task.name)
+  })
+
+  const result = {}
+  for (const category of PUNCH_CATEGORY_DEFS) {
+    const options = Array.from(map[category.id] ?? []).filter(Boolean)
+    options.sort((a, b) => a.localeCompare(b))
+    const customIndex = options.findIndex((opt) => String(opt).toLowerCase() === 'custom')
+    if (customIndex >= 0) options.splice(customIndex, 1)
+    options.push('Custom')
+    result[category.id] = options
+  }
+  return result
+}
+
+const punchTaskTypeToTrade = (taskType) => {
+  const value = String(taskType ?? '').toLowerCase()
+  if (!value || value === 'custom') return null
+  if (value.includes('concrete') || value.includes('flatwork')) return 'concrete'
+  if (value.includes('drywall')) return 'drywall'
+  if (value.includes('elect')) return 'electrical'
+  if (value.includes('floor')) return 'flooring'
+  if (value.includes('hvac')) return 'hvac'
+  if (value.includes('paint') || value.includes('stain')) return 'paint'
+  if (value.includes('plumb')) return 'plumbing'
+  if (value.includes('roof') || value.includes('gutter')) return 'roofing'
+  if (value.includes('siding') || value.includes('soffit')) return 'siding'
+  if (value.includes('landscape')) return 'landscaping'
+  if (value.includes('garage')) return 'garage_door'
+  if (value.includes('window') || value.includes('door')) return 'windows'
+  if (value.includes('counter')) return 'countertops'
+  if (value.includes('cabinet')) return 'cabinets'
+  if (value.includes('trim')) return 'trim'
+  if (value.includes('insulation')) return 'insulation'
+  if (value.includes('appliance')) return 'appliances'
+  if (value.includes('clean')) return 'cleaning'
+  return 'other'
+}
+
+function PunchListModal({ lot, community, subcontractors, onClose, onUpdate, onAddPunchPhoto, onNotifyAssignment, onPreviewPhoto }) {
   const punch = lot.punch_list ?? null
   const [draftPunchId] = useState(() => uuid())
   const [draftCreatedAt] = useState(() => new Date().toISOString())
@@ -12238,175 +12802,28 @@ function PunchListModal({ lot, subcontractors, onClose, onUpdate, onAddPunchPhot
   const done = items.filter((i) => i.status === 'closed' || i.status === 'verified').length
   const total = items.length
 
-  const [filterCategory, setFilterCategory] = useState('all')
-  const [filterTrade, setFilterTrade] = useState('all')
-  const [filterSub, setFilterSub] = useState('all')
-  const [filterStatus, setFilterStatus] = useState('all')
-  const [messageExpanded, setMessageExpanded] = useState(() => new Set())
-  const [expandedCategories, setExpandedCategories] = useState(() => new Set())
-  const [draftsByGroup, setDraftsByGroup] = useState({})
-  const [subMessageExpanded, setSubMessageExpanded] = useState(() => new Set())
-  const punchPhotoInputRefs = useRef(new Map())
+  const [expandedCategories, setExpandedCategories] = useState(() => new Set(PUNCH_CATEGORY_DEFS.map((c) => c.id)))
+  const [showAdd, setShowAdd] = useState(false)
+  const [addCategoryId, setAddCategoryId] = useState(PUNCH_CATEGORY_DEFS[0]?.id ?? 'foundation')
+  const [showSend, setShowSend] = useState(false)
+  const [draftModal, setDraftModal] = useState(null)
+  const [editingItem, setEditingItem] = useState(null)
 
   const subsOnLot = (() => {
     const ids = new Set((lot.tasks ?? []).map((t) => t.sub_id).filter(Boolean))
     return subcontractors.filter((s) => ids.has(s.id))
   })()
   const availableSubs = subsOnLot.length > 0 ? subsOnLot : subcontractors
-  const subsForTrade = (trade) => availableSubs.filter((s) => s.trade === trade || (s.secondary_trades ?? []).includes(trade))
-  const subsForSubcategory = (subcategory) => {
-    if (!subcategory) return availableSubs
-    const trade = categoryToTrade(subcategoryToCategoryLabel(subcategory))
-    if (!trade || trade === 'other') return availableSubs
-    const subs = subsForTrade(trade)
-    return subs.length > 0 ? subs : availableSubs
-  }
-  const subsForFilter = filterTrade === 'all' ? availableSubs : subsForTrade(filterTrade)
 
-  useEffect(() => {
-    if (filterSub === 'all') return
-    if (!subsForFilter.some((s) => s.id === filterSub)) setFilterSub('all')
-  }, [filterSub, subsForFilter])
+  const taskTypeOptionsByCategory = useMemo(() => buildPunchTaskTypeOptionsByCategory(lot.tasks), [lot.tasks])
 
-  const allSubcategories = PUNCH_CATEGORIES.flatMap((c) => c.items.map((item) => ({ category: c.label, subcategory: item })))
-  const getCategoryForSubcategory = (subcat) => allSubcategories.find((x) => x.subcategory === subcat)?.category ?? 'Interior'
-  const punchCategoryOptions = TASK_CATEGORIES.map((c) => c.label)
-  const subcategoryToCategoryLabel = (subcat) => {
-    const value = String(subcat ?? '').toLowerCase()
-    if (value.includes('plumb')) return 'Plumbing'
-    if (value.includes('elect')) return 'Electrical'
-    if (value.includes('hvac')) return 'HVAC'
-    if (value.includes('appliance')) return 'Appliances'
-    if (value.includes('door')) return 'Doors'
-    if (value.includes('window')) return 'Doors'
-    if (value.includes('paint')) return 'Paint'
-    if (value.includes('siding')) return 'Siding'
-    if (value.includes('concrete') || value.includes('flatwork')) return 'Concrete'
-    if (value.includes('landscape')) return 'Landscaping'
-    if (value.includes('floor')) return 'Flooring'
-    if (value.includes('trim')) return 'Trim'
-    if (value.includes('cabinet') || value.includes('counter')) return 'Cabinets'
-    if (value.includes('drywall')) return 'Drywall'
-    return getCategoryForSubcategory(subcat)
-  }
-  const categoryToTrade = (categoryLabel) => {
-    const value = String(categoryLabel ?? '').toLowerCase()
-    if (value.includes('plumb')) return 'plumbing'
-    if (value.includes('elect')) return 'electrical'
-    if (value.includes('hvac')) return 'hvac'
-    if (value.includes('appliance')) return 'appliances'
-    if (value.includes('door') || value.includes('window')) return 'windows'
-    if (value.includes('paint')) return 'paint'
-    if (value.includes('siding')) return 'siding'
-    if (value.includes('concrete') || value.includes('flatwork')) return 'concrete'
-    if (value.includes('landscape')) return 'landscaping'
-    if (value.includes('floor')) return 'flooring'
-    if (value.includes('trim')) return 'trim'
-    if (value.includes('cabinet') || value.includes('counter')) return 'cabinets'
-    if (value.includes('drywall')) return 'drywall'
-    return 'other'
-  }
-  const tradeToCategoryLabel = (trade) => {
-    const value = String(trade ?? '').toLowerCase()
-    if (value === 'plumbing') return 'Plumbing'
-    if (value === 'electrical') return 'Electrical'
-    if (value === 'hvac') return 'HVAC'
-    if (value === 'appliances') return 'Appliances'
-    if (value === 'windows') return 'Doors'
-    if (value === 'paint') return 'Paint'
-    if (value === 'siding') return 'Siding'
-    if (value === 'concrete') return 'Concrete'
-    if (value === 'landscaping') return 'Landscaping'
-    if (value === 'flooring') return 'Flooring'
-    if (value === 'trim') return 'Trim'
-    if (value === 'cabinets') return 'Cabinets'
-    if (value === 'drywall') return 'Drywall'
-    return 'Other'
-  }
-  const normalizeCategory = (item) =>
-    item.category || subcategoryToCategoryLabel(item.subcategory) || tradeToCategoryLabel(item.trade) || 'Other'
-  const normalizeTrade = (item) => item.trade || categoryToTrade(normalizeCategory(item)) || 'other'
-
-  const visible = items.filter((i) => {
-    const category = normalizeCategory(i)
-    if (filterCategory !== 'all' && category !== filterCategory) return false
-    if (filterTrade !== 'all' && normalizeTrade(i) !== filterTrade) return false
-    if (filterSub !== 'all' && i.sub_id !== filterSub) return false
-    if (filterStatus === 'open' && (i.status === 'closed' || i.status === 'verified')) return false
-    if (filterStatus === 'closed' && i.status !== 'closed' && i.status !== 'verified') return false
-    return true
-  })
-
-  const categories = Array.from(new Set(visible.map((i) => normalizeCategory(i)))).filter(Boolean)
-  const subMessageGroups = Array.from(
-    (items ?? []).reduce((map, item) => {
-      if (!item.sub_id) return map
-      if (!map.has(item.sub_id)) map.set(item.sub_id, [])
-      map.get(item.sub_id).push(item)
-      return map
-    }, new Map()),
-  ).map(([subId, subItems]) => ({
-    sub: subcontractors.find((s) => s.id === subId) ?? null,
-    items: subItems,
-  }))
-
-  useEffect(() => {
-    if (expandedCategories.size === 0 && categories.length > 0) setExpandedCategories(new Set(categories))
-  }, [categories, expandedCategories.size])
-
-  const grouped = (itemsForCategory) => {
-    const map = new Map()
-    for (const item of itemsForCategory) {
-      const trade = normalizeTrade(item)
-      const subKey = item.sub_id ?? 'unassigned'
-      const key = `${trade}::${subKey}`
-      if (!map.has(key)) {
-        map.set(key, { trade, sub_id: item.sub_id ?? null, items: [] })
-      }
-      map.get(key).items.push(item)
-    }
-    const tradeOrder = TRADES.map((t) => t.id)
-    return Array.from(map.values()).sort((a, b) => tradeOrder.indexOf(a.trade) - tradeOrder.indexOf(b.trade))
-  }
-
-  const buildPunchDraft = ({ sub, items: groupItems }) => {
-    const header = `Punch list - ${lotCode(lot)}`
-    const byCategory = new Map()
-    for (const item of groupItems) {
-      const cat = normalizeCategory(item)
-      if (!byCategory.has(cat)) byCategory.set(cat, [])
-      byCategory.get(cat).push(item)
-    }
-    const blocks = []
-    for (const [cat, itemsForCat] of byCategory.entries()) {
-      blocks.push(`${cat}:`)
-      for (const i of itemsForCat) {
-        const label = i.subcategory || normalizeCategory(i) || 'Item'
-        const notes = i.description ? ` — ${i.description}` : ''
-        const loc = i.location ? ` (${i.location})` : ''
-        const photoTag = i.photo_id ? ' [photo attached]' : ''
-        blocks.push(`• ${label}${notes}${loc}${photoTag}`)
-      }
-      blocks.push('')
-    }
-    const body = `${header}\n${blocks.join('\n')}`.trim()
-    return { subject: `Punch list - ${lotCode(lot)}`, body }
-  }
-
-  const openSmsWithDraft = (sub, draft) => {
-    if (!sub) return
-    const base = buildSmsLink(sub?.phone)
-    if (!base) return
-    const href = `${base}${base.includes('?') ? '&' : '?'}body=${encodeURIComponent(draft.body)}`
-    openExternalLink(href)
-  }
-
-  const openEmailWithDraft = (sub, draft) => {
-    if (!sub) return
-    const base = buildMailtoLink(sub?.email)
-    if (!base) return
-    const href = `${base}?subject=${encodeURIComponent(draft.subject)}&body=${encodeURIComponent(draft.body)}`
-    openExternalLink(href)
+  const toggleCategory = (categoryId) => {
+    setExpandedCategories((prev) => {
+      const next = new Set(prev)
+      if (next.has(categoryId)) next.delete(categoryId)
+      else next.add(categoryId)
+      return next
+    })
   }
 
   const updateItem = (itemId, patch) => {
@@ -12416,140 +12833,661 @@ function PunchListModal({ lot, subcontractors, onClose, onUpdate, onAddPunchPhot
     })
   }
 
-  const openPunchPhoto = (photoId) => {
-    if (!photoId) return
-    const photo = (lot.photos ?? []).find((p) => p.id === photoId)
+  const removeItem = (itemId) => {
+    onUpdate({
+      ...basePunch,
+      items: items.filter((x) => x.id !== itemId),
+    })
+  }
+
+  const openPunchPhoto = (photoOrId, photosForItem = null) => {
+    if (!photoOrId && (!photosForItem || photosForItem.length === 0)) return
+    const photo =
+      typeof photoOrId === 'string'
+        ? (lot.photos ?? []).find((p) => p.id === photoOrId)
+        : photoOrId
     if (!photo?.blob_id) {
       alert('Photo not found yet. Please try again in a moment.')
+      return
+    }
+    if (onPreviewPhoto) {
+      if (Array.isArray(photosForItem) && photosForItem.length > 0) {
+        const startIndex = Math.max(0, photosForItem.findIndex((p) => p.id === photo.id))
+        onPreviewPhoto({ photos: photosForItem, startIndex, title: photo.caption || photo.location || 'Photos' })
+      } else {
+        onPreviewPhoto(photo)
+      }
       return
     }
     openBlobInNewTab(photo.blob_id)
   }
 
-  const handlePunchPhotoUpload = async (item, file) => {
-    if (!file || !item?.id || !onAddPunchPhoto) return
+  const getItemPhotoIds = (item) => {
+    const ids = []
+    if (Array.isArray(item.photo_ids)) ids.push(...item.photo_ids)
+    if (item.photo_id) ids.push(item.photo_id)
+    return Array.from(new Set(ids.filter(Boolean)))
+  }
+
+  const getItemPhotos = (item) => {
+    const ids = getItemPhotoIds(item)
+    return ids.map((id) => (lot.photos ?? []).find((p) => p.id === id)).filter(Boolean)
+  }
+
+  const handlePunchPhotoUpload = async (itemId, file, caption) => {
+    if (!file || !itemId || !onAddPunchPhoto) return null
     const photoId = await onAddPunchPhoto({
-      punchItemId: item.id,
+      punchItemId: itemId,
       file,
-      caption: item.description || item.subcategory || 'Punch item',
+      caption,
     })
-    if (photoId) updateItem(item.id, { photo_id: photoId })
+    if (photoId) {
+      const item = items.find((x) => x.id === itemId)
+      const existing = item ? getItemPhotoIds(item) : []
+      updateItem(itemId, { photo_id: photoId, photo_ids: Array.from(new Set([...existing, photoId])) })
+    }
+    return photoId
   }
 
-  const updateDraft = (key, defaults, patch) => {
-    setDraftsByGroup((prev) => ({
-      ...prev,
-      [key]: { ...defaults, ...(prev[key] ?? {}), ...patch },
-    }))
-  }
-
-  const addItemFromDraft = async (key, draft) => {
-    if (!draft.notes?.trim()) return
+  const handleCreateItem = async ({ categoryId, taskType, subId, description, photoFiles, keepOpen }) => {
+    if (!description?.trim()) return
     const now = new Date().toISOString()
-    const resolvedCategory = draft.category ?? ''
-    const resolvedTrade = draft.trade ?? categoryToTrade(resolvedCategory || subcategoryToCategoryLabel(draft.subcategory))
+    const categoryLabel = PUNCH_CATEGORY_DEFS.find((c) => c.id === categoryId)?.label ?? 'Misc'
+    const trade = punchTaskTypeToTrade(taskType) ?? 'other'
     const newItem = {
       id: uuid(),
-      category: resolvedCategory || null,
-      subcategory: draft.subcategory ?? '',
-      location: draft.location ?? '',
-      description: draft.notes ?? '',
+      category: categoryLabel,
+      task_type: taskType,
+      subcategory: taskType,
+      description: description.trim(),
       photo_id: null,
-      priority: 'standard',
-      trade: resolvedTrade,
-      sub_id: draft.sub_id || null,
-      source: 'super',
+      photo_ids: [],
+      trade,
+      sub_id: subId || null,
       status: 'open',
       created_at: now,
       updated_at: now,
+      completed_at: null,
+      source: 'super',
     }
-    onUpdate({ ...basePunch, items: [...items, newItem] })
+    const nextItems = [...items, newItem]
+    onUpdate({ ...basePunch, items: nextItems })
     if (newItem.sub_id) onNotifyAssignment?.(newItem)
-    setDraftsByGroup((prev) => ({ ...prev, [key]: { ...draft, notes: '', location: '' } }))
+
+    if (ENABLE_PUNCH_PHOTOS && Array.isArray(photoFiles) && photoFiles.length > 0) {
+      for (const file of photoFiles) {
+        await handlePunchPhotoUpload(newItem.id, file, newItem.description || newItem.task_type || 'Punch item')
+      }
+    }
+
+    if (!keepOpen) setShowAdd(false)
   }
 
-  const renderAddRow = ({ trade, sub_id, groupKey, category: categoryLabel }) => {
-    const subs = subsForSubcategory(allSubcategories[0]?.subcategory ?? '') ?? subsForTrade(trade)
-    const defaultSub = subs.find((s) => s.id === sub_id) ? sub_id : ''
-    const defaultSubcategory = allSubcategories[0]?.subcategory ?? ''
-    const defaultCategory =
-      categoryLabel || TASK_CATEGORIES.find((c) => c.id === 'interior')?.label || punchCategoryOptions[0] || 'Interior Track'
-    const defaults = {
-      category: defaultCategory,
-      subcategory: defaultSubcategory,
-      trade: trade || categoryToTrade(defaultCategory),
-      sub_id: defaultSub,
-      notes: '',
-      location: '',
+  const handleEditItem = async ({ itemId, categoryId, taskType, subId, description, photoFiles, photoIds }) => {
+    if (!description?.trim()) return
+    const categoryLabel = PUNCH_CATEGORY_DEFS.find((c) => c.id === categoryId)?.label ?? 'Misc'
+    const trade = punchTaskTypeToTrade(taskType) ?? 'other'
+    updateItem(itemId, {
+      category: categoryLabel,
+      task_type: taskType,
+      subcategory: taskType,
+      description: description.trim(),
+      trade,
+      sub_id: subId || null,
+      photo_ids: photoIds ?? getItemPhotoIds(items.find((x) => x.id === itemId) ?? {}),
+    })
+    if (ENABLE_PUNCH_PHOTOS && Array.isArray(photoFiles) && photoFiles.length > 0) {
+      for (const file of photoFiles) {
+        await handlePunchPhotoUpload(itemId, file, description.trim() || taskType || 'Punch item')
+      }
     }
-    const draft = { ...defaults, ...(draftsByGroup[groupKey] ?? {}) }
-    return (
-      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center bg-white border border-dashed border-gray-200 rounded-xl p-2">
-        <select
-          value={draft.category}
-          onChange={(e) => updateDraft(groupKey, defaults, { category: e.target.value })}
-          className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm"
-        >
-          {punchCategoryOptions.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-        </select>
-        <select
-          value={draft.subcategory}
-          onChange={(e) => {
-            const nextSub = e.target.value
-            updateDraft(groupKey, defaults, { subcategory: nextSub, trade: categoryToTrade(draft.category), sub_id: '' })
-          }}
-          className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm"
-        >
-          {allSubcategories.map((opt) => (
-            <option key={opt.subcategory} value={opt.subcategory}>
-              {opt.subcategory}
-            </option>
-          ))}
-        </select>
-        <select
-          value={draft.sub_id || ''}
-          onChange={(e) => updateDraft(groupKey, defaults, { sub_id: e.target.value })}
-          className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm"
-        >
-          <option value="">Assign sub…</option>
-          {(subsForSubcategory(draft.subcategory) ?? subs).map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.company_name}
-            </option>
-          ))}
-        </select>
-        <input
-          value={draft.notes}
-          onChange={(e) => updateDraft(groupKey, defaults, { notes: e.target.value })}
-          className="sm:col-span-4 px-2 py-2 border rounded-lg text-sm placeholder:text-gray-400"
-          placeholder="Description / notes"
-        />
-        <input
-          value={draft.location}
-          onChange={(e) => updateDraft(groupKey, defaults, { location: e.target.value })}
-          className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm placeholder:text-gray-400"
-          placeholder="Location"
-        />
-        <div className="sm:col-span-12 flex justify-end">
-          <button
-            type="button"
-            onClick={() => addItemFromDraft(groupKey, draft)}
-            className="px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold"
-          >
-            + Add Punch Item
-          </button>
+    setEditingItem(null)
+  }
+
+  const isComplete = (item) => item.status === 'closed' || item.status === 'verified'
+
+  const toggleComplete = (item) => {
+    const nextComplete = !isComplete(item)
+    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(10)
+    updateItem(item.id, {
+      status: nextComplete ? 'closed' : 'open',
+      completed_at: nextComplete ? new Date().toISOString() : null,
+    })
+  }
+
+  const buildDraft = (sub, groupItems) => {
+    const communityName = community?.name ?? ''
+    const lotLabel = lotCode(lot)
+    const locationLabel = communityName ? `${communityName}, ${lotLabel}` : lotLabel
+    const header = `Punch list - ${locationLabel}`
+    const bullets = groupItems.map((item) => {
+      const description = item.description ? item.description.trim() : ''
+      const photoTag = ENABLE_PUNCH_PHOTOS && getItemPhotoIds(item).length > 0 ? ' (photo attached)' : ''
+      return `- ${description || 'Punch item'}${photoTag}`
+    })
+    const body = `${header}\n\n${bullets.join('\n')}\n\nThanks!`
+    return {
+      subject: `Punch list - ${lotCode(lot)}`,
+      body,
+    }
+  }
+
+  const openDraftModal = (sub, groupItems, channel) => {
+    setShowSend(false)
+    setDraftModal({ sub, items: groupItems, channel })
+  }
+
+  const categoryItems = (categoryId) => {
+    const label = PUNCH_CATEGORY_DEFS.find((c) => c.id === categoryId)?.label ?? 'Misc'
+    const filtered = items.filter((i) => normalizePunchCategoryId(i.category) === categoryId || punchCategoryLabelForItem(i) === label)
+    return filtered.slice().sort((a, b) => {
+      const completeDiff = Number(isComplete(a)) - Number(isComplete(b))
+      if (completeDiff !== 0) return completeDiff
+      const aTime = new Date(a.created_at ?? 0).getTime()
+      const bTime = new Date(b.created_at ?? 0).getTime()
+      return aTime - bTime
+    })
+  }
+
+  return (
+    <>
+      <Modal
+        title="Punch List"
+        onClose={onClose}
+        footer={
+          <div className="flex gap-2">
+            <SecondaryButton onClick={onClose} className="flex-1">
+              Close
+            </SecondaryButton>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm text-gray-500">Lot</p>
+              <p className="text-lg font-semibold">{lotCode(lot)}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowSend(true)}
+              className="h-11 px-4 rounded-xl bg-blue-600 text-white text-sm font-semibold flex items-center gap-2"
+            >
+              <MessageSquare className="w-4 h-4" />
+              Send to Subs
+            </button>
+          </div>
+
+          <Card className="bg-gray-50">
+            <p className="text-sm font-semibold">
+              Progress: {total ? `${done}/${total} (${Math.round((done / total) * 100)}%)` : '--'}
+            </p>
+            <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div className="h-full bg-green-500" style={{ width: total ? `${(done / total) * 100}%` : '0%' }} />
+            </div>
+          </Card>
+
+          <div className="space-y-2">
+            {PUNCH_CATEGORY_DEFS.map((category) => {
+              const expanded = expandedCategories.has(category.id)
+              const list = categoryItems(category.id)
+              const count = list.length
+              const remaining = list.filter((item) => !isComplete(item)).length
+              const allComplete = count > 0 && remaining === 0
+              return (
+                <div key={category.id} className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <button
+                    type="button"
+                    className="w-full flex items-center justify-between px-4 py-3 bg-white"
+                    onClick={() => toggleCategory(category.id)}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold">{category.label}</span>
+                      <span className="text-xs text-gray-500">({count})</span>
+                      {count === 0 ? null : allComplete ? (
+                        <span className="text-[11px] font-semibold text-green-700 bg-green-100 border border-green-200 rounded-full px-2 py-0.5">
+                          Completed
+                        </span>
+                      ) : (
+                        <span className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">
+                          Incomplete Items ({remaining})
+                        </span>
+                      )}
+                    </div>
+                    <ChevronRight className={`w-4 h-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                  </button>
+
+                  {expanded ? (
+                    <div className="bg-gray-50 border-t border-gray-200 px-3 py-3 space-y-2">
+                      {list.length === 0 ? (
+                        <p className="text-sm text-gray-500 px-2">No punch items yet.</p>
+                      ) : null}
+
+                      {list.map((item) => {
+                        const complete = isComplete(item)
+                        const sub = subcontractors.find((s) => s.id === item.sub_id) ?? null
+                        return (
+                          <div
+                            key={item.id}
+                            className={`rounded-2xl border px-3 py-3 bg-white ${complete ? 'opacity-70' : ''}`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <button
+                                type="button"
+                                onClick={() => toggleComplete(item)}
+                                className={`w-6 h-6 rounded-full border flex items-center justify-center mt-1 ${
+                                  complete ? 'bg-green-600 border-green-600 text-white' : 'border-gray-300'
+                                }`}
+                                aria-label="Toggle complete"
+                              >
+                                {complete ? <Check className="w-4 h-4" /> : null}
+                              </button>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="font-semibold text-sm truncate">{punchTaskTypeForItem(item)}</p>
+                                  {ENABLE_PUNCH_PHOTOS && getItemPhotoIds(item).length > 0 ? (
+                                    <button
+                                      type="button"
+                                      className="text-xs text-blue-600 font-semibold"
+                                      onClick={() => {
+                                        const photos = getItemPhotos(item)
+                                        if (photos.length === 0) {
+                                          alert('Photo not found yet. Please try again in a moment.')
+                                          return
+                                        }
+                                        openPunchPhoto(photos[0], photos)
+                                      }}
+                                    >
+                                      View photos ({getItemPhotoIds(item).length})
+                                    </button>
+                                  ) : null}
+                                </div>
+                                <p className="text-xs text-gray-600 truncate">{sub?.company_name ?? 'Unassigned'}</p>
+                                <p className="text-sm text-gray-700 mt-1 truncate">{item.description}</p>
+                                {ENABLE_PUNCH_PHOTOS && getItemPhotoIds(item).length > 0 ? (
+                                  <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                                    {getItemPhotos(item).map((photo) => (
+                                      <button
+                                        key={photo.id}
+                                        type="button"
+                                        className="w-16 h-16 rounded-xl border overflow-hidden flex-shrink-0"
+                                        onClick={() => openPunchPhoto(photo, getItemPhotos(item))}
+                                      >
+                                        <PhotoThumb blobId={photo.blob_id} alt={photo.caption ?? 'Punch photo'} />
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  className="text-xs text-blue-600 font-semibold"
+                                  onClick={() => setEditingItem(item)}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="text-gray-400 hover:text-red-500"
+                                  onClick={() => removeItem(item.id)}
+                                  aria-label="Delete punch item"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAddCategoryId(category.id)
+                          setShowAdd(true)
+                        }}
+                        className="w-full mt-1 h-11 rounded-xl border border-dashed border-gray-300 text-sm font-semibold text-gray-700"
+                      >
+                        + Add Punch Item
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              )
+            })}
+          </div>
         </div>
-      </div>
-    )
+      </Modal>
+
+      {showAdd ? (
+        <AddPunchItemModal
+          open={showAdd}
+          categoryId={addCategoryId}
+          categories={PUNCH_CATEGORY_DEFS}
+          taskTypeOptionsByCategory={taskTypeOptionsByCategory}
+          subcontractors={availableSubs}
+          lotPhotos={lot.photos ?? []}
+          onClose={() => setShowAdd(false)}
+          onSave={handleCreateItem}
+        />
+      ) : null}
+
+      {editingItem ? (
+        <AddPunchItemModal
+          mode="edit"
+          open={Boolean(editingItem)}
+          categoryId={normalizePunchCategoryId(editingItem.category)}
+          categories={PUNCH_CATEGORY_DEFS}
+          taskTypeOptionsByCategory={taskTypeOptionsByCategory}
+          subcontractors={availableSubs}
+          lotPhotos={lot.photos ?? []}
+          initialItem={editingItem}
+          onClose={() => setEditingItem(null)}
+          onSave={handleEditItem}
+        />
+      ) : null}
+
+      {showSend ? (
+        <SendToSubsModal
+          open={showSend}
+          lot={lot}
+          items={items}
+          subcontractors={subcontractors}
+          onClose={() => setShowSend(false)}
+          onDraft={openDraftModal}
+        />
+      ) : null}
+
+      {draftModal ? (
+        <MessageDraftModal
+          open={Boolean(draftModal)}
+          lot={lot}
+          draft={draftModal}
+          onClose={() => setDraftModal(null)}
+          buildDraft={buildDraft}
+        />
+      ) : null}
+    </>
+  )
+}
+
+function AddPunchItemModal({
+  open,
+  mode = 'create',
+  categoryId,
+  categories,
+  taskTypeOptionsByCategory,
+  subcontractors,
+  lotPhotos,
+  initialItem,
+  onClose,
+  onSave,
+}) {
+  const [selectedCategory, setSelectedCategory] = useState(categoryId)
+  const [taskType, setTaskType] = useState('Custom')
+  const [subId, setSubId] = useState('')
+  const [description, setDescription] = useState('')
+  const [photoFiles, setPhotoFiles] = useState([])
+  const [photoPreviews, setPhotoPreviews] = useState([])
+  const [existingPhotoIds, setExistingPhotoIds] = useState([])
+
+  const taskTypeOptions = taskTypeOptionsByCategory[selectedCategory] ?? ['Custom']
+
+  useEffect(() => {
+    if (!open) return
+    setSelectedCategory(categoryId)
+    if (mode === 'edit' && initialItem) {
+      const initialType = punchTaskTypeForItem(initialItem)
+      const categoryFromItem = normalizePunchCategoryId(initialItem.category)
+      setSelectedCategory(categoryFromItem || categoryId)
+      setTaskType(initialType || 'Custom')
+      setSubId(initialItem.sub_id ?? '')
+      setDescription(initialItem.description ?? '')
+      const ids = []
+      if (Array.isArray(initialItem.photo_ids)) ids.push(...initialItem.photo_ids)
+      if (initialItem.photo_id) ids.push(initialItem.photo_id)
+      setExistingPhotoIds(Array.from(new Set(ids.filter(Boolean))))
+      setPhotoFiles([])
+      setPhotoPreviews([])
+      return
+    }
+    const fallbackType = taskTypeOptionsByCategory[categoryId]?.[0] ?? 'Custom'
+    setTaskType(fallbackType)
+    setSubId('')
+    setDescription('')
+    setExistingPhotoIds([])
+    setPhotoFiles([])
+    setPhotoPreviews([])
+  }, [open, categoryId, mode, initialItem, taskTypeOptionsByCategory])
+
+  useEffect(() => {
+    if (photoFiles.length === 0) {
+      setPhotoPreviews([])
+      return
+    }
+    const urls = photoFiles.map((file) => ({ file, url: URL.createObjectURL(file) }))
+    setPhotoPreviews(urls)
+    return () => {
+      urls.forEach((entry) => URL.revokeObjectURL(entry.url))
+    }
+  }, [photoFiles])
+
+  useEffect(() => {
+    if (!taskTypeOptions.includes(taskType)) {
+      setTaskType(taskTypeOptions[0] ?? 'Custom')
+    }
+  }, [taskTypeOptions, taskType])
+
+  const availableSubs = (() => {
+    const trade = punchTaskTypeToTrade(taskType)
+    const normalized = String(taskType ?? '').toLowerCase()
+    if (!trade || normalized === 'custom') return subcontractors
+    const filtered = subcontractors.filter((s) => s.trade === trade || (s.secondary_trades ?? []).includes(trade))
+    return filtered.length > 0 ? filtered : subcontractors
+  })()
+
+  const sortedSubs = availableSubs.slice().sort((a, b) => a.company_name.localeCompare(b.company_name))
+  useEffect(() => {
+    if (!subId) return
+    if (!sortedSubs.some((s) => s.id === subId)) {
+      setSubId('')
+    }
+  }, [subId, sortedSubs])
+
+  const handleFile = (event) => {
+    const files = Array.from(event.target.files ?? [])
+    if (files.length === 0) return
+    setPhotoFiles((prev) => [...prev, ...files])
+    event.target.value = ''
+  }
+
+  const removeNewPhoto = (index) => {
+    setPhotoFiles((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const removeExistingPhoto = (photoId) => {
+    setExistingPhotoIds((prev) => prev.filter((id) => id !== photoId))
+  }
+
+  const existingPhotos = (lotPhotos ?? []).filter((p) => existingPhotoIds.includes(p.id))
+
+  const handleSave = async ({ keepOpen }) => {
+    if (!description.trim()) {
+      alert('Please add a description before saving.')
+      return
+    }
+    await onSave({
+      itemId: initialItem?.id,
+      categoryId: selectedCategory,
+      taskType,
+      subId,
+      description,
+      photoFiles,
+      photoIds: existingPhotoIds,
+      keepOpen,
+    })
+    if (keepOpen) {
+      setTaskType(taskTypeOptions[0] ?? 'Custom')
+      setDescription('')
+      setSubId('')
+      setExistingPhotoIds([])
+      setPhotoFiles([])
+    }
   }
 
   return (
     <Modal
-      title="Punch List"
+      title={mode === 'edit' ? 'Edit Punch Item' : 'Add Punch Item'}
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose} className="flex-1">
+            Cancel
+          </SecondaryButton>
+          <PrimaryButton onClick={() => handleSave({ keepOpen: false })} className="flex-1">
+            {mode === 'edit' ? 'Save Changes' : 'Save Punch Item'}
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-500">Category</label>
+          <select
+            value={selectedCategory}
+            onChange={(e) => setSelectedCategory(e.target.value)}
+            className="px-3 py-3 border rounded-xl text-sm"
+          >
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-500">Task Type</label>
+          <select value={taskType} onChange={(e) => setTaskType(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
+            {taskTypeOptions.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-500">Subcontractor</label>
+          <select value={subId} onChange={(e) => setSubId(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
+            <option value="">Select sub...</option>
+            {sortedSubs.map((sub) => (
+              <option key={sub.id} value={sub.id}>
+                {sub.company_name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-500">Description</label>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            className="px-3 py-3 border rounded-xl text-sm min-h-[100px]"
+            placeholder="Describe the issue to fix..."
+          />
+        </div>
+
+        {ENABLE_PUNCH_PHOTOS ? (
+          <div className="grid gap-2">
+            <label className="text-xs text-gray-500">Photo</label>
+            <div className="flex items-center gap-2">
+              <label className="flex-1 h-11 border rounded-xl px-3 flex items-center justify-center gap-2 text-sm cursor-pointer">
+                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFile} />
+                <Camera className="w-4 h-4" />
+                Take photo
+              </label>
+              <label className="flex-1 h-11 border rounded-xl px-3 flex items-center justify-center gap-2 text-sm cursor-pointer">
+                <input type="file" accept="image/*" multiple className="hidden" onChange={handleFile} />
+                <Upload className="w-4 h-4" />
+                Upload photo
+              </label>
+            </div>
+            {existingPhotos.length > 0 ? (
+              <div className="grid grid-cols-3 gap-2">
+                {existingPhotos.map((photo) => (
+                  <button
+                    key={photo.id}
+                    type="button"
+                    className="relative border rounded-xl overflow-hidden"
+                    onClick={() => openBlobInNewTab(photo.blob_id)}
+                  >
+                    <PhotoThumb blobId={photo.blob_id} alt={photo.caption ?? 'Punch photo'} />
+                    <span
+                      role="button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        removeExistingPhoto(photo.id)
+                      }}
+                      className="absolute top-1 right-1 bg-white/90 text-gray-700 rounded-full w-5 h-5 text-xs flex items-center justify-center"
+                    >
+                      ×
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {photoPreviews.length > 0 ? (
+              <div className="grid grid-cols-3 gap-2">
+                {photoPreviews.map((preview, index) => (
+                  <div key={preview.url} className="relative border rounded-xl overflow-hidden">
+                    <img src={preview.url} alt="Preview" className="w-full h-24 object-cover" />
+                    <button
+                      type="button"
+                      onClick={() => removeNewPhoto(index)}
+                      className="absolute top-1 right-1 bg-white/90 text-gray-700 rounded-full w-5 h-5 text-xs flex items-center justify-center"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {mode !== 'edit' ? (
+          <button
+            type="button"
+            onClick={() => handleSave({ keepOpen: true })}
+            className="w-full text-sm font-semibold text-blue-600"
+          >
+            Save & Add Another
+          </button>
+        ) : null}
+      </div>
+    </Modal>
+  )
+}
+
+function SendToSubsModal({ open, lot, items, subcontractors, onClose, onDraft }) {
+  if (!open) return null
+  const groups = Array.from(
+    (items ?? []).reduce((map, item) => {
+      if (!item.sub_id) return map
+      if (item.status === 'closed' || item.status === 'verified') return map
+      if (!map.has(item.sub_id)) map.set(item.sub_id, [])
+      map.get(item.sub_id).push(item)
+      return map
+    }, new Map()),
+  ).map(([subId, subItems]) => ({
+    id: subId,
+    sub: subcontractors.find((s) => s.id === subId) ?? null,
+    items: subItems,
+  }))
+
+  return (
+    <Modal
+      title="Send to Subs"
       onClose={onClose}
       footer={
         <div className="flex gap-2">
@@ -12560,366 +13498,148 @@ function PunchListModal({ lot, subcontractors, onClose, onUpdate, onAddPunchPhot
       }
     >
       <div className="space-y-3">
-        {!punch ? (
-          <Card className="border-orange-200 bg-orange-50">
-            <p className="font-semibold text-orange-800">Punch list not generated yet</p>
-            <p className="text-sm text-orange-800 mt-1">You can start adding items manually below.</p>
+        <p className="text-sm text-gray-500">{lotCode(lot)} - {groups.length} sub(s)</p>
+        {groups.length === 0 ? (
+          <Card className="bg-gray-50">
+            <p className="text-sm text-gray-600">No open punch items to send.</p>
           </Card>
         ) : null}
-
-        <Card className="bg-gray-50">
-          <p className="text-sm font-semibold">Progress: {total ? `${done}/${total} (${Math.round((done / total) * 100)}%)` : '—'}</p>
-          <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
-            <div className="h-full bg-green-500" style={{ width: total ? `${(done / total) * 100}%` : '0%' }} />
-          </div>
-        </Card>
-
-        <div className="grid grid-cols-2 gap-2">
-          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
-            <option value="all">All Categories</option>
-            {Array.from(new Set(items.map((i) => normalizeCategory(i)))).map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          <select value={filterTrade} onChange={(e) => setFilterTrade(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
-            <option value="all">All Trades</option>
-            {TRADES.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-          <select value={filterSub} onChange={(e) => setFilterSub(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
-            <option value="all">All Subs</option>
-            {subsForFilter.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.company_name}
-              </option>
-            ))}
-          </select>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-3 py-3 border rounded-xl text-sm">
-            <option value="open">Open Only</option>
-            <option value="closed">Completed Only</option>
-            <option value="all">All Statuses</option>
-          </select>
-        </div>
-
-        {subMessageGroups.length > 0 ? (
-          <Card className="bg-white border border-gray-200">
-            <p className="font-semibold mb-2">Message Subs</p>
-            <div className="space-y-2">
-              {subMessageGroups.map(({ sub, items: subItems }) => {
-                if (!sub) return null
-                const draft = buildPunchDraft({ sub, items: subItems })
-                const smsLink = buildSmsLink(sub.phone)
-                const emailLink = buildMailtoLink(sub.email)
-                const isOpen = subMessageExpanded.has(sub.id)
-                return (
-                  <div key={sub.id} className="border border-gray-200 rounded-xl p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <p className="font-semibold text-gray-900">{sub.company_name}</p>
-                        <p className="text-xs text-gray-500 mt-1">{subItems.length} punch item(s)</p>
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSubMessageExpanded((prev) => {
-                              const next = new Set(prev)
-                              if (next.has(sub.id)) next.delete(sub.id)
-                              else next.add(sub.id)
-                              return next
-                            })
-                          }
-                          className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold"
-                        >
-                          {isOpen ? 'Hide Draft' : 'Draft'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openSmsWithDraft(sub, draft)}
-                          disabled={!smsLink}
-                          className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
-                        >
-                          Text
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openEmailWithDraft(sub, draft)}
-                          disabled={!emailLink}
-                          className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
-                        >
-                          Email
-                        </button>
-                      </div>
-                    </div>
-                    {isOpen ? (
-                      <div className="mt-2 bg-gray-50 border border-gray-200 rounded-xl p-2">
-                        <textarea readOnly value={draft.body} className="w-full min-h-[110px] text-xs border rounded-xl p-2 bg-white" />
-                      </div>
+        {groups.map((group) => {
+          const phone = getSubPhone(group.sub)
+          const email = getSubEmail(group.sub)
+          const contactName = group.sub?.primary_contact?.name ?? ''
+          return (
+            <Card key={group.id} className="space-y-2">
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="font-semibold">{group.sub?.company_name ?? 'Subcontractor'}</p>
+                  <p className="text-xs text-gray-500">{phone || 'No phone on file'}</p>
+                  {contactName ? <p className="text-xs text-gray-500">Contact: {contactName}</p> : null}
+                  <p className="text-xs text-gray-500">Email: {email || 'No email on file'}</p>
+                </div>
+                <span className="text-xs text-gray-500">{group.items.length} item(s)</span>
+              </div>
+              <ul className="text-sm text-gray-700 list-disc pl-5">
+                {group.items.map((item) => (
+                  <li key={item.id}>
+                    {punchTaskTypeForItem(item)} - {item.description}
+                    {(Array.isArray(item.photo_ids) && item.photo_ids.length > 0) || item.photo_id ? (
+                      <span className="text-xs text-gray-400"> (photo attached)</span>
                     ) : null}
-                  </div>
-                )
-              })}
-            </div>
-          </Card>
-        ) : null}
-
-        {categories.length === 0 ? (
-          <Card className="bg-white border border-gray-200">
-            <p className="text-sm text-gray-600">No punch items yet. Add the first one below.</p>
-            {renderAddRow({
-              trade: filterTrade === 'all' ? 'other' : filterTrade,
-              sub_id: '',
-              groupKey: 'new',
-              category: filterCategory === 'all' ? null : filterCategory,
-            })}
-          </Card>
-        ) : (
-          categories.map((cat) => {
-            const isOpen = expandedCategories.has(cat)
-            const catItems = visible.filter((i) => normalizeCategory(i) === cat)
-            const groups = grouped(catItems)
-            return (
-              <div key={cat} className="bg-white border border-gray-200 rounded-xl">
+                  </li>
+                ))}
+              </ul>
+              <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    setExpandedCategories((prev) => {
-                      const next = new Set(prev)
-                      if (next.has(cat)) next.delete(cat)
-                      else next.add(cat)
-                      return next
-                    })
-                  }
-                  className="w-full px-4 py-3 flex items-center justify-between"
+                  onClick={() => onDraft(group.sub, group.items, 'sms')}
+                  disabled={!phone}
+                  className={`flex-1 h-10 rounded-xl border font-semibold ${phone ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
                 >
-                  <p className="font-semibold text-gray-900">{cat}</p>
-                  <span className="text-gray-500">{isOpen ? '▾' : '▸'}</span>
+                  Text
                 </button>
-                {isOpen ? (
-                  <div className="px-4 pb-4 space-y-4">
-                    {groups.map((group) => {
-                      const tradeLabel =
-                        group.trade === 'other' ? cat : TRADES.find((t) => t.id === group.trade)?.label ?? group.trade
-                      const sub = group.sub_id ? subcontractors.find((s) => s.id === group.sub_id) ?? null : null
-                      const groupItemIds = new Set(group.items.map((i) => i.id))
-                      const draftKey = `${cat}::${group.trade}::${group.sub_id ?? 'unassigned'}`
-                      const subItemsAll = group.sub_id ? items.filter((i) => i.sub_id === group.sub_id) : group.items
-                      const draft = buildPunchDraft({ sub, items: subItemsAll })
-                      const isExpanded = messageExpanded.has(draftKey)
-                      const smsLink = sub ? buildSmsLink(sub.phone) : ''
-                      const emailLink = sub ? buildMailtoLink(sub.email) : ''
-                      return (
-                        <div key={draftKey} className="bg-gray-50 border border-gray-200 rounded-xl p-3 space-y-2">
-                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                            <div>
-                              <p className="font-semibold text-gray-900">{tradeLabel}</p>
-                              <p className="text-xs text-gray-600 mt-1">
-                                {sub ? sub.company_name : 'Unassigned'} • {group.items.length} item(s)
-                              </p>
-                            </div>
-                            <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
-                              <select
-                                value={group.sub_id ?? ''}
-                                onChange={(e) => {
-                                  const nextSubId = e.target.value || null
-                                  onUpdate({
-                                    ...basePunch,
-                                    items: items.map((x) =>
-                                      groupItemIds.has(x.id) ? { ...x, sub_id: nextSubId } : x,
-                                    ),
-                                  })
-                                }}
-                                className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold"
-                              >
-                                <option value="">Assign sub…</option>
-                                {availableSubs.map((s) => (
-                                  <option key={s.id} value={s.id}>
-                                    {s.company_name}
-                                  </option>
-                                ))}
-                              </select>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setMessageExpanded((prev) => {
-                                    const next = new Set(prev)
-                                    if (next.has(draftKey)) next.delete(draftKey)
-                                    else next.add(draftKey)
-                                    return next
-                                  })
-                                }
-                                className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold"
-                              >
-                                {isExpanded ? 'Hide Draft' : 'Draft Message'}
-                              </button>
-                            </div>
-                          </div>
-
-                          {isExpanded ? (
-                            <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
-                              <p className="text-xs font-semibold text-gray-600">Draft message</p>
-                              <textarea readOnly value={draft.body} className="w-full min-h-[110px] text-xs border rounded-xl p-2 bg-white" />
-                              <div className="flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => openSmsWithDraft(sub, draft)}
-                                  disabled={!smsLink}
-                                  className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
-                                >
-                                  Text
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => openEmailWithDraft(sub, draft)}
-                                  disabled={!emailLink}
-                                  className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
-                                >
-                                  Email
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => onMessageSub?.(group.sub_id)}
-                                  disabled={!group.sub_id}
-                                  className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
-                                >
-                                  Open Chat
-                                </button>
-                              </div>
-                            </div>
-                          ) : null}
-
-                          <div className="hidden sm:grid grid-cols-12 gap-2 text-[11px] text-gray-500">
-                            <span className="col-span-2">Category</span>
-                            <span className="col-span-2">Subcategory</span>
-                            <span className="col-span-2">Sub</span>
-                            <span className="col-span-4">Notes</span>
-                            <span className="col-span-2">Location</span>
-                          </div>
-
-                          <div className="space-y-2">
-                            {group.items.map((item) => {
-                              const subs = subsForSubcategory(item.subcategory)
-                              const doneChecked = item.status === 'closed' || item.status === 'verified'
-                              return (
-                                <div key={item.id} className={`grid grid-cols-1 sm:grid-cols-12 gap-2 items-center bg-white border border-gray-200 rounded-xl p-2 ${doneChecked ? 'opacity-75' : ''}`}>
-                                  <select
-                                    value={item.category ?? ''}
-                                    onChange={(e) => updateItem(item.id, { category: e.target.value || null })}
-                                    className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm bg-white"
-                                  >
-                                    {punchCategoryOptions.map((opt) => (
-                                      <option key={opt} value={opt}>
-                                        {opt}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <select
-                                    value={item.subcategory}
-                                    onChange={(e) => {
-                                      const nextSub = e.target.value
-                                      updateItem(item.id, { subcategory: nextSub, trade: categoryToTrade(subcategoryToCategoryLabel(nextSub)) })
-                                    }}
-                                    className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm bg-white"
-                                  >
-                                    {allSubcategories.map((opt) => (
-                                      <option key={opt.subcategory} value={opt.subcategory}>
-                                        {opt.subcategory}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <select
-                                    value={item.sub_id ?? ''}
-                                    onChange={(e) => updateItem(item.id, { sub_id: e.target.value })}
-                                    className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm bg-white"
-                                  >
-                                    <option value="">Assign sub…</option>
-                                    {(subs ?? availableSubs).map((s) => (
-                                      <option key={s.id} value={s.id}>
-                                        {s.company_name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <input
-                                    value={item.description ?? ''}
-                                    onChange={(e) => updateItem(item.id, { description: e.target.value })}
-                                    className="sm:col-span-4 px-2 py-2 border rounded-lg text-sm bg-white placeholder:text-gray-400"
-                                    placeholder="Description / notes"
-                                  />
-                                  <input
-                                    value={item.location ?? ''}
-                                    onChange={(e) => updateItem(item.id, { location: e.target.value })}
-                                    className="sm:col-span-2 px-2 py-2 border rounded-lg text-sm bg-white placeholder:text-gray-400"
-                                    placeholder="Location"
-                                  />
-                                  <label className="sm:col-span-12 mt-1 flex items-center justify-between text-sm text-gray-600">
-                                    <span>{doneChecked ? 'Completed' : 'Open'}</span>
-                                    <div className="flex items-center gap-3">
-                                      <input
-                                        type="file"
-                                        accept="image/*"
-                                        className="hidden"
-                                        ref={(el) => {
-                                          const map = punchPhotoInputRefs.current
-                                          if (el) map.set(item.id, el)
-                                          else map.delete(item.id)
-                                        }}
-                                        onChange={async (e) => {
-                                          const file = e.target.files?.[0] ?? null
-                                          if (!file) return
-                                          await handlePunchPhotoUpload(item, file)
-                                          e.target.value = ''
-                                        }}
-                                      />
-                                      <button
-                                        type="button"
-                                        onClick={() => punchPhotoInputRefs.current.get(item.id)?.click?.()}
-                                        disabled={!onAddPunchPhoto}
-                                        className="text-xs text-blue-600 disabled:text-gray-400"
-                                      >
-                                        {item.photo_id ? 'Replace Photo' : 'Add Photo'}
-                                      </button>
-                                      {item.photo_id ? (
-                                        <button type="button" onClick={() => openPunchPhoto(item.photo_id)} className="text-xs text-blue-600">
-                                          View
-                                        </button>
-                                      ) : null}
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          onUpdate({ ...basePunch, items: items.filter((x) => x.id !== item.id) })
-                                        }
-                                        className="text-xs text-red-600"
-                                      >
-                                        Delete
-                                      </button>
-                                      <input
-                                        type="checkbox"
-                                        checked={doneChecked}
-                                        onChange={(e) => updateItem(item.id, { status: e.target.checked ? 'closed' : 'open' })}
-                                        className="h-4 w-4 accent-green-600"
-                                      />
-                                    </div>
-                                  </label>
-                                </div>
-                              )
-                            })}
-                          </div>
-
-                          {renderAddRow({ trade: group.trade, sub_id: group.sub_id, groupKey: draftKey, category: cat })}
-                        </div>
-                      )
-                    })}
-                  </div>
-                ) : null}
+                <button
+                  type="button"
+                  onClick={() => onDraft(group.sub, group.items, 'email')}
+                  disabled={!email}
+                  className={`flex-1 h-10 rounded-xl border font-semibold ${email ? 'bg-white text-gray-900 border-gray-200' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
+                >
+                  Email
+                </button>
               </div>
-            )
-          })
-        )}
+            </Card>
+          )
+        })}
+      </div>
+    </Modal>
+  )
+}
+
+function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
+  if (!open || !draft) return null
+  const { sub, items, channel } = draft
+  const base = buildDraft(sub, items)
+  const [message, setMessage] = useState(base.body)
+  const subject = base.subject
+  const contactName = sub?.primary_contact?.name ?? ''
+  useEffect(() => {
+    setMessage(base.body)
+  }, [base.body])
+
+  const photos = items
+    .flatMap((item) => {
+      const ids = []
+      if (Array.isArray(item.photo_ids)) ids.push(...item.photo_ids)
+      if (item.photo_id) ids.push(item.photo_id)
+      return ids
+    })
+    .filter(Boolean)
+    .filter((id, index, all) => all.indexOf(id) === index)
+    .map((id) => (lot.photos ?? []).find((p) => p.id === id))
+    .filter(Boolean)
+
+  const handleSend = () => {
+    if (channel === 'sms') {
+      const baseLink = buildSmsLink(getSubPhone(sub))
+      if (!baseLink) {
+        alert('No phone number on file for this sub.')
+        return
+      }
+      const href = `${baseLink}${baseLink.includes('?') ? '&' : '?'}body=${encodeURIComponent(message)}`
+      openExternalLink(href)
+      return
+    }
+    const baseLink = buildMailtoLink(getSubEmail(sub))
+    if (!baseLink) {
+      alert('No email address on file for this sub.')
+      return
+    }
+    const href = `${baseLink}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(message)}`
+    openExternalLink(href)
+  }
+
+  return (
+    <Modal
+      title="Message Draft"
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose} className="flex-1">
+            Close
+          </SecondaryButton>
+          <PrimaryButton onClick={handleSend} className="flex-1">
+            {channel === 'sms' ? 'Preview in iMessage' : 'Preview in Email'}
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <Card className="bg-gray-50">
+          <p className="text-sm font-semibold">{sub?.company_name ?? 'Subcontractor'}</p>
+          <p className="text-xs text-gray-500">{channel === 'sms' ? getSubPhone(sub) || 'No phone on file' : getSubEmail(sub) || 'No email on file'}</p>
+          {contactName ? <p className="text-xs text-gray-500">Contact: {contactName}</p> : null}
+          <p className="text-xs text-gray-500">Email: {getSubEmail(sub) || 'No email on file'}</p>
+        </Card>
+        <textarea
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          className="w-full min-h-[180px] px-3 py-3 border rounded-xl text-sm"
+        />
+        {photos.length > 0 ? (
+          <div className="grid grid-cols-2 gap-2">
+            {photos.map((photo) => (
+              <button
+                key={photo.id}
+                type="button"
+                className="border rounded-xl overflow-hidden"
+                onClick={() => openBlobInNewTab(photo.blob_id)}
+              >
+                <PhotoThumb blobId={photo.blob_id} alt={photo.caption ?? 'Punch photo'} />
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <p className="text-xs text-gray-500">Attachments open in your native app. Add photos there before sending.</p>
       </div>
     </Modal>
   )
@@ -14282,7 +15002,7 @@ function MaterialOrderEditorModal({ lot, tasks, initial, onClose, onSave, onAddD
               <div className="grid grid-cols-2 gap-2">
                 <input
                   value={draft.vendor_phone}
-                  onChange={(e) => setDraft((p) => ({ ...p, vendor_phone: e.target.value }))}
+                  onChange={(e) => setDraft((p) => ({ ...p, vendor_phone: formatPhoneInput(e.target.value) }))}
                   className="w-full px-3 py-3 border rounded-xl"
                   placeholder="Phone"
                 />
