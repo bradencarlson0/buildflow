@@ -17,6 +17,7 @@ import {
   Image,
   LayoutGrid,
   Lock,
+  Mail,
   MapPin,
   MessageSquare,
   Phone,
@@ -6345,54 +6346,64 @@ export default function BuildFlow() {
                 </button>
               </div>
               <div className="space-y-2">
-                {app.subcontractors.map((sub) => (
-                  <div key={sub.id} className="bg-gray-50 rounded-xl border border-gray-200 p-4">
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="font-semibold">{sub.company_name}</p>
-                        <p className="text-xs text-gray-600 mt-1">
-                          Trade: {tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade} • Capacity: {sub.max_concurrent_lots}
-                        </p>
+                {app.subcontractors.map((sub) => {
+                  const contactName = (sub.primary_contact?.name ?? '').trim()
+                  const contactPhone = (sub.primary_contact?.phone ?? '').trim()
+                  const contactEmail = (sub.primary_contact?.email ?? '').trim()
+
+                  return (
+                    <div key={sub.id} className="bg-gray-50 rounded-xl border border-gray-200 p-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <p className="font-semibold">{sub.company_name}</p>
+                          <p className="text-xs text-gray-600 mt-1">
+                            Trade: {tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade} • Capacity: {sub.max_concurrent_lots}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                    <div className="mt-3 flex items-center justify-between">
-                      <div>
-                        {sub.primary_contact?.name ? (
-                          <p className="text-xs text-gray-500 mb-1">Contact: {sub.primary_contact.name}</p>
-                        ) : null}
-                        <a
-                          href={`tel:${sub.primary_contact.phone}`}
-                          className="text-sm text-blue-600 inline-flex items-center gap-1"
-                        >
-                          <Phone className="w-4 h-4" />
-                          {sub.primary_contact.phone}
-                        </a>
-                        {sub.primary_contact?.email ? (
-                          <a
-                            href={`mailto:${sub.primary_contact.email}`}
-                            className="text-xs text-blue-600 inline-flex items-center gap-1 mt-1"
+                      <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="space-y-2">
+                          {contactName ? <p className="text-xs text-gray-500">Contact: {contactName}</p> : null}
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            {contactPhone ? (
+                              <a
+                                href={`tel:${contactPhone}`}
+                                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
+                              >
+                                <Phone className="w-3.5 h-3.5 text-blue-600" />
+                                <span className="tracking-tight">{contactPhone}</span>
+                              </a>
+                            ) : null}
+                            {contactEmail ? (
+                              <a
+                                href={`mailto:${contactEmail}`}
+                                title={contactEmail}
+                                className="inline-flex min-w-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
+                              >
+                                <Mail className="w-3.5 h-3.5 text-blue-600" />
+                                <span className="max-w-[220px] truncate sm:max-w-none">{contactEmail}</span>
+                              </a>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setEditingSubId(sub.id)}
+                            className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
                           >
-                            {sub.primary_contact.email}
-                          </a>
-                        ) : null}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setEditingSubId(sub.id)}
-                          className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => setSubContactModalId(sub.id)}
-                          className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
-                        >
-                          Message
-                        </button>
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => setSubContactModalId(sub.id)}
+                            className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
+                          >
+                            Message
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </Card>
           </div>
