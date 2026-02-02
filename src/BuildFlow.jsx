@@ -104,6 +104,7 @@ const CUSTOM_TASK_PRESET = { id: 'custom', name: 'Custom', trade: 'other', durat
 const DURATION_OPTIONS = Array.from({ length: 10 }, (_, i) => i + 1)
 const FILE_ACCEPT = '.pdf,.csv,.xls,.xlsx,.doc,.docx,.ppt,.pptx,.txt,.rtf,.jpg,.jpeg,.png,.heic,.heif'
 const SUPABASE_ORG_ID_FALLBACK = String(import.meta.env.VITE_SUPABASE_ORG_ID ?? '').trim()
+const GUEST_MODE_STORAGE_KEY = 'buildflow.guest_mode'
 
 const getWeatherFromCode = (code) => {
   const n = Number(code)
@@ -706,6 +707,10 @@ export default function BuildFlow() {
   const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
+  const [guestModeEnabled, setGuestModeEnabled] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem(GUEST_MODE_STORAGE_KEY) === '1'
+  })
   const [supabaseSession, setSupabaseSession] = useState(null)
   const [supabaseUser, setSupabaseUser] = useState(null)
   const [supabaseBootstrapVersion, setSupabaseBootstrapVersion] = useState(0)
@@ -836,8 +841,8 @@ export default function BuildFlow() {
     const hydrateFromSupabase = async () => {
       if (!supabaseUser?.id) {
         setSupabaseStatus({
-          phase: 'signed_out',
-          message: 'Not signed in. Using local data.',
+          phase: guestModeEnabled ? 'guest' : 'signed_out',
+          message: guestModeEnabled ? 'Guest mode active. Using local demo data.' : 'Not signed in. Using local data.',
           orgId: null,
           role: null,
           loadedAt: new Date().toISOString(),
@@ -1051,7 +1056,16 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [supabaseUser?.id, supabaseBootstrapVersion])
+  }, [supabaseUser?.id, supabaseBootstrapVersion, guestModeEnabled])
+
+  useEffect(() => {
+    if (supabaseUser?.id && guestModeEnabled) {
+      setGuestModeEnabled(false)
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(GUEST_MODE_STORAGE_KEY)
+      }
+    }
+  }, [supabaseUser?.id, guestModeEnabled])
 
   useEffect(() => {
     const onOnline = () => {
@@ -1252,6 +1266,35 @@ export default function BuildFlow() {
 
   const setAuthField = (field, value) => {
     setAuthDraft((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const continueAsGuest = () => {
+    setAuthError('')
+    setGuestModeEnabled(true)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(GUEST_MODE_STORAGE_KEY, '1')
+    }
+    setSupabaseStatus((prev) => ({
+      ...prev,
+      phase: 'guest',
+      message: 'Guest mode active. Using local demo data.',
+      loadedAt: new Date().toISOString(),
+      warning: '',
+    }))
+  }
+
+  const useAccountLogin = () => {
+    setGuestModeEnabled(false)
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(GUEST_MODE_STORAGE_KEY)
+    }
+    setSupabaseStatus((prev) => ({
+      ...prev,
+      phase: 'signed_out',
+      message: 'Sign in to sync with Supabase. Using local data until then.',
+      loadedAt: new Date().toISOString(),
+      warning: '',
+    }))
   }
 
   const signInWithSupabase = async () => {
@@ -3991,6 +4034,20 @@ export default function BuildFlow() {
                       Create Login
                     </SecondaryButton>
                   </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <SecondaryButton
+                      onClick={guestModeEnabled ? useAccountLogin : continueAsGuest}
+                      disabled={authBusy}
+                      className="col-span-2 border-blue-200"
+                    >
+                      {guestModeEnabled ? 'Use Account Login' : 'Continue as Guest'}
+                    </SecondaryButton>
+                  </div>
+                  {guestModeEnabled ? (
+                    <p className="text-xs text-gray-600">
+                      Guest mode keeps data local in this browser only. Sign in later to sync from Supabase.
+                    </p>
+                  ) : null}
                 </div>
               ) : (
                 <div className="mt-3 grid grid-cols-2 gap-2">
