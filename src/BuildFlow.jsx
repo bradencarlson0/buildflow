@@ -873,6 +873,12 @@ export default function BuildFlow() {
     counts: null,
     warning: '',
   })
+  const [writeSyncState, setWriteSyncState] = useState({
+    phase: 'idle',
+    lastSyncedAt: null,
+    error: '',
+  })
+  const [resetSeedBusy, setResetSeedBusy] = useState(false)
 
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
   const [weather, setWeather] = useState({ loading: true, forecast: [] })
@@ -1221,6 +1227,7 @@ export default function BuildFlow() {
     if (!pendingPayload || !pendingHash || pendingHash === supabaseLastSyncedHashRef.current) return
 
     supabaseWriteInFlightRef.current = true
+    setWriteSyncState((prev) => ({ ...prev, phase: 'syncing', error: '' }))
     supabasePendingPayloadRef.current = null
     supabasePendingHashRef.current = ''
 
@@ -1308,11 +1315,12 @@ export default function BuildFlow() {
       }
 
       supabaseLastSyncedHashRef.current = pendingHash
+      const syncedAt = new Date().toISOString()
       setSupabaseStatus((prev) => ({
         ...prev,
         phase: 'ready',
         message: 'Supabase connected. Remote data is loaded.',
-        loadedAt: new Date().toISOString(),
+        loadedAt: syncedAt,
         counts: {
           communities: communitiesRows.length,
           lots: lotRows.length,
@@ -1321,6 +1329,7 @@ export default function BuildFlow() {
           product_types: productTypes.length,
         },
       }))
+      setWriteSyncState({ phase: 'synced', lastSyncedAt: syncedAt, error: '' })
     } catch (error) {
       setSupabaseStatus((prev) => ({
         ...prev,
@@ -1328,6 +1337,7 @@ export default function BuildFlow() {
         message: `Supabase write failed: ${error.message}`,
         loadedAt: new Date().toISOString(),
       }))
+      setWriteSyncState((prev) => ({ ...prev, phase: 'error', error: error.message || 'Unknown sync error' }))
     } finally {
       supabaseWriteInFlightRef.current = false
       if (
@@ -1411,6 +1421,11 @@ export default function BuildFlow() {
 
     supabasePendingPayloadRef.current = nextPayload
     supabasePendingHashRef.current = nextHash
+    setWriteSyncState((prev) => ({
+      ...prev,
+      phase: prev.phase === 'syncing' ? 'syncing' : 'pending',
+      error: '',
+    }))
 
     if (supabaseWriteTimerRef.current) {
       clearTimeout(supabaseWriteTimerRef.current)
@@ -1438,6 +1453,7 @@ export default function BuildFlow() {
     supabasePendingPayloadRef.current = null
     supabasePendingHashRef.current = ''
     supabaseLastSyncedHashRef.current = ''
+    setWriteSyncState({ phase: 'idle', lastSyncedAt: null, error: '' })
   }, [supabaseUser?.id])
 
   useEffect(() => {
@@ -1739,6 +1755,44 @@ export default function BuildFlow() {
 
   const refreshSupabaseBootstrap = () => {
     if (!supabaseUser?.id) return
+    setSupabaseBootstrapVersion((prev) => prev + 1)
+  }
+
+  const resetRemoteSeed = async () => {
+    if (!supabaseUser?.id) return
+    if (supabaseUser?.is_anonymous) {
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: 'Seed reset requires a full login (anonymous sessions cannot reset).',
+        loadedAt: new Date().toISOString(),
+      }))
+      return
+    }
+
+    const confirmed = typeof window === 'undefined' ? false : window.confirm('Reset all remote data back to the seed baseline? This will overwrite current Supabase data for this org.')
+    if (!confirmed) return
+
+    setResetSeedBusy(true)
+    const { error } = await supabase.rpc('reset_buildflow_seed', { target_org_id: supabaseStatus.orgId ?? null })
+    setResetSeedBusy(false)
+
+    if (error) {
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Seed reset failed: ${error.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+      return
+    }
+
+    setSupabaseStatus((prev) => ({
+      ...prev,
+      phase: 'loading',
+      message: 'Seed reset complete. Reloading Supabase data...',
+      loadedAt: new Date().toISOString(),
+    }))
     setSupabaseBootstrapVersion((prev) => prev + 1)
   }
 
@@ -4356,6 +4410,25 @@ export default function BuildFlow() {
                   {supabaseStatus.loadedAt ? (
                     <p className="text-xs text-gray-500 mt-1">Last check: {formatSyncTimestamp(supabaseStatus.loadedAt)}</p>
                   ) : null}
+                  {supabaseUser?.id ? (
+                    <p
+                      className={`text-xs mt-1 ${
+                        writeSyncState.phase === 'error'
+                          ? 'text-red-600'
+                          : writeSyncState.phase === 'synced'
+                            ? 'text-green-700'
+                            : 'text-amber-700'
+                      }`}
+                    >
+                      {writeSyncState.phase === 'error'
+                        ? `Sync error: ${writeSyncState.error || 'write failed'}`
+                        : writeSyncState.phase === 'synced' && writeSyncState.lastSyncedAt
+                          ? `Last synced: ${formatSyncTimestamp(writeSyncState.lastSyncedAt)}`
+                          : writeSyncState.phase === 'idle'
+                            ? 'Sync idle'
+                            : 'Syncing changes...'}
+                    </p>
+                  ) : null}
                   {supabaseStatus.warning ? (
                     <p className="text-xs text-amber-700 mt-2">{supabaseStatus.warning}</p>
                   ) : null}
@@ -4425,6 +4498,18 @@ export default function BuildFlow() {
                   <SecondaryButton onClick={signOutFromSupabase} disabled={authBusy} className="border-blue-200">
                     Sign Out
                   </SecondaryButton>
+                  <SecondaryButton
+                    onClick={resetRemoteSeed}
+                    disabled={resetSeedBusy || supabaseStatus.phase === 'loading'}
+                    className="col-span-2 border-red-200 text-red-600"
+                  >
+                    {resetSeedBusy ? 'Resetting Seed...' : 'Reset Remote Data to Seed'}
+                  </SecondaryButton>
+                  {supabaseUser?.is_anonymous ? (
+                    <p className="col-span-2 text-xs text-amber-700">
+                      Sign in with a full account to run a seed reset.
+                    </p>
+                  ) : null}
                 </div>
               )}
             </Card>
