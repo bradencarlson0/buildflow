@@ -104,7 +104,6 @@ const CUSTOM_TASK_PRESET = { id: 'custom', name: 'Custom', trade: 'other', durat
 const DURATION_OPTIONS = Array.from({ length: 10 }, (_, i) => i + 1)
 const FILE_ACCEPT = '.pdf,.csv,.xls,.xlsx,.doc,.docx,.ppt,.pptx,.txt,.rtf,.jpg,.jpeg,.png,.heic,.heif'
 const SUPABASE_ORG_ID_FALLBACK = String(import.meta.env.VITE_SUPABASE_ORG_ID ?? '').trim()
-const GUEST_MODE_STORAGE_KEY = 'buildflow.guest_mode'
 
 const getWeatherFromCode = (code) => {
   const n = Number(code)
@@ -491,6 +490,161 @@ const mapSubcontractorFromSupabase = (subRow) => ({
   office_phone: subRow?.office_phone ?? subRow?.phone ?? subRow?.primary_contact?.phone ?? '',
 })
 
+const toIsoDateOrNull = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (value instanceof Date) return formatISODate(value)
+  return String(value)
+}
+
+const mapProductTypeToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  name: row?.name ?? 'Product Type',
+  build_days: Math.max(1, Number(row?.build_days ?? 1) || 1),
+  template_id: row?.template_id ?? null,
+  sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : 0,
+  is_active: row?.is_active !== false,
+})
+
+const mapPlanToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  name: row?.name ?? 'Plan',
+  product_type_id: row?.product_type_id ?? null,
+  sq_ft: Number.isFinite(Number(row?.sq_ft)) ? Number(row.sq_ft) : null,
+  bedrooms: Number.isFinite(Number(row?.bedrooms)) ? Number(row.bedrooms) : null,
+  bathrooms: Number.isFinite(Number(row?.bathrooms)) ? Number(row.bathrooms) : null,
+  is_active: row?.is_active !== false,
+})
+
+const mapAgencyToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  name: row?.name ?? 'Agency',
+  type: row?.type ?? 'municipality',
+  inspection_types: coerceArray(row?.inspection_types),
+  is_org_level: row?.is_org_level !== false,
+  is_active: row?.is_active !== false,
+})
+
+const mapCommunityToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  name: row?.name ?? 'Community',
+  address: row?.address ?? {},
+  product_type_ids: coerceArray(row?.product_type_ids),
+  lot_count: Math.max(0, Number(row?.lot_count ?? 0) || 0),
+  lots_by_product_type: row?.lots_by_product_type ?? {},
+  builders: coerceArray(row?.builders),
+  realtors: coerceArray(row?.realtors),
+  inspectors: coerceArray(row?.inspectors),
+  agency_ids: coerceArray(row?.agency_ids),
+  agencies: coerceArray(row?.agencies),
+  documents: coerceArray(row?.documents),
+  specs: coerceArray(row?.specs),
+  is_active: row?.is_active !== false,
+})
+
+const mapSubcontractorToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  name: row?.name ?? row?.company_name ?? 'Subcontractor',
+  company_name: row?.company_name ?? row?.name ?? 'Subcontractor',
+  trade: row?.trade ?? 'other',
+  secondary_trades: coerceArray(row?.secondary_trades),
+  phone: row?.phone ?? row?.primary_contact?.phone ?? null,
+  email: row?.email ?? row?.primary_contact?.email ?? null,
+  office_phone: row?.office_phone ?? row?.phone ?? row?.primary_contact?.phone ?? null,
+  primary_contact: row?.primary_contact ?? {},
+  additional_contacts: coerceArray(row?.additional_contacts),
+  insurance_expiration: toIsoDateOrNull(row?.insurance_expiration),
+  license_number: row?.license_number ?? null,
+  w9_on_file: Boolean(row?.w9_on_file),
+  crew_size: Number.isFinite(Number(row?.crew_size)) ? Number(row.crew_size) : null,
+  max_concurrent_lots: Math.max(1, Number(row?.max_concurrent_lots ?? 1) || 1),
+  is_preferred: row?.is_preferred !== false,
+  is_backup: Boolean(row?.is_backup),
+  rating: Number.isFinite(Number(row?.rating)) ? Number(row.rating) : null,
+  total_jobs: Number.isFinite(Number(row?.total_jobs)) ? Number(row.total_jobs) : 0,
+  on_time_pct: Number.isFinite(Number(row?.on_time_pct)) ? Number(row.on_time_pct) : null,
+  delay_count: Number.isFinite(Number(row?.delay_count)) ? Number(row.delay_count) : 0,
+  blackout_dates: coerceArray(row?.blackout_dates),
+  notes: row?.notes ?? null,
+  status: row?.status ?? 'active',
+  documents: coerceArray(row?.documents),
+  custom_fields: row?.custom_fields ?? {},
+})
+
+const mapLotToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  community_id: row?.community_id,
+  block: row?.block ?? '',
+  lot_number: String(row?.lot_number ?? ''),
+  product_type_id: row?.product_type_id ?? null,
+  plan_id: row?.plan_id ?? null,
+  builder_id: row?.builder_id ?? null,
+  address: row?.address ?? '',
+  job_number: row?.job_number ?? '',
+  permit_number: row?.permit_number ?? null,
+  model_type: row?.model_type ?? '',
+  status: row?.status ?? 'not_started',
+  start_date: toIsoDateOrNull(row?.start_date),
+  hard_deadline: toIsoDateOrNull(row?.hard_deadline),
+  build_days: Math.max(1, Number(row?.build_days ?? 1) || 1),
+  target_completion_date: toIsoDateOrNull(row?.target_completion_date),
+  actual_completion_date: toIsoDateOrNull(row?.actual_completion_date),
+  sold_status: row?.sold_status ?? 'available',
+  sold_date: toIsoDateOrNull(row?.sold_date),
+  custom_fields: row?.custom_fields ?? {},
+  inspections: coerceArray(row?.inspections),
+  punch_list: row?.punch_list ?? null,
+  daily_logs: coerceArray(row?.daily_logs),
+  change_orders: coerceArray(row?.change_orders),
+  material_orders: coerceArray(row?.material_orders),
+  documents: coerceArray(row?.documents),
+  photos: coerceArray(row?.photos),
+})
+
+const mapTaskToSupabase = (row, lotId, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  lot_id: lotId,
+  name: row?.name ?? 'Task',
+  trade: row?.trade ?? 'other',
+  track: row?.track ?? 'foundation',
+  phase: row?.phase ?? 'foundation',
+  duration: Math.max(1, Number(row?.duration ?? 1) || 1),
+  sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : 0,
+  status: row?.status ?? 'not_started',
+  scheduled_start: row?.scheduled_start ?? null,
+  scheduled_end: row?.scheduled_end ?? null,
+  actual_start: row?.actual_start ?? null,
+  actual_end: row?.actual_end ?? null,
+  sub_id: row?.sub_id ?? null,
+  notes: row?.notes ?? null,
+  delay_reason: row?.delay_reason ?? null,
+  delay_days: Number.isFinite(Number(row?.delay_days)) ? Number(row.delay_days) : 0,
+  dependencies: coerceArray(row?.dependencies),
+  custom_fields: row?.custom_fields ?? {},
+})
+
+const mapDependencyToSupabase = (taskId, dep) => ({
+  task_id: taskId,
+  depends_on_task_id: dep?.depends_on_task_id,
+  type: dep?.type ?? 'FS',
+  lag_days: Number.isFinite(Number(dep?.lag_days)) ? Number(dep.lag_days) : 0,
+})
+
+const chunkArray = (rows, chunkSize = 200) => {
+  const chunks = []
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    chunks.push(rows.slice(i, i + chunkSize))
+  }
+  return chunks
+}
+
 const formatSyncTimestamp = (iso) => {
   if (!iso) return ''
   const dt = parseISODate(iso)
@@ -707,10 +861,6 @@ export default function BuildFlow() {
   const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
-  const [guestModeEnabled, setGuestModeEnabled] = useState(() => {
-    if (typeof window === 'undefined') return false
-    return window.localStorage.getItem(GUEST_MODE_STORAGE_KEY) === '1'
-  })
   const [supabaseSession, setSupabaseSession] = useState(null)
   const [supabaseUser, setSupabaseUser] = useState(null)
   const [supabaseBootstrapVersion, setSupabaseBootstrapVersion] = useState(0)
@@ -755,6 +905,11 @@ export default function BuildFlow() {
   })
   const listDropPulseTimerRef = useRef(null)
   const listSuppressClickRef = useRef(false)
+  const supabaseWriteTimerRef = useRef(null)
+  const supabaseWriteInFlightRef = useRef(false)
+  const supabasePendingPayloadRef = useRef(null)
+  const supabasePendingHashRef = useRef('')
+  const supabaseLastSyncedHashRef = useRef('')
 
   useEffect(() => {
     saveAppState(app)
@@ -841,8 +996,8 @@ export default function BuildFlow() {
     const hydrateFromSupabase = async () => {
       if (!supabaseUser?.id) {
         setSupabaseStatus({
-          phase: guestModeEnabled ? 'guest' : 'signed_out',
-          message: guestModeEnabled ? 'Guest mode active. Using local demo data.' : 'Not signed in. Using local data.',
+          phase: 'signed_out',
+          message: 'Not signed in. Using local data.',
           orgId: null,
           role: null,
           loadedAt: new Date().toISOString(),
@@ -1056,16 +1211,234 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [supabaseUser?.id, supabaseBootstrapVersion, guestModeEnabled])
+  }, [supabaseUser?.id, supabaseBootstrapVersion])
 
-  useEffect(() => {
-    if (supabaseUser?.id && guestModeEnabled) {
-      setGuestModeEnabled(false)
-      if (typeof window !== 'undefined') {
-        window.localStorage.removeItem(GUEST_MODE_STORAGE_KEY)
+  const flushSupabaseWrite = async () => {
+    if (supabaseWriteInFlightRef.current) return
+
+    const pendingPayload = supabasePendingPayloadRef.current
+    const pendingHash = supabasePendingHashRef.current
+    if (!pendingPayload || !pendingHash || pendingHash === supabaseLastSyncedHashRef.current) return
+
+    supabaseWriteInFlightRef.current = true
+    supabasePendingPayloadRef.current = null
+    supabasePendingHashRef.current = ''
+
+    try {
+      const {
+        orgId,
+        userId,
+        role,
+        orgRow,
+        productTypes,
+        plansRows,
+        agenciesRows,
+        communitiesRows,
+        subcontractorRows,
+        lotRows,
+        taskRows,
+        dependencyRows,
+      } = pendingPayload
+
+      if (!orgId || !userId) return
+
+      const profileUpsert = await supabase.from('profiles').upsert(
+        {
+          id: userId,
+          org_id: orgId,
+          role: role || 'admin',
+        },
+        { onConflict: 'id' },
+      )
+      if (profileUpsert.error) {
+        throw new Error(`Profile upsert failed: ${profileUpsert.error.message}`)
+      }
+
+      const orgUpdate = await supabase
+        .from('organizations')
+        .update({
+          name: orgRow.name,
+          builder_name: orgRow.builder_name,
+          default_build_days: orgRow.default_build_days,
+          work_days: orgRow.work_days,
+          holidays: orgRow.holidays,
+        })
+        .eq('id', orgId)
+      if (orgUpdate.error) {
+        throw new Error(`Organization update failed: ${orgUpdate.error.message}`)
+      }
+
+      const upsertRows = async (tableName, rows, onConflict) => {
+        if (!Array.isArray(rows) || rows.length === 0) return
+        for (const chunk of chunkArray(rows, 200)) {
+          const result = await supabase.from(tableName).upsert(chunk, { onConflict })
+          if (result.error) {
+            throw new Error(`${tableName} sync failed: ${result.error.message}`)
+          }
+        }
+      }
+
+      await upsertRows('product_types', productTypes, 'id')
+      await upsertRows('plans', plansRows, 'id')
+      await upsertRows('agencies', agenciesRows, 'id')
+      await upsertRows('communities', communitiesRows, 'id')
+      await upsertRows('subcontractors', subcontractorRows, 'id')
+      await upsertRows('lots', lotRows, 'id')
+      await upsertRows('tasks', taskRows, 'id')
+
+      const taskIds = taskRows.map((row) => row.id).filter(Boolean)
+      if (taskIds.length > 0) {
+        for (const idChunk of chunkArray(taskIds, 200)) {
+          const depDelete = await supabase.from('task_dependencies').delete().in('task_id', idChunk)
+          if (depDelete.error) {
+            throw new Error(`Task dependency cleanup failed: ${depDelete.error.message}`)
+          }
+        }
+      }
+
+      if (dependencyRows.length > 0) {
+        for (const chunk of chunkArray(dependencyRows, 200)) {
+          const depInsert = await supabase.from('task_dependencies').upsert(chunk, {
+            onConflict: 'task_id,depends_on_task_id,type,lag_days',
+          })
+          if (depInsert.error) {
+            throw new Error(`Task dependency sync failed: ${depInsert.error.message}`)
+          }
+        }
+      }
+
+      supabaseLastSyncedHashRef.current = pendingHash
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'ready',
+        message: 'Supabase connected. Remote data is loaded.',
+        loadedAt: new Date().toISOString(),
+        counts: {
+          communities: communitiesRows.length,
+          lots: lotRows.length,
+          tasks: taskRows.length,
+          subcontractors: subcontractorRows.length,
+          product_types: productTypes.length,
+        },
+      }))
+    } catch (error) {
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Supabase write failed: ${error.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+    } finally {
+      supabaseWriteInFlightRef.current = false
+      if (
+        supabasePendingPayloadRef.current &&
+        supabasePendingHashRef.current &&
+        supabasePendingHashRef.current !== supabaseLastSyncedHashRef.current
+      ) {
+        if (supabaseWriteTimerRef.current) {
+          clearTimeout(supabaseWriteTimerRef.current)
+        }
+        supabaseWriteTimerRef.current = setTimeout(() => {
+          void flushSupabaseWrite()
+        }, 250)
       }
     }
-  }, [supabaseUser?.id, guestModeEnabled])
+  }
+
+  useEffect(() => {
+    if (!supabaseUser?.id || !supabaseStatus.orgId || supabaseStatus.phase === 'loading') return
+
+    const orgId = supabaseStatus.orgId
+    const orgConfig = app.org ?? {}
+    const orgRow = {
+      id: orgId,
+      name: orgConfig?.name ?? orgConfig?.builder_name ?? 'BuildFlow',
+      builder_name: orgConfig?.builder_name ?? orgConfig?.name ?? 'BuildFlow',
+      default_build_days: Math.max(1, Number(orgConfig?.default_build_days ?? 1) || 1),
+      work_days: coerceArray(orgConfig?.work_days)
+        .map((day) => Number(day))
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6),
+      holidays: coerceArray(orgConfig?.holidays).map((holiday) => String(holiday)),
+    }
+
+    const productTypes = (app.product_types ?? [])
+      .map((row) => mapProductTypeToSupabase(row, orgId))
+      .filter((row) => row?.id)
+    const plansRows = (app.plans ?? []).map((row) => mapPlanToSupabase(row, orgId)).filter((row) => row?.id)
+    const agenciesRows = (app.agencies ?? [])
+      .map((row) => mapAgencyToSupabase(row, orgId))
+      .filter((row) => row?.id)
+    const communitiesRows = (app.communities ?? [])
+      .map((row) => mapCommunityToSupabase(row, orgId))
+      .filter((row) => row?.id)
+    const subcontractorRows = (app.subcontractors ?? [])
+      .map((row) => mapSubcontractorToSupabase(row, orgId))
+      .filter((row) => row?.id)
+    const lotRows = (app.lots ?? []).map((row) => mapLotToSupabase(row, orgId)).filter((row) => row?.id)
+
+    const taskRows = []
+    const dependencyRows = []
+    for (const lot of app.lots ?? []) {
+      for (const task of lot?.tasks ?? []) {
+        const mappedTask = mapTaskToSupabase(task, lot.id, orgId)
+        if (!mappedTask?.id) continue
+        taskRows.push(mappedTask)
+        for (const dep of task?.dependencies ?? []) {
+          const mappedDep = mapDependencyToSupabase(task.id, dep)
+          if (!mappedDep.task_id || !mappedDep.depends_on_task_id) continue
+          dependencyRows.push(mappedDep)
+        }
+      }
+    }
+
+    const nextPayload = {
+      orgId,
+      userId: supabaseUser.id,
+      role: supabaseStatus.role ?? 'admin',
+      orgRow,
+      productTypes,
+      plansRows,
+      agenciesRows,
+      communitiesRows,
+      subcontractorRows,
+      lotRows,
+      taskRows,
+      dependencyRows,
+    }
+    const nextHash = JSON.stringify(nextPayload)
+
+    if (nextHash === supabaseLastSyncedHashRef.current || nextHash === supabasePendingHashRef.current) return
+
+    supabasePendingPayloadRef.current = nextPayload
+    supabasePendingHashRef.current = nextHash
+
+    if (supabaseWriteTimerRef.current) {
+      clearTimeout(supabaseWriteTimerRef.current)
+    }
+
+    supabaseWriteTimerRef.current = setTimeout(() => {
+      void flushSupabaseWrite()
+    }, 700)
+
+    return () => {
+      if (supabaseWriteTimerRef.current) {
+        clearTimeout(supabaseWriteTimerRef.current)
+        supabaseWriteTimerRef.current = null
+      }
+    }
+  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase, supabaseStatus.role, flushSupabaseWrite])
+
+  useEffect(() => {
+    if (supabaseUser?.id) return
+    if (supabaseWriteTimerRef.current) {
+      clearTimeout(supabaseWriteTimerRef.current)
+      supabaseWriteTimerRef.current = null
+    }
+    supabaseWriteInFlightRef.current = false
+    supabasePendingPayloadRef.current = null
+    supabasePendingHashRef.current = ''
+    supabaseLastSyncedHashRef.current = ''
+  }, [supabaseUser?.id])
 
   useEffect(() => {
     const onOnline = () => {
@@ -1268,30 +1641,27 @@ export default function BuildFlow() {
     setAuthDraft((prev) => ({ ...prev, [field]: value }))
   }
 
-  const continueAsGuest = () => {
+  const signInAsGuest = async () => {
+    setAuthBusy(true)
     setAuthError('')
-    setGuestModeEnabled(true)
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(GUEST_MODE_STORAGE_KEY, '1')
-    }
-    setSupabaseStatus((prev) => ({
-      ...prev,
-      phase: 'guest',
-      message: 'Guest mode active. Using local demo data.',
-      loadedAt: new Date().toISOString(),
-      warning: '',
-    }))
-  }
+    const { error } = await supabase.auth.signInAnonymously()
+    setAuthBusy(false)
 
-  const useAccountLogin = () => {
-    setGuestModeEnabled(false)
-    if (typeof window !== 'undefined') {
-      window.localStorage.removeItem(GUEST_MODE_STORAGE_KEY)
+    if (error) {
+      setAuthError(error.message)
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Guest sign-in failed: ${error.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+      return
     }
+
     setSupabaseStatus((prev) => ({
       ...prev,
-      phase: 'signed_out',
-      message: 'Sign in to sync with Supabase. Using local data until then.',
+      phase: 'loading',
+      message: 'Guest session created. Syncing with Supabase...',
       loadedAt: new Date().toISOString(),
       warning: '',
     }))
@@ -4036,18 +4406,16 @@ export default function BuildFlow() {
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <SecondaryButton
-                      onClick={guestModeEnabled ? useAccountLogin : continueAsGuest}
+                      onClick={signInAsGuest}
                       disabled={authBusy}
                       className="col-span-2 border-blue-200"
                     >
-                      {guestModeEnabled ? 'Use Account Login' : 'Continue as Guest'}
+                      Continue as Guest
                     </SecondaryButton>
                   </div>
-                  {guestModeEnabled ? (
-                    <p className="text-xs text-gray-600">
-                      Guest mode keeps data local in this browser only. Sign in later to sync from Supabase.
-                    </p>
-                  ) : null}
+                  <p className="text-xs text-gray-600">
+                    Guest sign-in now uses an anonymous Supabase account so test edits persist to shared data.
+                  </p>
                 </div>
               ) : (
                 <div className="mt-3 grid grid-cols-2 gap-2">
