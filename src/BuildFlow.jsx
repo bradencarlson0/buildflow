@@ -70,6 +70,7 @@ import {
 } from './lib/scheduleEngine.js'
 import { deleteBlob, getBlob, putBlob } from './lib/idb.js'
 import { uuid } from './lib/uuid.js'
+import { supabase } from './lib/supabaseClient.js'
 
 const DALLAS = {
   name: 'Dallas, TX',
@@ -102,6 +103,7 @@ const TASK_PRESETS = [
 const CUSTOM_TASK_PRESET = { id: 'custom', name: 'Custom', trade: 'other', duration: 1, category: 'misc' }
 const DURATION_OPTIONS = Array.from({ length: 10 }, (_, i) => i + 1)
 const FILE_ACCEPT = '.pdf,.csv,.xls,.xlsx,.doc,.docx,.ppt,.pptx,.txt,.rtf,.jpg,.jpeg,.png,.heic,.heif'
+const SUPABASE_ORG_ID_FALLBACK = String(import.meta.env.VITE_SUPABASE_ORG_ID ?? '').trim()
 
 const getWeatherFromCode = (code) => {
   const n = Number(code)
@@ -420,6 +422,86 @@ const buildMailtoLink = (email) => {
 const getSubPhone = (sub) => sub?.phone || sub?.primary_contact?.phone || sub?.office_phone || ''
 const getSubEmail = (sub) => sub?.email || sub?.primary_contact?.email || ''
 
+const coerceArray = (value) => (Array.isArray(value) ? value : [])
+
+const isMissingSupabaseTableError = (error) => {
+  const code = String(error?.code ?? '')
+  const message = String(error?.message ?? '').toLowerCase()
+  return (
+    code === '42P01' ||
+    code === 'PGRST205' ||
+    message.includes('relation') && message.includes('does not exist') ||
+    message.includes('could not find the table') && message.includes('schema cache')
+  )
+}
+
+const normalizeTaskDependency = (dep) => {
+  if (!dep?.depends_on_task_id) return null
+  return {
+    depends_on_task_id: dep.depends_on_task_id,
+    type: dep.type ?? 'FS',
+    lag_days: Number.isFinite(Number(dep.lag_days)) ? Number(dep.lag_days) : 0,
+  }
+}
+
+const mapTaskFromSupabase = (taskRow, dependencyRows = []) => {
+  const dependencyList = coerceArray(dependencyRows).map(normalizeTaskDependency).filter(Boolean)
+  const existingDependencies = coerceArray(taskRow?.dependencies).map(normalizeTaskDependency).filter(Boolean)
+  return {
+    ...taskRow,
+    duration: Math.max(1, Number(taskRow?.duration ?? 1) || 1),
+    sort_order: Number.isFinite(Number(taskRow?.sort_order)) ? Number(taskRow.sort_order) : 0,
+    dependencies: existingDependencies.length > 0 ? existingDependencies : dependencyList,
+  }
+}
+
+const mapLotFromSupabase = (lotRow, lotTasks = []) => ({
+  ...lotRow,
+  custom_fields: lotRow?.custom_fields ?? {},
+  tasks: coerceArray(lotTasks),
+  inspections: coerceArray(lotRow?.inspections),
+  punch_list: lotRow?.punch_list ?? null,
+  daily_logs: coerceArray(lotRow?.daily_logs),
+  change_orders: coerceArray(lotRow?.change_orders),
+  material_orders: coerceArray(lotRow?.material_orders),
+  documents: coerceArray(lotRow?.documents),
+  photos: coerceArray(lotRow?.photos),
+})
+
+const mapCommunityFromSupabase = (communityRow) => ({
+  ...communityRow,
+  builders: coerceArray(communityRow?.builders),
+  realtors: coerceArray(communityRow?.realtors),
+  inspectors: coerceArray(communityRow?.inspectors),
+  documents: coerceArray(communityRow?.documents),
+})
+
+const mapSubcontractorFromSupabase = (subRow) => ({
+  ...subRow,
+  company_name: subRow?.company_name ?? subRow?.name ?? 'Subcontractor',
+  trade: subRow?.trade ?? 'other',
+  secondary_trades: coerceArray(subRow?.secondary_trades),
+  primary_contact: {
+    name: subRow?.primary_contact?.name ?? '',
+    phone: subRow?.primary_contact?.phone ?? subRow?.phone ?? '',
+    email: subRow?.primary_contact?.email ?? subRow?.email ?? '',
+  },
+  additional_contacts: coerceArray(subRow?.additional_contacts),
+  office_phone: subRow?.office_phone ?? subRow?.phone ?? subRow?.primary_contact?.phone ?? '',
+})
+
+const formatSyncTimestamp = (iso) => {
+  if (!iso) return ''
+  const dt = parseISODate(iso)
+  if (!dt) return ''
+  return dt.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 const mergeTradeOptions = (customTrades = []) => {
   const map = new Map()
   TRADES.forEach((t) => map.set(t.id, t))
@@ -621,6 +703,21 @@ export default function BuildFlow() {
   const [scheduledReportModal, setScheduledReportModal] = useState(false)
   const [subContactModalId, setSubContactModalId] = useState(null)
   const [editingSubId, setEditingSubId] = useState(null)
+  const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authError, setAuthError] = useState('')
+  const [supabaseSession, setSupabaseSession] = useState(null)
+  const [supabaseUser, setSupabaseUser] = useState(null)
+  const [supabaseBootstrapVersion, setSupabaseBootstrapVersion] = useState(0)
+  const [supabaseStatus, setSupabaseStatus] = useState({
+    phase: 'idle',
+    message: 'Not signed in. Using local data.',
+    orgId: null,
+    role: null,
+    loadedAt: null,
+    counts: null,
+    warning: '',
+  })
 
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
   const [weather, setWeather] = useState({ loading: true, forecast: [] })
@@ -657,6 +754,304 @@ export default function BuildFlow() {
   useEffect(() => {
     saveAppState(app)
   }, [app])
+
+  useEffect(() => {
+    let active = true
+
+    const readSession = async () => {
+      const { data, error } = await supabase.auth.getSession()
+      if (!active) return
+
+      if (error) {
+        setSupabaseStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          message: `Auth session check failed: ${error.message}`,
+          loadedAt: new Date().toISOString(),
+        }))
+        return
+      }
+
+      const session = data?.session ?? null
+      setSupabaseSession(session)
+      setSupabaseUser(session?.user ?? null)
+      if (session?.user?.email) {
+        setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
+      }
+    }
+
+    readSession()
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return
+      setSupabaseSession(session ?? null)
+      setSupabaseUser(session?.user ?? null)
+      if (session?.user?.email) {
+        setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
+      } else {
+        setAuthDraft((prev) => ({ ...prev, password: '' }))
+      }
+      setAuthError('')
+    })
+
+    return () => {
+      active = false
+      subscription?.unsubscribe?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const readOrgScopedRows = async (tableName, orgId, filterFallbackTables) => {
+      const withFilter = await supabase.from(tableName).select('*').eq('org_id', orgId)
+      if (!withFilter.error) {
+        return { rows: withFilter.data ?? [], missing: false, error: null }
+      }
+      if (isMissingSupabaseTableError(withFilter.error)) {
+        return { rows: [], missing: true, error: null }
+      }
+
+      const code = String(withFilter.error?.code ?? '')
+      const message = String(withFilter.error?.message ?? '').toLowerCase()
+      const orgColumnMissing = code === '42703' || (message.includes('org_id') && message.includes('column'))
+      if (!orgColumnMissing) {
+        return { rows: [], missing: false, error: withFilter.error }
+      }
+
+      const withoutFilter = await supabase.from(tableName).select('*')
+      if (withoutFilter.error) {
+        if (isMissingSupabaseTableError(withoutFilter.error)) {
+          return { rows: [], missing: true, error: null }
+        }
+        return { rows: [], missing: false, error: withoutFilter.error }
+      }
+
+      filterFallbackTables.push(tableName)
+      return { rows: withoutFilter.data ?? [], missing: false, error: null }
+    }
+
+    const hydrateFromSupabase = async () => {
+      if (!supabaseUser?.id) {
+        setSupabaseStatus({
+          phase: 'signed_out',
+          message: 'Not signed in. Using local data.',
+          orgId: null,
+          role: null,
+          loadedAt: new Date().toISOString(),
+          counts: null,
+          warning: '',
+        })
+        return
+      }
+
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'loading',
+        message: 'Loading organization data from Supabase...',
+        loadedAt: new Date().toISOString(),
+        warning: '',
+      }))
+
+      const profileResult = await supabase
+        .from('profiles')
+        .select('id, org_id, role')
+        .eq('id', supabaseUser.id)
+        .limit(1)
+
+      if (cancelled) return
+      if (profileResult.error) {
+        setSupabaseStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          message: `Profile lookup failed: ${profileResult.error.message}`,
+          loadedAt: new Date().toISOString(),
+        }))
+        return
+      }
+
+      const profile = (profileResult.data ?? [])[0] ?? null
+      const orgId = profile?.org_id ?? (SUPABASE_ORG_ID_FALLBACK || null)
+      const usedEnvOrgFallback = !profile?.org_id && Boolean(SUPABASE_ORG_ID_FALLBACK)
+
+      if (!orgId) {
+        setSupabaseStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          message: 'No profile.org_id found for this user. Add a profile row or set VITE_SUPABASE_ORG_ID.',
+          loadedAt: new Date().toISOString(),
+        }))
+        return
+      }
+
+      const orgResult = await supabase.from('organizations').select('*').eq('id', orgId).limit(1)
+      if (cancelled) return
+      if (orgResult.error) {
+        setSupabaseStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          message: `Organization lookup failed: ${orgResult.error.message}`,
+          orgId,
+          role: profile?.role ?? null,
+          loadedAt: new Date().toISOString(),
+        }))
+        return
+      }
+
+      const orgRow = (orgResult.data ?? [])[0] ?? null
+      const filterFallbackTables = []
+      const missingTables = []
+
+      const communitiesRead = await readOrgScopedRows('communities', orgId, filterFallbackTables)
+      const lotsRead = await readOrgScopedRows('lots', orgId, filterFallbackTables)
+      const tasksRead = await readOrgScopedRows('tasks', orgId, filterFallbackTables)
+      const subsRead = await readOrgScopedRows('subcontractors', orgId, filterFallbackTables)
+      const productTypesRead = await readOrgScopedRows('product_types', orgId, filterFallbackTables)
+      const plansRead = await readOrgScopedRows('plans', orgId, filterFallbackTables)
+      const agenciesRead = await readOrgScopedRows('agencies', orgId, filterFallbackTables)
+
+      const reads = [communitiesRead, lotsRead, tasksRead, subsRead, productTypesRead, plansRead, agenciesRead]
+      const fatalReadError = reads.find((r) => r.error)?.error ?? null
+      if (fatalReadError) {
+        setSupabaseStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          message: `Supabase read failed: ${fatalReadError.message}`,
+          orgId,
+          role: profile?.role ?? null,
+          loadedAt: new Date().toISOString(),
+        }))
+        return
+      }
+
+      if (communitiesRead.missing) missingTables.push('communities')
+      if (lotsRead.missing) missingTables.push('lots')
+      if (tasksRead.missing) missingTables.push('tasks')
+      if (subsRead.missing) missingTables.push('subcontractors')
+      if (productTypesRead.missing) missingTables.push('product_types')
+      if (plansRead.missing) missingTables.push('plans')
+      if (agenciesRead.missing) missingTables.push('agencies')
+
+      let dependencyRows = []
+      const taskIds = (tasksRead.rows ?? []).map((task) => task?.id).filter(Boolean)
+      if (taskIds.length > 0) {
+        const depResult = await supabase.from('task_dependencies').select('*').in('task_id', taskIds)
+        if (depResult.error) {
+          if (isMissingSupabaseTableError(depResult.error)) {
+            missingTables.push('task_dependencies')
+          } else {
+            setSupabaseStatus((prev) => ({
+              ...prev,
+              phase: 'error',
+              message: `Task dependency read failed: ${depResult.error.message}`,
+              orgId,
+              role: profile?.role ?? null,
+              loadedAt: new Date().toISOString(),
+            }))
+            return
+          }
+        } else {
+          dependencyRows = depResult.data ?? []
+        }
+      }
+
+      const dependenciesByTaskId = new Map()
+      for (const dep of dependencyRows) {
+        if (!dep?.task_id) continue
+        const list = dependenciesByTaskId.get(dep.task_id) ?? []
+        list.push(dep)
+        dependenciesByTaskId.set(dep.task_id, list)
+      }
+
+      const tasksByLotId = new Map()
+      for (const taskRow of tasksRead.rows ?? []) {
+        const lotId = taskRow?.lot_id
+        if (!lotId) continue
+        const dependencyList = dependenciesByTaskId.get(taskRow.id) ?? []
+        const mappedTask = mapTaskFromSupabase(taskRow, dependencyList)
+        const list = tasksByLotId.get(lotId) ?? []
+        list.push(mappedTask)
+        tasksByLotId.set(lotId, list)
+      }
+
+      const mappedCommunities = (communitiesRead.rows ?? []).map(mapCommunityFromSupabase)
+      const mappedLots = (lotsRead.rows ?? []).map((lotRow) =>
+        mapLotFromSupabase(lotRow, tasksByLotId.get(lotRow.id) ?? []),
+      )
+      const mappedSubs = (subsRead.rows ?? []).map(mapSubcontractorFromSupabase)
+      const mappedProductTypes = coerceArray(productTypesRead.rows)
+      const mappedPlans = coerceArray(plansRead.rows)
+      const mappedAgencies = coerceArray(agenciesRead.rows)
+
+      const hasRemoteCoreData = mappedCommunities.length > 0 || mappedLots.length > 0 || mappedSubs.length > 0
+
+      setApp((prev) => {
+        const nextOrg = {
+          ...prev.org,
+          name: orgRow?.name ?? orgRow?.builder_name ?? prev.org.name,
+          builder_name: orgRow?.builder_name ?? orgRow?.name ?? prev.org.builder_name,
+          default_build_days: Number.isFinite(Number(orgRow?.default_build_days))
+            ? Number(orgRow.default_build_days)
+            : prev.org.default_build_days,
+          work_days: Array.isArray(orgRow?.work_days) ? orgRow.work_days : prev.org.work_days,
+          holidays: Array.isArray(orgRow?.holidays) ? orgRow.holidays : prev.org.holidays,
+        }
+
+        if (!hasRemoteCoreData) {
+          return { ...prev, org: nextOrg }
+        }
+
+        return {
+          ...prev,
+          org: nextOrg,
+          communities: mappedCommunities.length > 0 ? mappedCommunities : prev.communities,
+          lots: mappedLots.length > 0 ? mappedLots : prev.lots,
+          subcontractors: mappedSubs.length > 0 ? mappedSubs : prev.subcontractors,
+          product_types: mappedProductTypes.length > 0 ? mappedProductTypes : prev.product_types,
+          plans: mappedPlans.length > 0 ? mappedPlans : prev.plans,
+          agencies: mappedAgencies.length > 0 ? mappedAgencies : prev.agencies,
+        }
+      })
+
+      const warningParts = []
+      if (filterFallbackTables.length > 0) {
+        warningParts.push(`No org_id filter on: ${filterFallbackTables.join(', ')}`)
+      }
+      if (usedEnvOrgFallback) {
+        warningParts.push('Using VITE_SUPABASE_ORG_ID fallback because profile mapping was not found')
+      }
+      if (missingTables.length > 0) {
+        warningParts.push(`Missing tables: ${Array.from(new Set(missingTables)).join(', ')}`)
+      }
+
+      if (cancelled) return
+      setSupabaseStatus({
+        phase: 'ready',
+        message: hasRemoteCoreData
+          ? 'Supabase connected. Remote data is loaded.'
+          : 'Supabase connected. No remote core rows yet; local seed data remains active.',
+        orgId,
+        role: profile?.role ?? null,
+        loadedAt: new Date().toISOString(),
+        counts: {
+          communities: mappedCommunities.length,
+          lots: mappedLots.length,
+          tasks: (tasksRead.rows ?? []).length,
+          subcontractors: mappedSubs.length,
+          product_types: mappedProductTypes.length,
+        },
+        warning: warningParts.join(' | '),
+      })
+    }
+
+    hydrateFromSupabase()
+
+    return () => {
+      cancelled = true
+    }
+  }, [supabaseUser?.id, supabaseBootstrapVersion])
 
   useEffect(() => {
     const onOnline = () => {
@@ -853,6 +1248,85 @@ export default function BuildFlow() {
     setSelectedCommunityId(null)
     setSelectedLotId(null)
     setLotDetailTab('overview')
+  }
+
+  const setAuthField = (field, value) => {
+    setAuthDraft((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const signInWithSupabase = async () => {
+    const email = String(authDraft.email ?? '').trim()
+    const password = String(authDraft.password ?? '')
+    if (!email || !password) {
+      setAuthError('Enter both email and password.')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthError('')
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    setAuthBusy(false)
+
+    if (error) {
+      setAuthError(error.message)
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Sign in failed: ${error.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+      return
+    }
+
+    setAuthDraft((prev) => ({ ...prev, password: '' }))
+  }
+
+  const createSupabaseLogin = async () => {
+    const email = String(authDraft.email ?? '').trim()
+    const password = String(authDraft.password ?? '')
+    if (!email || !password) {
+      setAuthError('Enter an email and password to create a login.')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthError('')
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: typeof window !== 'undefined' ? window.location.origin : undefined },
+    })
+    setAuthBusy(false)
+
+    if (error) {
+      setAuthError(error.message)
+      return
+    }
+
+    setAuthDraft((prev) => ({ ...prev, password: '' }))
+    setSupabaseStatus((prev) => ({
+      ...prev,
+      phase: 'auth_pending',
+      message: 'Account created. Check your email if confirmation is enabled, then sign in.',
+      loadedAt: new Date().toISOString(),
+    }))
+  }
+
+  const signOutFromSupabase = async () => {
+    setAuthBusy(true)
+    setAuthError('')
+    const { error } = await supabase.auth.signOut()
+    setAuthBusy(false)
+    if (error) {
+      setAuthError(error.message)
+      return
+    }
+    setSupabaseBootstrapVersion((prev) => prev + 1)
+  }
+
+  const refreshSupabaseBootstrap = () => {
+    if (!supabaseUser?.id) return
+    setSupabaseBootstrapVersion((prev) => prev + 1)
   }
 
   const navigateRoot = (nextTab) => {
@@ -3455,6 +3929,81 @@ export default function BuildFlow() {
       <div className="p-4 space-y-4">
         {tab === 'dashboard' && !selectedLot && !selectedCommunity && (
           <div className="space-y-4">
+            <Card className="border-blue-200 bg-blue-50/40">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Supabase</p>
+                  <p className="text-sm text-gray-800 mt-1">{supabaseStatus.message}</p>
+                  {supabaseStatus.orgId ? (
+                    <p className="text-xs text-gray-600 mt-1">Org: {supabaseStatus.orgId}</p>
+                  ) : null}
+                  {supabaseStatus.role ? (
+                    <p className="text-xs text-gray-600 mt-1">Role: {supabaseStatus.role}</p>
+                  ) : null}
+                  {supabaseStatus.loadedAt ? (
+                    <p className="text-xs text-gray-500 mt-1">Last check: {formatSyncTimestamp(supabaseStatus.loadedAt)}</p>
+                  ) : null}
+                  {supabaseStatus.warning ? (
+                    <p className="text-xs text-amber-700 mt-2">{supabaseStatus.warning}</p>
+                  ) : null}
+                  {supabaseStatus.counts ? (
+                    <p className="text-xs text-gray-700 mt-2">
+                      Rows - Communities {supabaseStatus.counts.communities}, Lots {supabaseStatus.counts.lots}, Tasks {supabaseStatus.counts.tasks}, Subs {supabaseStatus.counts.subcontractors}
+                    </p>
+                  ) : null}
+                </div>
+                {supabaseUser?.email ? (
+                  <p className="text-[11px] text-gray-600 text-right max-w-[11rem] break-words">
+                    {supabaseUser.email}
+                    {supabaseSession?.expires_at ? (
+                      <span className="block text-[10px] text-gray-500 mt-1">
+                        Session: {formatSyncTimestamp(new Date(Number(supabaseSession.expires_at) * 1000).toISOString())}
+                      </span>
+                    ) : null}
+                  </p>
+                ) : null}
+              </div>
+
+              {!supabaseUser ? (
+                <div className="mt-3 space-y-2">
+                  <input
+                    type="email"
+                    value={authDraft.email}
+                    onChange={(e) => setAuthField('email', e.target.value)}
+                    placeholder="Email"
+                    className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
+                    autoComplete="email"
+                  />
+                  <input
+                    type="password"
+                    value={authDraft.password}
+                    onChange={(e) => setAuthField('password', e.target.value)}
+                    placeholder="Password"
+                    className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
+                    autoComplete="current-password"
+                  />
+                  {authError ? <p className="text-xs text-red-600">{authError}</p> : null}
+                  <div className="grid grid-cols-2 gap-2">
+                    <PrimaryButton onClick={signInWithSupabase} disabled={authBusy}>
+                      {authBusy ? 'Signing in...' : 'Sign In'}
+                    </PrimaryButton>
+                    <SecondaryButton onClick={createSupabaseLogin} disabled={authBusy} className="border-blue-200">
+                      Create Login
+                    </SecondaryButton>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <SecondaryButton onClick={refreshSupabaseBootstrap} disabled={supabaseStatus.phase === 'loading'} className="border-blue-200">
+                    Refresh Data
+                  </SecondaryButton>
+                  <SecondaryButton onClick={signOutFromSupabase} disabled={authBusy} className="border-blue-200">
+                    Sign Out
+                  </SecondaryButton>
+                </div>
+              )}
+            </Card>
+
             <div className="bg-gradient-to-r from-sky-400 to-blue-500 rounded-2xl p-4 text-white">
               <div className="flex items-center justify-between mb-3">
                 <div>
