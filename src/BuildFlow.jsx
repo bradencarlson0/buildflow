@@ -7883,25 +7883,32 @@ export default function BuildFlow() {
 
               {!communityDraft.plat_skip ? (
                 <div className="space-y-2">
-                  <label className={`block ${!isOnline ? 'opacity-50' : ''}`}>
-                    <span className="text-sm font-semibold">Upload Plat Map</span>
-                    <input
-                      type="file"
-                      accept="application/pdf,image/*"
-                      disabled={!isOnline}
-                      onChange={(e) => {
-                        const file = e.target.files?.[0]
-                        if (!file) return
-                        const max = 50 * 1024 * 1024
-                        const okType = file.type === 'application/pdf' || String(file.type).startsWith('image/')
-                        if (!okType) return alert('Plat map must be a PDF or image.')
-                        if (file.size > max) return alert('Plat map must be ≤ 50MB.')
-                        setCommunityDraft((d) => ({ ...d, plat_file: file, plat_skip: false }))
-                        e.target.value = ''
-                      }}
-                      className="mt-1 w-full"
-                    />
-                  </label>
+                  <div className={`${!isOnline ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-semibold block mb-1">Upload Plat Map</span>
+                    <label
+                      className={`w-full h-16 rounded-xl border-2 border-dashed border-gray-300 bg-white flex items-center justify-center text-sm font-semibold text-gray-700 ${
+                        !isOnline ? 'cursor-not-allowed' : 'cursor-pointer hover:border-blue-300 hover:bg-blue-50/30'
+                      }`}
+                    >
+                      Click to choose a file
+                      <input
+                        type="file"
+                        accept="application/pdf,image/*"
+                        disabled={!isOnline}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0]
+                          if (!file) return
+                          const max = 50 * 1024 * 1024
+                          const okType = file.type === 'application/pdf' || String(file.type).startsWith('image/')
+                          if (!okType) return alert('Plat map must be a PDF or image.')
+                          if (file.size > max) return alert('Plat map must be ≤ 50MB.')
+                          setCommunityDraft((d) => ({ ...d, plat_file: file, plat_skip: false }))
+                          e.target.value = ''
+                        }}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
 
                   {communityDraft.plat_file ? (
                     <Card className="bg-white">
