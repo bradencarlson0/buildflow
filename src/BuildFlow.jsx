@@ -7,6 +7,7 @@ import {
   Calendar,
   Camera,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Cloud,
@@ -59,7 +60,6 @@ import {
   applyDelayCascade,
   applyDurationChange,
   applyListReorder,
-  buildParallelStartPlan,
   buildReschedulePreview,
   calculateLotProgress,
   calculateTargetCompletionDate,
@@ -67,6 +67,10 @@ import {
   getCurrentMilestone,
   getPredictedCompletionDate,
   previewDelayImpact,
+  rebuildTrackSchedule,
+  insertBufferTaskAfter,
+  removeBufferTask,
+  refreshReadyStatuses,
   startLotFromTemplate,
 } from './lib/scheduleEngine.js'
 import { deleteBlob, getBlob, putBlob } from './lib/idb.js'
@@ -424,6 +428,15 @@ const getSubPhone = (sub) => sub?.phone || sub?.primary_contact?.phone || sub?.o
 const getSubEmail = (sub) => sub?.email || sub?.primary_contact?.email || ''
 
 const coerceArray = (value) => (Array.isArray(value) ? value : [])
+
+const isBufferTask = (task) => {
+  if (!task) return false
+  if (task.is_buffer) return true
+  if (String(task.kind ?? '').toLowerCase() === 'buffer') return true
+  if (String(task.trade ?? '').toLowerCase() === 'buffer') return true
+  if (String(task.name ?? '').trim().toLowerCase() === 'buffer') return true
+  return false
+}
 
 const isMissingSupabaseTableError = (error) => {
   const code = String(error?.code ?? '')
@@ -838,9 +851,12 @@ export default function BuildFlow() {
   const [taskModal, setTaskModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
+  const [bufferModal, setBufferModal] = useState(null)
+  const [createBufferModal, setCreateBufferModal] = useState(null)
   const [addTaskModal, setAddTaskModal] = useState(null)
   const [scheduleInspectionModal, setScheduleInspectionModal] = useState(null)
   const [inspectionResultModal, setInspectionResultModal] = useState(null)
+  const [inspectionNoteModal, setInspectionNoteModal] = useState(null)
   const [photoCaptureModal, setPhotoCaptureModal] = useState(null)
   const [messageModal, setMessageModal] = useState(null)
   const [specEditorModal, setSpecEditorModal] = useState(null)
@@ -891,7 +907,6 @@ export default function BuildFlow() {
     communityId: 'all',
     trade: 'all',
     subId: 'all',
-    showInspections: true,
     showDelayed: true,
     showMilestones: true,
   }))
@@ -1246,6 +1261,7 @@ export default function BuildFlow() {
         lotRows,
         taskRows,
         dependencyRows,
+        deletedTaskIds,
       } = pendingPayload
 
       if (!orgId || !userId) return
@@ -1292,6 +1308,26 @@ export default function BuildFlow() {
       await upsertRows('communities', communitiesRows, 'id')
       await upsertRows('subcontractors', subcontractorRows, 'id')
       await upsertRows('lots', lotRows, 'id')
+
+      const deletedIds = Array.from(new Set(coerceArray(deletedTaskIds).filter(Boolean)))
+      if (deletedIds.length > 0) {
+        for (const chunk of chunkArray(deletedIds, 200)) {
+          const depDeleteTask = await supabase.from('task_dependencies').delete().in('task_id', chunk)
+          if (depDeleteTask.error && !isMissingSupabaseTableError(depDeleteTask.error)) {
+            throw new Error(`Task dependency delete failed: ${depDeleteTask.error.message}`)
+          }
+          const depDeleteDepends = await supabase.from('task_dependencies').delete().in('depends_on_task_id', chunk)
+          if (depDeleteDepends.error && !isMissingSupabaseTableError(depDeleteDepends.error)) {
+            throw new Error(`Task dependency delete failed: ${depDeleteDepends.error.message}`)
+          }
+
+          const taskDelete = await supabase.from('tasks').delete().in('id', chunk)
+          if (taskDelete.error && !isMissingSupabaseTableError(taskDelete.error)) {
+            throw new Error(`Task delete failed: ${taskDelete.error.message}`)
+          }
+        }
+      }
+
       await upsertRows('tasks', taskRows, 'id')
 
       const taskIds = taskRows.map((row) => row.id).filter(Boolean)
@@ -1331,6 +1367,16 @@ export default function BuildFlow() {
         },
       }))
       setWriteSyncState({ phase: 'synced', lastSyncedAt: syncedAt, error: '' })
+
+      if (deletedIds.length > 0) {
+        const deletedSet = new Set(deletedIds)
+        setApp((prev) => {
+          const sync = prev.sync ?? {}
+          const remaining = coerceArray(sync.deleted_task_ids).filter((id) => !deletedSet.has(id))
+          if (remaining.length === coerceArray(sync.deleted_task_ids).length) return prev
+          return { ...prev, sync: { ...sync, deleted_task_ids: remaining } }
+        })
+      }
     } catch (error) {
       setSupabaseStatus((prev) => ({
         ...prev,
@@ -1402,6 +1448,8 @@ export default function BuildFlow() {
       }
     }
 
+    const deletedTaskIds = coerceArray(app.sync?.deleted_task_ids).filter(Boolean)
+
     const nextPayload = {
       orgId,
       userId: supabaseUser.id,
@@ -1415,6 +1463,7 @@ export default function BuildFlow() {
       lotRows,
       taskRows,
       dependencyRows,
+      deletedTaskIds,
     }
     const nextHash = JSON.stringify(nextPayload)
 
@@ -1537,7 +1586,7 @@ export default function BuildFlow() {
   const contactLibrary = app.contact_library ?? { builders: [], realtors: [] }
   const contactLibraryBuilders = contactLibrary.builders ?? []
   const contactLibraryRealtors = contactLibrary.realtors ?? []
-  const { businessDaysBetweenInclusive, getNextWorkDay, addWorkDays, subtractWorkDays } = makeWorkdayHelpers(org)
+  const { businessDaysBetweenInclusive, getNextWorkDay } = makeWorkdayHelpers(org)
   const todayIso = formatISODate(new Date())
 
   const communitiesById = useMemo(() => new Map(app.communities.map((c) => [c.id, c])), [app.communities])
@@ -1837,6 +1886,79 @@ export default function BuildFlow() {
       )
       return { ...lot, tasks }
     })
+  }
+
+  const markTaskIncomplete = (lotId, taskId) => {
+    updateLot(lotId, (lot) => {
+      const now = new Date().toISOString()
+      const tasks = (lot.tasks ?? []).map((t) => {
+        if (t.id !== taskId) return t
+        return {
+          ...t,
+          status: 'pending',
+          actual_start: null,
+          actual_end: null,
+          updated_at: now,
+        }
+      })
+
+      const nextStatus = lot.status === 'complete' ? 'in_progress' : lot.status
+      return {
+        ...lot,
+        status: nextStatus,
+        actual_completion_date: nextStatus === 'complete' ? lot.actual_completion_date ?? null : null,
+        tasks: refreshReadyStatuses(tasks),
+      }
+    })
+
+    if (!isOnline) {
+      enqueueSyncOp({
+        type: 'task_status',
+        lot_id: lotId,
+        entity_type: 'task',
+        entity_id: taskId,
+        summary: 'Task marked incomplete',
+      })
+    }
+  }
+
+  const deleteLotTask = (lotId, taskId, taskName = '') => {
+    setApp((prev) => {
+      const now = new Date().toISOString()
+      const nextLots = (prev.lots ?? []).map((lot) => {
+        if (lot.id !== lotId) return lot
+        const target = (lot.tasks ?? []).find((t) => t.id === taskId) ?? null
+        const baseLot = { ...lot, tasks: (lot.tasks ?? []).map((t) => ({ ...t })) }
+        const nextLot = target && isBufferTask(target) ? removeBufferTask(baseLot, taskId, prev.org) : baseLot
+        const nextTasks = refreshReadyStatuses((nextLot.tasks ?? []).filter((t) => t.id !== taskId))
+        return { ...lot, tasks: nextTasks, updated_at: now }
+      })
+
+      const prevSync = prev.sync ?? {}
+      const deleted = new Set(coerceArray(prevSync.deleted_task_ids))
+      deleted.add(taskId)
+
+      return {
+        ...prev,
+        lots: nextLots,
+        sync: {
+          ...prevSync,
+          deleted_task_ids: Array.from(deleted),
+        },
+      }
+    })
+
+    setSelectedScheduleTaskIds((prev) => prev.filter((id) => id !== taskId))
+
+    if (!isOnline) {
+      enqueueSyncOp({
+        type: 'task_delete',
+        lot_id: lotId,
+        entity_type: 'task',
+        entity_id: taskId,
+        summary: `Task deleted${taskName ? ` (${taskName})` : ''}`,
+      })
+    }
   }
 
   const buildParallelCascadePlan = (lot, taskIds) => {
@@ -2542,13 +2664,7 @@ export default function BuildFlow() {
 
       const tasks = (lot.tasks ?? []).map((t) => {
         if (t.id !== taskId) return t
-        return {
-          ...t,
-          status: 'blocked',
-          inspection_id: inspectionId,
-          actual_end: t.actual_end ?? todayIso,
-          updated_at: now,
-        }
+        return { ...t, inspection_id: inspectionId, updated_at: now }
       })
 
       return { ...lot, tasks, inspections: [...(lot.inspections ?? []), inspection] }
@@ -2566,60 +2682,6 @@ export default function BuildFlow() {
   }
 
   const saveInspectionResult = (lotId, inspectionId, resultPayload) => {
-    const lotSnapshot = lotsById.get(lotId) ?? null
-    if (lotSnapshot && resultPayload?.result === 'pass') {
-      const before = getCurrentMilestone(lotSnapshot)
-      const now = new Date().toISOString()
-      const inspections = (lotSnapshot.inspections ?? []).map((i) => {
-        if (i.id !== inspectionId) return i
-        return {
-          ...i,
-          status: 'completed',
-          result: resultPayload.result,
-          failure_items: resultPayload.failure_items ?? [],
-          report_document: resultPayload.report_document ?? i.report_document ?? null,
-          checklist_completed: resultPayload.checklist_completed ?? i.checklist_completed ?? {},
-          updated_at: now,
-        }
-      })
-
-      const inspection = inspections.find((i) => i.id === inspectionId)
-      const tasks = (lotSnapshot.tasks ?? []).map((t) => {
-        if (!inspection || t.id !== inspection.task_id) return t
-        return { ...t, status: 'complete', updated_at: now }
-      })
-
-      const inspectedTask = inspection ? tasks.find((t) => t.id === inspection.task_id) ?? null : null
-      const nextPunch =
-        resultPayload.result === 'pass' && !lotSnapshot.punch_list && inspectedTask?.name === 'Final Clean'
-          ? createPunchListFromTemplate(now)
-          : lotSnapshot.punch_list
-      const nextStatus = resultPayload.result === 'pass' && inspectedTask?.name === 'Punch Complete' ? 'complete' : lotSnapshot.status
-
-      const nextLotSnapshot = {
-        ...lotSnapshot,
-        status: nextStatus,
-        actual_completion_date: nextStatus === 'complete' ? todayIso : lotSnapshot.actual_completion_date ?? null,
-        inspections,
-        tasks,
-        punch_list: nextPunch,
-      }
-      const after = getCurrentMilestone(nextLotSnapshot)
-      if (after?.id && after.id !== before?.id) {
-        const community = communitiesById.get(lotSnapshot.community_id) ?? null
-        pushNotificationDeduped({
-          dedupeKey: `milestone_reached:${lotId}:${after.id}`,
-          type: 'milestone_reached',
-          title: `Milestone Reached - ${community?.name ?? ''} ${lotCode(lotSnapshot)}`.trim(),
-          body: `${after.label} (${after.pct}%)`,
-          entity_type: 'lot',
-          entity_id: lotId,
-          lot_id: lotId,
-          priority: after.pct >= 95 ? 'high' : 'normal',
-        })
-      }
-    }
-
     updateLot(lotId, (lot) => {
       const now = new Date().toISOString()
       const inspections = (lot.inspections ?? []).map((i) => {
@@ -2634,31 +2696,7 @@ export default function BuildFlow() {
           updated_at: now,
         }
       })
-
-      const inspection = inspections.find((i) => i.id === inspectionId)
-      const tasks = (lot.tasks ?? []).map((t) => {
-        if (!inspection || t.id !== inspection.task_id) return t
-        if (resultPayload.result !== 'pass') {
-          return { ...t, status: 'blocked', updated_at: now }
-        }
-        return { ...t, status: 'complete', updated_at: now }
-      })
-
-      const inspectedTask = inspection ? tasks.find((t) => t.id === inspection.task_id) ?? null : null
-      const nextPunch =
-        resultPayload.result === 'pass' && !lot.punch_list && inspectedTask?.name === 'Final Clean'
-          ? createPunchListFromTemplate(now)
-          : lot.punch_list
-      const nextStatus = resultPayload.result === 'pass' && inspectedTask?.name === 'Punch Complete' ? 'complete' : lot.status
-
-      return {
-        ...lot,
-        status: nextStatus,
-        actual_completion_date: nextStatus === 'complete' ? todayIso : lot.actual_completion_date ?? null,
-        inspections,
-        tasks,
-        punch_list: nextPunch,
-      }
+      return { ...lot, inspections }
     })
     if (!isOnline) {
       enqueueSyncOp({
@@ -3357,20 +3395,6 @@ export default function BuildFlow() {
     return items
   }, [activeLots, todayIso, app.subcontractors])
 
-  const upcomingInspections = useMemo(() => {
-    const list = []
-    for (const lot of app.lots ?? []) {
-      for (const inspection of lot.inspections ?? []) {
-        if (!inspection?.scheduled_date) continue
-        if (inspection.result) continue
-        if (inspection.scheduled_date < todayIso) continue
-        const community = communitiesById.get(lot.community_id) ?? null
-        list.push({ lot, community, inspection })
-      }
-    }
-    return list.sort((a, b) => String(a.inspection.scheduled_date).localeCompare(String(b.inspection.scheduled_date)))
-  }, [app.lots, communitiesById, todayIso])
-
   const criticalDeadlines = useMemo(() => {
     const list = []
     for (const lot of app.lots ?? []) {
@@ -3396,16 +3420,6 @@ export default function BuildFlow() {
     }
     return items
   }, [activeLots, todayIso])
-
-  const pendingInspections = useMemo(() => {
-    let count = 0
-    for (const lot of app.lots ?? []) {
-      for (const inspection of lot.inspections ?? []) {
-        if (!inspection?.result) count += 1
-      }
-    }
-    return count
-  }, [app.lots])
 
   const delayedLots = useMemo(() => activeLots.filter((l) => lotHasDelay(l)), [activeLots])
 
@@ -3752,35 +3766,83 @@ export default function BuildFlow() {
     return true
   }
 
-  const getEarliestStartIso = (lot, task) => {
-    if (!task?.scheduled_start) return null
-    const durationMinus1 = Math.max(0, Number(task.duration ?? 0) - 1)
-    let earliest = getNextWorkDay(task.scheduled_start) ?? parseISODate(task.scheduled_start)
-
-    for (const dep of task.dependencies ?? []) {
-      const pred = (lot.tasks ?? []).find((t) => t.id === dep.depends_on_task_id)
-      if (!pred?.scheduled_start || !pred?.scheduled_end) continue
-      const lag = Math.max(0, Number(dep.lag_days ?? 0) || 0)
-
-      if (dep.type === 'FS') {
-        const d = addWorkDays(pred.scheduled_end, 1 + lag)
-        if (d && (!earliest || d > earliest)) earliest = d
-      } else if (dep.type === 'SS') {
-        const d = addWorkDays(pred.scheduled_start, lag)
-        if (d && (!earliest || d > earliest)) earliest = d
-      } else if (dep.type === 'FF') {
-        const requiredEnd = addWorkDays(pred.scheduled_end, lag)
-        const d = requiredEnd ? subtractWorkDays(requiredEnd, durationMinus1) : null
-        if (d && (!earliest || d > earliest)) earliest = d
-      } else if (dep.type === 'SF') {
-        const requiredEnd = addWorkDays(pred.scheduled_start, lag)
-        const d = requiredEnd ? subtractWorkDays(requiredEnd, durationMinus1) : null
-        if (d && (!earliest || d > earliest)) earliest = d
+  const createInspectionNote = (lotId, payload) => {
+    const inspectionId = uuid()
+    updateLot(lotId, (lot) => {
+      const now = new Date().toISOString()
+      const inspection = {
+        id: inspectionId,
+        lot_id: lotId,
+        task_id: payload.task_id ?? null,
+        type: payload.type ?? 'NOTE',
+        status: 'logged',
+        scheduled_date: payload.scheduled_date ?? todayIso,
+        scheduled_time: payload.scheduled_time ?? '',
+        inspector: payload.inspector ?? '',
+        notes: payload.notes ?? '',
+        result: payload.result ?? null,
+        documents: payload.documents ?? [],
+        created_at: now,
+        updated_at: now,
       }
+      return { ...lot, inspections: [...(lot.inspections ?? []), inspection] }
+    })
+    if (!isOnline) {
+      enqueueSyncOp({
+        type: 'inspection_note',
+        lot_id: lotId,
+        entity_type: 'inspection',
+        entity_id: inspectionId,
+        summary: 'Inspection note added',
+      })
     }
+    return inspectionId
+  }
 
-    const normalized = earliest ? formatISODate(getNextWorkDay(earliest) ?? earliest) : null
-    return normalized
+  const updateInspection = (lotId, inspectionId, patch) => {
+    updateLot(lotId, (lot) => {
+      const now = new Date().toISOString()
+      const inspections = (lot.inspections ?? []).map((i) => {
+        if (i.id !== inspectionId) return i
+        return { ...i, ...patch, updated_at: now }
+      })
+      return { ...lot, inspections }
+    })
+    if (!isOnline) {
+      enqueueSyncOp({
+        type: 'inspection_update',
+        lot_id: lotId,
+        entity_type: 'inspection',
+        entity_id: inspectionId,
+        summary: 'Inspection updated',
+      })
+    }
+  }
+
+  const deleteInspection = async (lotId, inspectionId) => {
+    const lot = lotsById.get(lotId) ?? null
+    const inspection = lot?.inspections?.find((i) => i.id === inspectionId) ?? null
+    const blobs = []
+    for (const doc of inspection?.documents ?? []) {
+      if (doc?.blob_id) blobs.push(doc.blob_id)
+    }
+    if (inspection?.report_document?.blob_id) blobs.push(inspection.report_document.blob_id)
+    await Promise.allSettled(blobs.map((id) => deleteBlob(id)))
+
+    updateLot(lotId, (l) => {
+      const inspections = (l.inspections ?? []).filter((i) => i.id !== inspectionId)
+      const tasks = (l.tasks ?? []).map((t) => (t.inspection_id === inspectionId ? { ...t, inspection_id: null, updated_at: new Date().toISOString() } : t))
+      return { ...l, tasks, inspections }
+    })
+    if (!isOnline) {
+      enqueueSyncOp({
+        type: 'inspection_delete',
+        lot_id: lotId,
+        entity_type: 'inspection',
+        entity_id: inspectionId,
+        summary: 'Inspection deleted',
+      })
+    }
   }
 
   const getSubConflictPreview = ({ subId, dateIso, movingLotId }) => {
@@ -3805,12 +3867,9 @@ export default function BuildFlow() {
   const getCalendarDropStatus = ({ lot, task, targetDateIso }) => {
     if (!lot || !task || !targetDateIso) return { status: 'invalid', normalized: '', earliest: null, conflict: null }
     const normalized = formatISODate(getNextWorkDay(targetDateIso) ?? parseISODate(targetDateIso)) || targetDateIso
-    const earliest = getEarliestStartIso(lot, task)
-    const violation = earliest && parseISODate(normalized) && parseISODate(earliest) && parseISODate(normalized) < parseISODate(earliest)
-    if (violation) return { status: 'invalid', normalized, earliest, conflict: null }
     const conflict = task.sub_id ? getSubConflictPreview({ subId: task.sub_id, dateIso: normalized, movingLotId: lot.id }) : null
-    if (conflict?.conflict) return { status: 'conflict', normalized, earliest, conflict }
-    return { status: 'valid', normalized, earliest, conflict }
+    if (conflict?.conflict) return { status: 'conflict', normalized, earliest: null, conflict }
+    return { status: 'valid', normalized, earliest: null, conflict }
   }
 
   const applyReschedule = ({ lot, task, targetDateIso, reason, notifySubs, preview }) => {
@@ -3818,7 +3877,6 @@ export default function BuildFlow() {
     const computed = preview ?? buildReschedulePreview({ lot, task, targetDateIso, org })
     const normalizedDate = computed.normalized_date || ''
     if (!normalizedDate) return { status: 'invalid' }
-    if (computed.dependency_violation) return { status: 'invalid', earliest: computed.earliest_start }
 
     const hasShift = (computed.affected ?? []).some((a) => a.old_start !== a.new_start || a.old_end !== a.new_end)
     if (!hasShift) return { status: 'noop', newStartDate: normalizedDate, preview: computed }
@@ -3829,11 +3887,11 @@ export default function BuildFlow() {
 
     updateLot(lot.id, (current) => {
       const now = new Date().toISOString()
-      const nextTasks = (current.tasks ?? []).map((t) => {
+      const nextTasks = refreshReadyStatuses((current.tasks ?? []).map((t) => {
         const hit = affectedById.get(t.id)
         if (!hit) return t
         return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
-      })
+      }))
       const currentTask = (current.tasks ?? []).find((t) => t.id === task.id) ?? task
       return {
         ...current,
@@ -3899,21 +3957,6 @@ export default function BuildFlow() {
       }
     }
     return items
-  }
-
-  const calendarInspectionsForDate = (dateIso) => {
-    if (!calendarFilters.showInspections) return []
-    const out = []
-    for (const lot of activeLots) {
-      for (const inspection of lot.inspections ?? []) {
-        if (!inspection?.scheduled_date) continue
-        if (inspection.scheduled_date !== dateIso) continue
-        const task = lot.tasks?.find((t) => t.id === inspection.task_id) ?? null
-        const community = communitiesById.get(lot.community_id) ?? null
-        out.push({ lot, community, inspection, task })
-      }
-    }
-    return out
   }
 
   const headerTitle = selectedLot
@@ -4750,32 +4793,6 @@ export default function BuildFlow() {
                 </div>
               )}
             </Card>
-
-            <Card>
-              <h3 className="font-semibold mb-3">Upcoming Inspections</h3>
-              {upcomingInspections.length === 0 ? (
-                <p className="text-sm text-gray-500">No upcoming inspections.</p>
-              ) : (
-                <div className="space-y-2">
-                  {upcomingInspections.slice(0, 5).map(({ lot, community, inspection }) => (
-                    <button
-                      key={inspection.id}
-                      onClick={() => openLot(lot.id)}
-                      className="w-full p-3 bg-gray-50 rounded-xl text-left"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium">
-                          {INSPECTION_TYPES.find((t) => t.code === inspection.type)?.label ?? inspection.type}
-                        </span>
-                        <span className="text-xs text-gray-600">{formatShortDate(inspection.scheduled_date)}</span>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1">{community?.name ?? ''} • {lotCode(lot)}</p>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </Card>
-
             <Card>
               <h3 className="font-semibold mb-3">Critical Deadlines</h3>
               {criticalDeadlines.length === 0 ? (
@@ -4815,8 +4832,8 @@ export default function BuildFlow() {
                   <p className="text-xs text-gray-600">Tasks Today</p>
                 </div>
                 <div className="p-4 bg-orange-50 rounded-xl text-center">
-                  <p className="text-2xl font-bold text-orange-600">{pendingInspections}</p>
-                  <p className="text-xs text-gray-600">Pending Inspections</p>
+                  <p className="text-2xl font-bold text-orange-600">{todaysAssignments.length}</p>
+                  <p className="text-xs text-gray-600">On Site Today</p>
                 </div>
                 <div className="p-4 bg-red-50 rounded-xl text-center">
                   <p className="text-2xl font-bold text-red-600">{delayedLots.length}</p>
@@ -4961,16 +4978,7 @@ export default function BuildFlow() {
                 </select>
               </div>
 
-              <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={calendarFilters.showInspections}
-                    onChange={(e) => setCalendarFilters((p) => ({ ...p, showInspections: e.target.checked }))}
-                  />
-                  Inspections
-                </label>
-                <label className="inline-flex items-center gap-2">
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">                <label className="inline-flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={calendarFilters.showDelayed}
@@ -4991,7 +4999,6 @@ export default function BuildFlow() {
 
             {calendarView === 'day' && (() => {
               const assignments = calendarAssignmentsForDate(calendarDate)
-              const inspections = calendarInspectionsForDate(calendarDate)
               return (
                 <>
                   <Card>
@@ -5029,36 +5036,7 @@ export default function BuildFlow() {
                         ))}
                       </div>
                     )}
-                  </Card>
-
-                  {calendarFilters.showInspections ? (
-                    <Card>
-                      <h3 className="font-semibold mb-3">Inspections</h3>
-                      {inspections.length === 0 ? (
-                        <p className="text-sm text-gray-500">No inspections scheduled.</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {inspections.map(({ lot, community, inspection, task }) => (
-                            <button
-                              key={inspection.id}
-                              onClick={() => setInspectionResultModal({ lot_id: lot.id, inspection_id: inspection.id })}
-                              className="w-full bg-gray-50 rounded-xl border border-gray-200 p-3 text-left"
-                            >
-                              <p className="font-semibold">
-                                {INSPECTION_TYPES.find((t) => t.code === inspection.type)?.label ?? inspection.type}{' '}
-                                • {community?.name ?? ''} {lotCode(lot)}
-                              </p>
-                              <p className="text-xs text-gray-600 mt-1">
-                                {inspection.scheduled_time ? `${inspection.scheduled_time} • ` : ''}
-                                {task?.name ?? ''}
-                              </p>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </Card>
-                  ) : null}
-                </>
+                  </Card>                </>
               )
             })()}
 
@@ -5145,7 +5123,6 @@ export default function BuildFlow() {
                                 if (!lot || !task) return
                                 const status = getCalendarDropStatus({ lot, task, targetDateIso: iso })
                                 if (status.status === 'invalid') {
-                                  alert(`Dependency violation. Earliest allowed start is ${formatShortDate(status.earliest)}.`)
                                   setCalendarDropTarget(null)
                                   setDraggingCalendarTask(null)
                                   return
@@ -5230,7 +5207,6 @@ export default function BuildFlow() {
                 <div className="space-y-4">
                   {weekDates.map((iso) => {
                     const assignments = calendarAssignmentsForDate(iso)
-                    const inspections = calendarInspectionsForDate(iso)
                     if (calendarView === 'sub' && calendarFilters.subId === 'all') return null
                     const drop = calendarDropTarget?.date === iso ? calendarDropTarget : null
                     const dropCls =
@@ -5265,7 +5241,6 @@ export default function BuildFlow() {
                           if (!lot || !task) return
                           const status = getCalendarDropStatus({ lot, task, targetDateIso: iso })
                           if (status.status === 'invalid') {
-                            alert(`Dependency violation. Earliest allowed start is ${formatShortDate(status.earliest)}.`)
                             setCalendarDropTarget(null)
                             setDraggingCalendarTask(null)
                             return
@@ -5276,7 +5251,7 @@ export default function BuildFlow() {
                         }}
                       >
                         <p className="text-sm font-semibold text-gray-800 mb-2">{formatLongDate(iso)}</p>
-                        {assignments.length === 0 && inspections.length === 0 ? (
+                        {assignments.length === 0 ? (
                           <p className="text-sm text-gray-500">No scheduled work.</p>
                         ) : (
                           <div className="space-y-2">
@@ -5307,25 +5282,7 @@ export default function BuildFlow() {
                                   <TaskStatusBadge status={status} />
                                 </div>
                               </button>
-                            ))}
-                            {calendarFilters.showInspections
-                              ? inspections.map(({ lot, community, inspection }) => (
-                                  <button
-                                    key={inspection.id}
-                                    onClick={() => setInspectionResultModal({ lot_id: lot.id, inspection_id: inspection.id })}
-                                    className="w-full bg-white rounded-xl border border-gray-200 p-3 text-left"
-                                  >
-                                    <p className="font-semibold">
-                                      🔍 {INSPECTION_TYPES.find((t) => t.code === inspection.type)?.label ?? inspection.type} •{' '}
-                                      {community?.name ?? ''} {lotCode(lot)}
-                                    </p>
-                                    <p className="text-xs text-gray-600 mt-1">
-                                      {inspection.scheduled_time ? `${inspection.scheduled_time}` : 'Scheduled'}
-                                    </p>
-                                  </button>
-                                ))
-                              : null}
-                          </div>
+                            ))}                          </div>
                         )}
                       </div>
                     )
@@ -5349,10 +5306,8 @@ export default function BuildFlow() {
                     const d = parseISODate(iso)
                     const inMonth = d ? d.getMonth() === (parseISODate(monthGrid.monthStartIso)?.getMonth() ?? d.getMonth()) : false
                     const assignments = calendarAssignmentsForDate(iso)
-                    const inspections = calendarInspectionsForDate(iso)
                     const workCount = assignments.length
-                    const inspCount = inspections.length
-                    const totalCount = workCount + inspCount
+                    const totalCount = workCount
                     const previewTasks = assignments.slice(0, 2)
                     const hasActivity = totalCount > 0
                     return (
@@ -5389,16 +5344,7 @@ export default function BuildFlow() {
                                 />
                                 <span className="truncate">{lotCode(lot)} • {task.name}</span>
                               </div>
-                            ))}
-                            {calendarFilters.showInspections && inspCount > 0 ? (
-                              <div className="flex items-center gap-1 text-[10px] text-orange-700">
-                                <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                                <span className="truncate">
-                                  {inspCount} inspection{inspCount === 1 ? '' : 's'}
-                                </span>
-                              </div>
-                            ) : null}
-                            {workCount > previewTasks.length ? (
+                            ))}                            {workCount > previewTasks.length ? (
                               <p className="text-[10px] text-gray-500">+{workCount - previewTasks.length} more</p>
                             ) : null}
                           </div>
@@ -6087,17 +6033,24 @@ export default function BuildFlow() {
                         <p className="text-sm text-gray-500">Predicted Completion</p>
                         <p className="font-semibold">{lotEta(selectedLot)}</p>
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2 justify-end">
                         <button
                           onClick={() => setAddTaskModal({ lot_id: selectedLot.id })}
-                          className="px-3 py-2 rounded-xl bg-blue-50 border border-blue-200 text-sm font-semibold text-blue-700"
+                          className="px-3 py-2 rounded-xl bg-blue-50 border border-blue-200 text-sm font-semibold text-blue-700 w-full sm:w-auto"
                         >
                           <Plus className="w-4 h-4 inline mr-1" />
                           Create Task
                         </button>
                         <button
+                          onClick={() => setCreateBufferModal({ lot_id: selectedLot.id })}
+                          className="px-3 py-2 rounded-xl bg-white border border-gray-200 text-sm font-semibold w-full sm:w-auto"
+                        >
+                          <Plus className="w-4 h-4 inline mr-1" />
+                          Create Buffer
+                        </button>
+                        <button
                           onClick={() => exportLotScheduleCsv(selectedLot)}
-                          className="px-3 py-2 rounded-xl bg-white border border-gray-200 text-sm font-semibold"
+                          className="px-3 py-2 rounded-xl bg-white border border-gray-200 text-sm font-semibold w-full sm:w-auto"
                           disabled={!isOnline}
                           title={!isOnline ? 'Requires connection to export' : 'Export schedule to CSV'}
                         >
@@ -6147,9 +6100,7 @@ export default function BuildFlow() {
                           onRescheduleTask={({ task, targetDateIso, preview }) => {
                             if (!selectedLot || !task) return
                             const outcome = applyReschedule({ lot: selectedLot, task, targetDateIso, preview })
-                            if (outcome.status === 'invalid') {
-                              alert(`Dependency violation. Earliest allowed start is ${formatShortDate(outcome.earliest)}.`)
-                            }
+                            if (outcome.status === 'invalid') alert('Could not reschedule task.')
                           }}
                         />
                       </div>
@@ -6215,6 +6166,7 @@ export default function BuildFlow() {
                                   const isDragging = listDraggingTaskId === task.id
                                   const isDropTarget = listDropTaskId === task.id && listDraggingTaskId
                                   const isPulse = listDropPulseId === task.id && !isDragging
+                                  const bufferTask = isBufferTask(task)
                                   const dragStyle = isDragging
                                     ? {
                                         transform: `translateY(${listDragOffset}px) scale(1.02)`,
@@ -6235,7 +6187,7 @@ export default function BuildFlow() {
                                       data-task-id={task.id}
                                       data-track={task.track ?? ''}
                                       style={rowStyle}
-                                      className={`w-full bg-gray-50 rounded-xl p-3 border text-left ${isDragging ? 'border-blue-300 bg-blue-50/50 transition-none' : 'border-gray-200 transition-transform'} ${isDropTarget ? 'ring-2 ring-blue-300' : ''}`}
+                                      className={`w-full rounded-xl p-3 border text-left ${bufferTask ? 'bg-gray-100 border-dashed border-gray-300' : 'bg-gray-50 border-gray-200'} ${isDragging ? 'border-blue-300 bg-blue-50/50 transition-none' : 'transition-transform'} ${isDropTarget ? 'ring-2 ring-blue-300' : ''}`}
                                     >
                                       <div className="flex items-start gap-3">
                                         <input
@@ -6255,47 +6207,99 @@ export default function BuildFlow() {
                                               }}
                                               className="text-left flex-1 min-w-0"
                                             >
-                                              <p className="font-semibold truncate">{task.name}</p>
+                                              <p
+                                                className="font-semibold leading-tight text-gray-900"
+                                                style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }}
+                                              >
+                                                {task.name}
+                                              </p>
                                               <p className="text-xs text-gray-600 mt-1">
                                                 {formatShortDate(task.scheduled_start)} - {formatShortDate(task.scheduled_end)} •
                                                 <span className="ml-1 inline-flex items-center gap-1">
                                                   <span className="text-[10px] uppercase text-gray-500">Duration</span>
-                                                  <select
-                                                    value={task.duration ?? 1}
-                                                    disabled={task.status === 'complete'}
-                                                    onChange={(e) => updateTaskDuration(selectedLot.id, task.id, e.target.value)}
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className="border rounded-md px-1 py-0.5 text-[11px] bg-white"
-                                                  >
-                                                    {DURATION_OPTIONS.map((d) => (
-                                                      <option key={d} value={d}>
-                                                        {d}d
-                                                      </option>
-                                                    ))}
-                                                  </select>
+                                                  {bufferTask ? (
+                                                    <div className="inline-flex items-center gap-1">
+                                                      <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                          e.stopPropagation()
+                                                          const current = Math.max(1, Number(task.duration ?? 1) || 1)
+                                                          updateTaskDuration(selectedLot.id, task.id, Math.max(1, current - 1))
+                                                        }}
+                                                        disabled={Math.max(1, Number(task.duration ?? 1) || 1) <= 1 || task.status === 'complete'}
+                                                        className="w-6 h-6 rounded-md border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
+                                                        title="Decrease"
+                                                      >
+                                                        –
+                                                      </button>
+                                                      <input
+                                                        type="number"
+                                                        min="1"
+                                                        value={Math.max(1, Number(task.duration ?? 1) || 1)}
+                                                        onChange={(e) =>
+                                                          updateTaskDuration(selectedLot.id, task.id, Math.max(1, Number(e.target.value) || 1))
+                                                        }
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        className="w-14 h-6 border border-gray-200 rounded-md text-[11px] bg-white text-center"
+                                                        inputMode="numeric"
+                                                        disabled={task.status === 'complete'}
+                                                      />
+                                                      <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                          e.stopPropagation()
+                                                          const current = Math.max(1, Number(task.duration ?? 1) || 1)
+                                                          updateTaskDuration(selectedLot.id, task.id, current + 1)
+                                                        }}
+                                                        disabled={task.status === 'complete'}
+                                                        className="w-6 h-6 rounded-md border border-gray-200 bg-white text-xs font-semibold disabled:opacity-50"
+                                                        title="Increase"
+                                                      >
+                                                        +
+                                                      </button>
+                                                    </div>
+                                                  ) : (
+                                                    <select
+                                                      value={task.duration ?? 1}
+                                                      disabled={task.status === 'complete'}
+                                                      onChange={(e) => updateTaskDuration(selectedLot.id, task.id, e.target.value)}
+                                                      onClick={(e) => e.stopPropagation()}
+                                                      className="border rounded-md px-1 py-0.5 text-[11px] bg-white"
+                                                    >
+                                                      {DURATION_OPTIONS.map((d) => (
+                                                        <option key={d} value={d}>
+                                                          {d}d
+                                                        </option>
+                                                      ))}
+                                                    </select>
+                                                  )}
                                                 </span>
                                               </p>
                                             </button>
                                             <TaskStatusBadge status={status} />
                                           </div>
-                                          <div className="mt-2 flex flex-col gap-2">
-                                            <label className="text-xs text-gray-600">
-                                              Sub
-                                              <select
-                                                value={effectiveSubId}
-                                                onChange={(e) => updateTaskSub(selectedLot.id, task.id, e.target.value)}
-                                                onClick={(e) => e.stopPropagation()}
-                                                className="mt-1 w-full px-2 py-1 border rounded-lg text-xs bg-white"
-                                              >
-                                                <option value="">Unassigned</option>
-                                                {subsForSelect.map((s) => (
-                                                  <option key={s.id} value={s.id}>
-                                                    {s.company_name}
-                                                  </option>
-                                                ))}
-                                              </select>
-                                            </label>
-                                          </div>
+                                          {!bufferTask ? (
+                                            <div className="mt-2 flex flex-col gap-2">
+                                              <label className="text-xs text-gray-600">
+                                                Sub
+                                                <select
+                                                  value={effectiveSubId}
+                                                  onChange={(e) => updateTaskSub(selectedLot.id, task.id, e.target.value)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  className="mt-1 w-full px-2 py-1 border rounded-lg text-xs bg-white"
+                                                >
+                                                  <option value="">Unassigned</option>
+                                                  {subsForSelect.map((s) => (
+                                                    <option key={s.id} value={s.id}>
+                                                      {s.company_name}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              </label>
+                                            </div>
+                                          ) : (
+                                            <p className="mt-2 text-[11px] text-gray-600">Buffer block (no subcontractor)</p>
+                                          )}
                                         </div>
                                         <button
                                           type="button"
@@ -8222,7 +8226,7 @@ export default function BuildFlow() {
           isOnline={isOnline}
           prefill={startLotPrefill}
           onClose={closeStartLot}
-          onStart={({ lotId, form }) => {
+          onStart={({ lotId, form, draftTasks }) => {
             setApp((prev) => {
               const existingLots = prev.lots
               let startedLot = null
@@ -8246,6 +8250,7 @@ export default function BuildFlow() {
                   orgSettings: prev.org,
                   subcontractors: prev.subcontractors,
                   existingLots,
+                  draftTasks: Array.isArray(draftTasks) ? draftTasks : [],
                 })
                 startedLot = next
                 return next
@@ -8340,22 +8345,19 @@ export default function BuildFlow() {
             }
             onClose={() => setTaskModal(null)}
             onStart={() => startTask(lot.id, task.id)}
-            onRequestComplete={() => {
-              if (task.requires_inspection) {
-                setScheduleInspectionModal({ lot_id: lot.id, task_id: task.id })
-                return
-              }
-              completeTaskDirect(lot.id, task.id)
-            }}
+            onRequestComplete={() => completeTaskDirect(lot.id, task.id)}
             onDelay={() => setDelayModal({ lot_id: lot.id, task_id: task.id })}
             onReschedule={() => setRescheduleModal({ lot_id: lot.id, task_id: task.id })}
+            onBuffer={() => setBufferModal({ lot_id: lot.id, task_id: task.id })}
             onAddPhoto={() => setPhotoSourceModal({ lot_id: lot.id, task_id: task.id })}
-            onOpenInspection={() => {
-              const inspectionId = task.inspection_id
-              if (inspectionId) setInspectionResultModal({ lot_id: lot.id, inspection_id: inspectionId })
-              else setScheduleInspectionModal({ lot_id: lot.id, task_id: task.id })
-            }}
             onMessage={() => setMessageModal({ lot_id: lot.id, task_id: task.id, sub_id: sub?.id ?? null })}
+            onMarkIncomplete={() => markTaskIncomplete(lot.id, task.id)}
+            onDeleteTask={() => {
+              const ok = window.confirm(`Delete this task?\n\n${task.name}\n\nThis cannot be undone.`)
+              if (!ok) return
+              deleteLotTask(lot.id, task.id, task.name)
+              setTaskModal(null)
+            }}
             onAddFile={async ({ label, description, file }) =>
               addTaskFile({ lotId: lot.id, taskId: task.id, label, description, file })
             }
@@ -8376,7 +8378,7 @@ export default function BuildFlow() {
             onSave={(task) => {
               updateLot(lot.id, (current) => ({
                 ...current,
-                tasks: [...(current.tasks ?? []), task],
+                tasks: refreshReadyStatuses([...(current.tasks ?? []), task]),
               }))
               setAddTaskModal(null)
             }}
@@ -8464,6 +8466,62 @@ export default function BuildFlow() {
             onApply={({ newStartDate, reason, notifySubs, preview }) => {
               applyReschedule({ lot, task, targetDateIso: newStartDate, reason, notifySubs, preview })
               setRescheduleModal(null)
+            }}
+          />
+        )
+      })()}
+
+      {bufferModal && (() => {
+        const lot = lotsById.get(bufferModal.lot_id) ?? null
+        const task = lot?.tasks?.find((t) => t.id === bufferModal.task_id) ?? null
+        if (!lot || !task) return null
+        return (
+          <BufferModal
+            lot={lot}
+            task={task}
+            org={org}
+            onClose={() => setBufferModal(null)}
+            onApply={({ days, bufferTaskId }) => {
+              const value = Math.max(1, Number(days) || 1)
+              if (value <= 0) return
+              updateLot(lot.id, (current) => insertBufferTaskAfter(current, task.id, value, org, { buffer_task_id: bufferTaskId }))
+              if (!isOnline) {
+                enqueueSyncOp({
+                  type: 'task_dates',
+                  lot_id: lot.id,
+                  entity_type: 'task',
+                  entity_id: task.id,
+                  summary: `Buffer inserted (${lotCode(lot)} - ${task.name})`,
+                })
+              }
+              setBufferModal(null)
+            }}
+          />
+        )
+      })()}
+
+      {createBufferModal && (() => {
+        const lot = lotsById.get(createBufferModal.lot_id) ?? null
+        if (!lot) return null
+        return (
+          <CreateBufferModal
+            lot={lot}
+            org={org}
+            onClose={() => setCreateBufferModal(null)}
+            onCreate={({ anchorTaskId, days, bufferTaskId }) => {
+              const value = Math.max(1, Number(days) || 1)
+              if (!anchorTaskId || value <= 0) return
+              updateLot(lot.id, (current) => insertBufferTaskAfter(current, anchorTaskId, value, org, { buffer_task_id: bufferTaskId }))
+              if (!isOnline) {
+                enqueueSyncOp({
+                  type: 'task_dates',
+                  lot_id: lot.id,
+                  entity_type: 'task',
+                  entity_id: anchorTaskId,
+                  summary: `Buffer created (${lotCode(lot)})`,
+                })
+              }
+              setCreateBufferModal(null)
             }}
           />
         )
@@ -8611,6 +8669,47 @@ export default function BuildFlow() {
         )
       })()}
 
+      {inspectionNoteModal && (() => {
+        const lot = lotsById.get(inspectionNoteModal.lot_id) ?? null
+        if (!lot) return null
+        const community = communitiesById.get(lot.community_id) ?? null
+        const inspection = inspectionNoteModal.inspection_id ? (lot.inspections ?? []).find((i) => i.id === inspectionNoteModal.inspection_id) ?? null : null
+        const tasks = (lot.tasks ?? []).slice().sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? '')))
+        return (
+          <InspectionNoteModal
+            lot={lot}
+            community={community}
+            tasks={tasks}
+            inspection={inspection}
+            isOnline={isOnline}
+            onClose={() => setInspectionNoteModal(null)}
+            onDelete={async () => {
+              if (!inspection?.id) return
+              const ok = window.confirm('Delete this inspection note?')
+              if (!ok) return
+              await deleteInspection(lot.id, inspection.id)
+              setInspectionNoteModal(null)
+            }}
+            onSave={(draft) => {
+              const patch = {
+                type: draft.type ?? 'NOTE',
+                scheduled_date: draft.scheduled_date ?? todayIso,
+                scheduled_time: draft.scheduled_time ?? '',
+                task_id: draft.task_id ? draft.task_id : null,
+                notes: draft.notes ?? '',
+                documents: draft.documents ?? [],
+              }
+              if (inspection?.id) {
+                updateInspection(lot.id, inspection.id, patch)
+              } else {
+                createInspectionNote(lot.id, patch)
+              }
+              setInspectionNoteModal(null)
+            }}
+          />
+        )
+      })()}
+
       {photoCaptureModal && (() => {
         const lot = lotsById.get(photoCaptureModal.lot_id) ?? null
         const task = photoCaptureModal.task_id ? lot?.tasks?.find((t) => t.id === photoCaptureModal.task_id) ?? null : null
@@ -8678,7 +8777,16 @@ export default function BuildFlow() {
             lot={lot}
             community={community}
             onClose={() => setInspectionsLotId(null)}
-            onOpenInspection={(inspectionId) => setInspectionResultModal({ lot_id: lot.id, inspection_id: inspectionId })}
+            onAddInspectionNote={() => setInspectionNoteModal({ lot_id: lot.id, inspection_id: null })}
+            onOpenInspection={(inspectionId) => {
+              const inspection = (lot.inspections ?? []).find((i) => i.id === inspectionId) ?? null
+              if (!inspection) return
+              if (!inspection.task_id || inspection.type === 'NOTE') {
+                setInspectionNoteModal({ lot_id: lot.id, inspection_id: inspectionId })
+                return
+              }
+              setInspectionResultModal({ lot_id: lot.id, inspection_id: inspectionId })
+            }}
             onScheduleInspectionForTask={(taskId) => setScheduleInspectionModal({ lot_id: lot.id, task_id: taskId })}
           />
         )
@@ -9423,6 +9531,30 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     custom_fields: {},
   }))
 
+  const [draftTasks, setDraftTasks] = useState([])
+  const [previewTouched, setPreviewTouched] = useState(false)
+  const [previewAddTaskOpen, setPreviewAddTaskOpen] = useState(false)
+  const [previewDraggingTaskId, setPreviewDraggingTaskId] = useState(null)
+  const [previewDropTaskId, setPreviewDropTaskId] = useState(null)
+  const previewDragRef = useRef({
+    active: false,
+    timer: null,
+    pointerId: null,
+    taskId: null,
+    track: null,
+    lastX: 0,
+    lastY: 0,
+    offsetX: 0,
+    offsetY: 0,
+    rowRect: null,
+  })
+  const previewScrollRef = useRef(null)
+  const previewAutoScrollRef = useRef({ raf: null, vy: 0, lastY: 0 })
+  const [previewGhost, setPreviewGhost] = useState(null)
+  const previewGhostPosRef = useRef({ raf: null, x: 0, y: 0 })
+  const [previewCollapsedTracks, setPreviewCollapsedTracks] = useState(() => new Set())
+  const previewKey = `${resolvedLotId ?? ''}:${form.start_date ?? ''}:${template?.id ?? ''}`
+
   useEffect(() => {
     if (!resolvedLotId) return
     const defaultPlanId = plans.find((p) => p.product_type_id === resolvedLot?.product_type_id)?.id ?? ''
@@ -9440,12 +9572,324 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     }))
   }, [resolvedLotId])
 
+  useEffect(() => {
+    if (!resolvedLot || !form.start_date) {
+      setDraftTasks([])
+      setPreviewTouched(false)
+      return
+    }
+
+    const nextLot = startLotFromTemplate({
+      lot: resolvedLot,
+      start_date: form.start_date,
+      model_type: resolvedLot?.model_type ?? '',
+      plan_id: form.plan_id || null,
+      job_number: form.job_number,
+      custom_fields: form.custom_fields ?? {},
+      address: form.address,
+      permit_number: form.permit_number,
+      hard_deadline: form.hard_deadline || null,
+      template,
+      orgSettings: org,
+      subcontractors: app.subcontractors,
+      existingLots: lots,
+    })
+
+    const nextTasks = nextLot?.tasks ?? []
+    setDraftTasks(nextTasks)
+    setPreviewCollapsedTracks(new Set(nextTasks.map((t) => t?.track ?? 'misc')))
+    setPreviewTouched(false)
+  }, [previewKey])
+
+  useEffect(() => {
+    return () => {
+      if (previewDragRef.current.timer) clearTimeout(previewDragRef.current.timer)
+      if (previewAutoScrollRef.current.raf) cancelAnimationFrame(previewAutoScrollRef.current.raf)
+      if (previewGhostPosRef.current.raf) cancelAnimationFrame(previewGhostPosRef.current.raf)
+    }
+  }, [])
+
   const targetCompletion = form.start_date ? calculateTargetCompletionDate(form.start_date, buildDays, org) : null
+  const previewCompletion = useMemo(() => {
+    if (!draftTasks || draftTasks.length === 0) return null
+    const completion = getPredictedCompletionDate({ tasks: draftTasks })
+    return completion ? formatISODate(completion) : null
+  }, [draftTasks])
 
   const canStart = Boolean(resolvedLotId && form.start_date)
 
+  const previewLot = useMemo(() => (resolvedLot ? { ...resolvedLot, tasks: draftTasks } : null), [resolvedLot, draftTasks])
+
+  const allSubs = useMemo(
+    () => (app.subcontractors ?? []).slice().sort((a, b) => String(a.company_name).localeCompare(String(b.company_name))),
+    [app.subcontractors],
+  )
+
+  const subsByTrade = useMemo(() => {
+    const out = new Map()
+    for (const sub of allSubs) {
+      const trades = new Set([sub?.trade, ...(sub?.secondary_trades ?? [])].filter(Boolean))
+      for (const trade of trades) {
+        const list = out.get(trade) ?? []
+        list.push(sub)
+        out.set(trade, list)
+      }
+    }
+    return out
+  }, [allSubs])
+
+  const getSubsForTask = (task) => {
+    const trade = String(task?.trade ?? '').trim()
+    if (!trade) return { trade: '', subs: allSubs, showingAll: allSubs.length > 0, hadMatches: allSubs.length > 0 }
+    const matched = subsByTrade.get(trade) ?? []
+    if (matched.length > 0) return { trade, subs: matched, showingAll: false, hadMatches: true }
+    return { trade, subs: allSubs, showingAll: allSubs.length > 0, hadMatches: false }
+  }
+
+  const previewTracks = useMemo(() => {
+    const ordered = TASK_CATEGORIES.map((c) => c.track)
+    const seen = new Set(ordered)
+    for (const task of draftTasks ?? []) {
+      const track = task?.track ?? 'misc'
+      if (seen.has(track)) continue
+      seen.add(track)
+      ordered.push(track)
+    }
+    return ordered
+  }, [draftTasks])
+
+  const getTrackLabel = (track) => TASK_CATEGORIES.find((c) => c.track === track)?.label ?? String(track ?? 'misc')
+
+  const togglePreviewTrack = (track) => {
+    setPreviewCollapsedTracks((prev) => {
+      const next = new Set(prev)
+      if (next.has(track)) next.delete(track)
+      else next.add(track)
+      return next
+    })
+  }
+
+  const updateDraftLot = (updater) => {
+    if (!resolvedLot) return
+    setPreviewTouched(true)
+    setDraftTasks((prev) => {
+      const base = { ...resolvedLot, tasks: prev }
+      const next = updater(base)
+      return next?.tasks ?? prev
+    })
+  }
+
+  const clearPreviewDrag = () => {
+    const state = previewDragRef.current
+    if (state.timer) clearTimeout(state.timer)
+    state.timer = null
+    state.active = false
+    state.pointerId = null
+    state.taskId = null
+    state.track = null
+    state.rowRect = null
+    setPreviewDraggingTaskId(null)
+    setPreviewDropTaskId(null)
+    setPreviewGhost(null)
+    const auto = previewAutoScrollRef.current
+    auto.vy = 0
+    if (auto.raf) cancelAnimationFrame(auto.raf)
+    auto.raf = null
+  }
+
+  const updatePreviewDropTarget = (x, y) => {
+    if (typeof document === 'undefined') return
+    const el = document.elementFromPoint(x, y)
+    const row = el?.closest?.('[data-preview-task-id]')
+    const nextId = row?.dataset?.previewTaskId ?? null
+    const nextTrack = row?.dataset?.previewTaskTrack ?? null
+    const activeTrack = previewDragRef.current.track
+    if (!nextId) return
+    if (activeTrack && nextTrack && String(activeTrack) !== String(nextTrack)) return
+    setPreviewDropTaskId(nextId)
+  }
+
+  const queuePreviewGhostPosition = () => {
+    const pos = previewGhostPosRef.current
+    if (pos.raf) return
+    pos.raf = requestAnimationFrame(() => {
+      pos.raf = null
+      setPreviewGhost((prev) => (prev ? { ...prev, x: pos.x, y: pos.y } : prev))
+    })
+  }
+
+  const updatePreviewGhostPosition = (clientX, clientY) => {
+    const state = previewDragRef.current
+    if (!state.rowRect) return
+    previewGhostPosRef.current.x = clientX - state.offsetX
+    previewGhostPosRef.current.y = clientY - state.offsetY
+    queuePreviewGhostPosition()
+  }
+
+  const tickPreviewAutoScroll = () => {
+    const auto = previewAutoScrollRef.current
+    const el = previewScrollRef.current
+    if (!el) {
+      auto.raf = null
+      return
+    }
+    if (!auto.vy) {
+      auto.raf = null
+      return
+    }
+
+    el.scrollTop += auto.vy
+    auto.raf = requestAnimationFrame(tickPreviewAutoScroll)
+  }
+
+  const updatePreviewAutoScroll = (clientY) => {
+    const el = previewScrollRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return
+    const edge = Math.max(44, Math.min(72, rect.height * 0.18))
+
+    const distTop = clientY - rect.top
+    const distBottom = rect.bottom - clientY
+
+    let vy = 0
+    if (distTop >= 0 && distTop < edge) {
+      const t = 1 - distTop / edge
+      vy = -Math.round(2 + 14 * t * t)
+    } else if (distBottom >= 0 && distBottom < edge) {
+      const t = 1 - distBottom / edge
+      vy = Math.round(2 + 14 * t * t)
+    }
+
+    const auto = previewAutoScrollRef.current
+    auto.vy = vy
+    auto.lastY = clientY
+    if (vy && !auto.raf) {
+      auto.raf = requestAnimationFrame(tickPreviewAutoScroll)
+    }
+    if (!vy && auto.raf) {
+      cancelAnimationFrame(auto.raf)
+      auto.raf = null
+    }
+  }
+
+  const handlePreviewDragPointerDown = (task, e) => {
+    const state = previewDragRef.current
+    if (state.timer) clearTimeout(state.timer)
+    state.active = false
+    state.pointerId = e.pointerId
+    state.taskId = task.id
+    state.track = task.track
+    state.lastX = e.clientX
+    state.lastY = e.clientY
+    const rowEl = e.currentTarget?.closest?.('[data-preview-task-id]')
+    const rect = rowEl?.getBoundingClientRect?.() ?? null
+    state.rowRect = rect
+    if (rect) {
+      state.offsetX = Math.max(12, Math.min(rect.width - 12, e.clientX - rect.left))
+      state.offsetY = Math.max(12, Math.min(rect.height - 12, e.clientY - rect.top))
+    } else {
+      state.offsetX = 16
+      state.offsetY = 16
+    }
+
+    const targetEl = e.currentTarget
+    const pointerId = e.pointerId
+    state.timer = setTimeout(() => {
+      state.timer = null
+      state.active = true
+      setPreviewDraggingTaskId(task.id)
+      setPreviewDropTaskId(task.id)
+      const width = Math.max(260, Math.min(520, Number(state.rowRect?.width ?? 360) || 360))
+      const ghostX = state.lastX - state.offsetX
+      const ghostY = state.lastY - state.offsetY
+      previewGhostPosRef.current.x = ghostX
+      previewGhostPosRef.current.y = ghostY
+      setPreviewGhost({
+        taskId: task.id,
+        name: task.name,
+        trade: task.trade ?? '',
+        start: task.scheduled_start ?? '',
+        end: task.scheduled_end ?? '',
+        width,
+        x: ghostX,
+        y: ghostY,
+      })
+      if (targetEl?.setPointerCapture) {
+        try {
+          targetEl.setPointerCapture(pointerId)
+        } catch (_err) {
+          void _err
+        }
+      }
+    }, 60)
+  }
+
+  const handlePreviewDragPointerMove = (task, e) => {
+    const state = previewDragRef.current
+    if (state.taskId !== task.id) return
+    state.lastX = e.clientX
+    state.lastY = e.clientY
+    if (!state.active) return
+    e.preventDefault()
+    updatePreviewDropTarget(e.clientX, e.clientY)
+    updatePreviewAutoScroll(e.clientY)
+    updatePreviewGhostPosition(e.clientX, e.clientY)
+  }
+
+  const handlePreviewDragPointerUp = (task, e) => {
+    const state = previewDragRef.current
+    if (state.timer) clearTimeout(state.timer)
+    state.timer = null
+    if (!state.active) return
+    state.active = false
+
+    const dropId = previewDropTaskId
+    if (dropId && dropId !== task.id) {
+      updateDraftLot((current) => applyListReorder(current, task.id, dropId, org))
+    }
+
+    if (state.pointerId !== null && e.currentTarget?.releasePointerCapture) {
+      try {
+        e.currentTarget.releasePointerCapture(state.pointerId)
+      } catch (_err) {
+        void _err
+      }
+    }
+
+    clearPreviewDrag()
+  }
+
+  const handlePreviewDragPointerCancel = () => {
+    clearPreviewDrag()
+  }
+
+  const resetPreview = () => {
+    if (!resolvedLot || !form.start_date) return
+    const nextLot = startLotFromTemplate({
+      lot: resolvedLot,
+      start_date: form.start_date,
+      model_type: resolvedLot?.model_type ?? '',
+      plan_id: form.plan_id || null,
+      job_number: form.job_number,
+      custom_fields: form.custom_fields ?? {},
+      address: form.address,
+      permit_number: form.permit_number,
+      hard_deadline: form.hard_deadline || null,
+      template,
+      orgSettings: org,
+      subcontractors: app.subcontractors,
+      existingLots: lots,
+    })
+    const nextTasks = nextLot?.tasks ?? []
+    setDraftTasks(nextTasks)
+    setPreviewCollapsedTracks(new Set(nextTasks.map((t) => t?.track ?? 'misc')))
+    setPreviewTouched(false)
+  }
+
   return (
-    <Modal
+    <>
+      <Modal
       title="Start Lot"
       onClose={onClose}
       footer={
@@ -9457,7 +9901,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
             className="flex-1 bg-green-600"
             disabled={!isOnline || !canStart}
             title={!isOnline ? 'Requires connection to generate schedules' : ''}
-            onClick={() => onStart({ lotId: resolvedLotId, form })}
+            onClick={() => onStart({ lotId: resolvedLotId, form, draftTasks })}
           >
             Start Lot & View Schedule
           </PrimaryButton>
@@ -9634,15 +10078,274 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
             Start: <span className="font-semibold">{form.start_date ? formatShortDate(form.start_date) : '—'}</span>
           </p>
           <p className="text-sm text-gray-700">
-            Target Completion:{' '}
-            <span className="font-semibold">{targetCompletion ? formatShortDate(targetCompletion) : '—'}</span>
+            Preview Completion:{' '}
+            <span className="font-semibold">
+              {previewCompletion ? formatShortDate(previewCompletion) : targetCompletion ? formatShortDate(targetCompletion) : '—'}
+            </span>
           </p>
-          <p className="text-xs text-gray-600 mt-1">
-            {template?.tasks?.length ?? 0} tasks • {INSPECTION_TYPES.length} inspections
-          </p>
+          <p className="text-xs text-gray-600 mt-1">{(draftTasks?.length || template?.tasks?.length || 0)} tasks</p>
+          <p className="text-[11px] text-gray-500 mt-1">Inspections are recorded in Overview and do not block scheduling.</p>
         </Card>
+
+        {canStart ? (
+          <Card className="border border-blue-200 bg-blue-50/40">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-gray-900">Schedule Preview (before starting)</p>
+                <p className="text-xs text-gray-600 mt-1">
+                  Drag the handle to swap tasks within a track. Adjust durations, subs, add/delete tasks, then click Start Lot to save.
+                </p>
+                {previewTouched ? <p className="text-xs text-blue-700 mt-1">Preview modified — changes will be used when you start the lot.</p> : null}
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={resetPreview}
+                  className="h-10 px-3 rounded-xl border border-gray-200 bg-white text-sm font-semibold disabled:opacity-50"
+                  disabled={!previewTouched}
+                >
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewAddTaskOpen(true)}
+                  className="h-10 px-3 rounded-xl bg-blue-600 text-white text-sm font-semibold"
+                >
+                  + Add Task
+                </button>
+              </div>
+            </div>
+
+            {draftTasks.length === 0 ? (
+              <p className="text-sm text-gray-600 mt-3">Select a lot and start date to generate a preview schedule.</p>
+            ) : (
+              <div className="mt-3">
+                <div className="relative mt-2">
+                  <div
+                    ref={previewScrollRef}
+                    className="max-h-[52vh] overflow-y-auto overscroll-contain rounded-xl border border-blue-200 bg-white/70 p-2"
+                    style={{ WebkitOverflowScrolling: 'touch' }}
+                  >
+                    <div className="space-y-3">
+                      {previewTracks.map((track) => {
+                        const tasksForTrack = (draftTasks ?? [])
+                          .filter((t) => (t?.track ?? 'misc') === track)
+                          .slice()
+                          .sort(
+                            (a, b) =>
+                              (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0) ||
+                              String(a.name).localeCompare(String(b.name)),
+                          )
+                        if (tasksForTrack.length === 0) return null
+                        const collapsed = previewCollapsedTracks.has(track)
+
+                        return (
+                          <div key={track}>
+                            <button
+                              type="button"
+                              onClick={() => togglePreviewTrack(track)}
+                              className="w-full flex items-center justify-between px-1 py-2 rounded-lg hover:bg-blue-50/60"
+                              aria-expanded={!collapsed}
+                            >
+                              <span className="text-[11px] font-semibold text-gray-700 flex items-center gap-2">
+                                {collapsed ? <ChevronRight className="w-4 h-4 text-gray-500" /> : <ChevronDown className="w-4 h-4 text-gray-500" />}
+                                {getTrackLabel(track)}
+                                <span className="text-[10px] text-gray-500 font-semibold">{tasksForTrack.length}</span>
+                              </span>
+                              <span className="text-[11px] text-blue-700">{collapsed ? 'Show' : 'Hide'}</span>
+                            </button>
+
+                            {!collapsed ? <div className="space-y-2">
+                              {tasksForTrack.map((task) => {
+                                const dropHot = Boolean(previewDraggingTaskId) && previewDropTaskId === task.id
+                                const dragging = previewDraggingTaskId === task.id
+                                const subOptions = getSubsForTask(task)
+                                return (
+                                  <div
+                                    key={task.id}
+                                    data-preview-task-id={task.id}
+                                    data-preview-task-track={task.track ?? 'misc'}
+                                    className={`p-3 rounded-xl border transition-colors ${
+                                      dropHot ? 'border-blue-400 bg-blue-100/60' : 'border-gray-200 bg-white'
+                                    } ${dragging ? 'opacity-30' : ''}`}
+                                  >
+                                    <div className="flex items-start gap-2">
+                                      <button
+                                        type="button"
+                                        className="touch-none select-none shrink-0 w-11 h-11 rounded-xl border border-gray-200 bg-white text-gray-500 flex items-center justify-center cursor-grab active:cursor-grabbing"
+                                        title="Drag to reorder (swap)"
+                                        onPointerDown={(e) => handlePreviewDragPointerDown(task, e)}
+                                        onPointerMove={(e) => handlePreviewDragPointerMove(task, e)}
+                                        onPointerUp={(e) => handlePreviewDragPointerUp(task, e)}
+                                        onPointerCancel={handlePreviewDragPointerCancel}
+                                      >
+                                        <GripVertical className="w-5 h-5" />
+                                      </button>
+
+                                      <div className="min-w-0 flex-1">
+                                        <p className="text-sm font-semibold text-gray-900">{task.name}</p>
+                                        <p className="text-[11px] text-gray-600 mt-0.5">
+                                          {task.scheduled_start ? formatShortDate(task.scheduled_start) : '—'} –{' '}
+                                          {task.scheduled_end ? formatShortDate(task.scheduled_end) : '—'}
+                                          {task.trade ? ` • ${task.trade}` : ''}
+                                        </p>
+                                      </div>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (!resolvedLot) return
+                                          const ok = window.confirm(`Delete this task from the preview?\n\n${task.name}`)
+                                          if (!ok) return
+                                          setPreviewTouched(true)
+                                          setDraftTasks((prev) => {
+                                            const nextTasks = prev.filter((t) => t.id !== task.id)
+                                            const nextLot = rebuildTrackSchedule({ ...resolvedLot, tasks: nextTasks }, task.track, org)
+                                            return nextLot?.tasks ?? nextTasks
+                                          })
+                                        }}
+                                        className="shrink-0 h-10 px-3 rounded-xl border border-red-200 bg-red-50 text-red-700 text-xs font-semibold"
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+
+                                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      <label className="block">
+                                        <span className="text-[11px] font-semibold text-gray-600">Duration (days)</span>
+                                        <div className="mt-1 grid grid-cols-[44px_1fr_44px] gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const currentDuration = Math.max(1, Number(task.duration ?? 1) || 1)
+                                              const next = Math.max(1, currentDuration - 1)
+                                              updateDraftLot((current) => applyDurationChange(current, task.id, next, org))
+                                            }}
+                                            disabled={Math.max(1, Number(task.duration ?? 1) || 1) <= 1}
+                                            className="h-11 w-11 rounded-xl border border-gray-200 bg-white text-gray-900 font-semibold disabled:opacity-50"
+                                            aria-label="Decrease duration"
+                                          >
+                                            –
+                                          </button>
+                                          <input
+                                            type="number"
+                                            min="1"
+                                            value={Math.max(1, Number(task.duration ?? 1) || 1)}
+                                            onChange={(e) => {
+                                              const next = Math.max(1, Number(e.target.value) || 1)
+                                              updateDraftLot((current) => applyDurationChange(current, task.id, next, org))
+                                            }}
+                                            className="h-11 w-full px-3 border border-gray-200 rounded-xl text-sm text-center"
+                                            inputMode="numeric"
+                                          />
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const currentDuration = Math.max(1, Number(task.duration ?? 1) || 1)
+                                              const next = currentDuration + 1
+                                              updateDraftLot((current) => applyDurationChange(current, task.id, next, org))
+                                            }}
+                                            className="h-11 w-11 rounded-xl border border-gray-200 bg-white text-gray-900 font-semibold"
+                                            aria-label="Increase duration"
+                                          >
+                                            +
+                                          </button>
+                                        </div>
+                                      </label>
+
+                                      <label className="block">
+                                        <span className="text-[11px] font-semibold text-gray-600">Assign Sub</span>
+                                        <select
+                                          value={task.sub_id ?? ''}
+                                          onChange={(e) => {
+                                            const nextSubId = e.target.value || null
+                                            setPreviewTouched(true)
+                                            setDraftTasks((prev) =>
+                                              prev.map((t) => (t.id === task.id ? { ...t, sub_id: nextSubId } : t)),
+                                            )
+                                          }}
+                                          className="mt-1 w-full px-3 py-3 border border-gray-200 rounded-xl text-sm"
+                                        >
+                                          <option value="">Unassigned</option>
+                                          {subOptions.subs.map((s) => (
+                                            <option key={s.id} value={s.id}>
+                                              {s.company_name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                        {subOptions.trade && subOptions.showingAll && !subOptions.hadMatches ? (
+                                          <p className="text-[11px] text-gray-500 mt-1">
+                                            No subs match “{subOptions.trade}” — showing all subs.
+                                          </p>
+                                        ) : null}
+                                      </label>
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div> : null}
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    <div className="h-10" />
+                  </div>
+                </div>
+              </div>
+            )}
+          </Card>
+        ) : null}
       </div>
-    </Modal>
+      </Modal>
+
+      {previewAddTaskOpen && previewLot ? (
+        <AddTaskModal
+          lot={previewLot}
+          org={org}
+          subcontractors={app.subcontractors}
+          onClose={() => setPreviewAddTaskOpen(false)}
+          onSave={(newTask) => {
+            setPreviewAddTaskOpen(false)
+            if (!resolvedLot) return
+            setPreviewTouched(true)
+            setDraftTasks((prev) => {
+              const nextTasks = [...prev, newTask]
+              const nextLot = rebuildTrackSchedule({ ...resolvedLot, tasks: nextTasks }, newTask.track, org)
+              return nextLot?.tasks ?? nextTasks
+            })
+          }}
+        />
+      ) : null}
+
+      {previewGhost ? (
+        <div
+          className="fixed left-0 top-0 z-[9999] pointer-events-none"
+          style={{
+            transform: `translate3d(${Math.round(previewGhost.x)}px, ${Math.round(previewGhost.y)}px, 0)`,
+            width: previewGhost.width,
+          }}
+        >
+          <div className="rounded-2xl border border-blue-300 bg-white shadow-2xl ring-2 ring-blue-200/40">
+            <div className="p-3">
+              <div className="flex items-start gap-2">
+                <div className="shrink-0 w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center">
+                  <GripVertical className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-gray-900 truncate">{previewGhost.name}</p>
+                  <p className="text-[11px] text-gray-600 mt-0.5 truncate">
+                    {previewGhost.start ? formatShortDate(previewGhost.start) : '—'} –{' '}
+                    {previewGhost.end ? formatShortDate(previewGhost.end) : '—'}
+                    {previewGhost.trade ? ` • ${previewGhost.trade}` : ''}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   )
 }
 
@@ -9662,9 +10365,11 @@ function TaskModal({
   onRequestComplete,
   onDelay,
   onReschedule,
+  onBuffer,
   onAddPhoto,
-  onOpenInspection,
   onMessage,
+  onMarkIncomplete,
+  onDeleteTask,
   onAddFile,
   onRemoveFile,
 }) {
@@ -9859,6 +10564,12 @@ function TaskModal({
             <Calendar className="w-5 h-5" /> Reschedule
           </button>
           <button
+            onClick={onBuffer}
+            className="h-12 rounded-xl bg-white border border-gray-200 text-gray-900 font-semibold flex items-center justify-center gap-2"
+          >
+            <Plus className="w-5 h-5" /> Buffer
+          </button>
+          <button
             onClick={onAddPhoto}
             className="h-12 rounded-xl bg-white border border-gray-200 text-gray-900 font-semibold flex items-center justify-center gap-2"
           >
@@ -9871,13 +10582,6 @@ function TaskModal({
           >
             <MessageSquare className="w-5 h-5" /> Message
           </button>
-          <button
-            onClick={onOpenInspection}
-            disabled={!task.requires_inspection && !task.inspection_id}
-            className="h-12 rounded-xl bg-white border border-gray-200 text-gray-900 font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            <Lock className="w-5 h-5" /> Inspection
-          </button>
         </div>
 
         <div className="flex gap-2">
@@ -9888,22 +10592,26 @@ function TaskModal({
           ) : null}
           {status === 'in_progress' ? (
             <PrimaryButton onClick={onRequestComplete} className="flex-1" disabled={!canComplete}>
-              {task.requires_inspection ? (
-                <>
-                  <Check className="w-4 h-4 inline mr-1" /> Complete & Schedule Inspection
-                </>
-              ) : (
-                <>
-                  <Check className="w-4 h-4 inline mr-1" /> Mark Complete
-                </>
-              )}
+              <Check className="w-4 h-4 inline mr-1" /> Mark Complete
             </PrimaryButton>
           ) : null}
-          {status === 'blocked' && task.inspection_id ? (
-            <PrimaryButton onClick={onOpenInspection} className="flex-1 bg-orange-600">
-              Enter Inspection Result
-            </PrimaryButton>
+        </div>
+
+        <div className="flex gap-2">
+          {status === 'complete' ? (
+            <SecondaryButton onClick={onMarkIncomplete} className="flex-1">
+              Mark Incomplete
+            </SecondaryButton>
           ) : null}
+          <button
+            type="button"
+            onClick={onDeleteTask}
+            disabled={status === 'in_progress'}
+            className="flex-1 h-11 rounded-xl border border-red-200 bg-red-50 text-red-700 font-semibold disabled:opacity-50"
+            title={status === 'in_progress' ? 'Complete or stop the task before deleting.' : 'Delete task'}
+          >
+            Delete Task
+          </button>
         </div>
 
         <Card>
@@ -10256,6 +10964,363 @@ function AddTaskModal({ lot, org, subcontractors, onClose, onSave }) {
   )
 }
 
+function ImpactDatePill({ tone = 'old', label }) {
+  const cls =
+    tone === 'new'
+      ? 'bg-blue-50 border-blue-200 text-blue-800'
+      : tone === 'buffer'
+        ? 'bg-amber-50 border-amber-200 text-amber-900'
+        : 'bg-white border-gray-200 text-gray-700'
+  return <span className={`inline-flex items-center px-2 py-1 rounded-full border text-[11px] font-semibold ${cls}`}>{label}</span>
+}
+
+function ImpactDeltaPill({ delta }) {
+  if (!delta) return null
+  const cls = delta > 0 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-200'
+  return (
+    <span className={`inline-flex items-center px-2 py-1 rounded-full border text-[11px] font-semibold ${cls}`}>
+      {delta > 0 ? `+${delta}` : delta}d
+    </span>
+  )
+}
+
+function ImpactPreviewCard({ affected, buffer, oldCompletion, newCompletion, maxItems = 8 }) {
+  const trackIndex = useMemo(() => new Map(TASK_CATEGORIES.map((c, idx) => [c.track, idx])), [])
+  const sorted = useMemo(() => {
+    const list = Array.isArray(affected) ? affected.slice() : []
+    list.sort((a, b) => {
+      const ai = trackIndex.get(a?.track) ?? 999
+      const bi = trackIndex.get(b?.track) ?? 999
+      if (ai !== bi) return ai - bi
+      const sa = String(a?.old_start ?? a?.new_start ?? '')
+      const sb = String(b?.old_start ?? b?.new_start ?? '')
+      const sd = sa.localeCompare(sb)
+      if (sd !== 0) return sd
+      return String(a?.task_name ?? '').localeCompare(String(b?.task_name ?? ''))
+    })
+    return list
+  }, [affected, trackIndex])
+
+  const completionDelta = useMemo(() => {
+    if (!oldCompletion || !newCompletion) return null
+    return daysBetweenCalendar(newCompletion, oldCompletion)
+  }, [newCompletion, oldCompletion])
+
+  return (
+    <Card className="bg-gradient-to-b from-white to-gray-50">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-gray-800">Impact Preview</p>
+          <p className="text-xs text-gray-600">
+            {sorted.length} task{sorted.length === 1 ? '' : 's'} shifting
+            {newCompletion ? ` • New completion: ${formatShortDate(newCompletion)}` : ''}
+          </p>
+        </div>
+        {oldCompletion && newCompletion ? (
+          <div className="text-right">
+            <p className="text-[11px] text-gray-500 font-semibold">Completion</p>
+            <div className="mt-1 flex items-center justify-end gap-2">
+              <ImpactDatePill tone="old" label={formatShortDate(oldCompletion)} />
+              <span className="text-[11px] text-gray-400">→</span>
+              <ImpactDatePill tone="new" label={formatShortDate(newCompletion)} />
+              {completionDelta ? <ImpactDeltaPill delta={completionDelta} /> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      {buffer?.start && buffer?.end ? (
+        <div className="mt-3 bg-white border border-dashed border-amber-300 rounded-xl p-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-amber-900">New Buffer Block</p>
+            <span className="text-xs text-amber-900">
+              {typeof buffer?.duration_days === 'number' ? `${buffer.duration_days}d` : ''}
+            </span>
+          </div>
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            <ImpactDatePill tone="buffer" label={formatShortDate(buffer.start)} />
+            <span className="text-[11px] text-amber-700">to</span>
+            <ImpactDatePill tone="buffer" label={formatShortDate(buffer.end)} />
+          </div>
+        </div>
+      ) : null}
+
+      {sorted.length === 0 ? (
+        <p className="text-sm text-gray-600 mt-3">No downstream date changes yet.</p>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {sorted.slice(0, maxItems).map((a) => {
+            const oldStart = a?.old_start ?? ''
+            const newStart = a?.new_start ?? ''
+            const oldEnd = a?.old_end ?? ''
+            const newEnd = a?.new_end ?? ''
+            const delta = oldStart && newStart ? daysBetweenCalendar(newStart, oldStart) : 0
+            return (
+              <div key={a.task_id} className="bg-white border border-gray-200 rounded-xl p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-sm truncate">{a.task_name}</p>
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      {(TASK_CATEGORIES.find((c) => c.track === a.track)?.label ?? a.track ?? 'Track').toString()}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                    <ImpactDatePill tone="old" label={oldStart ? formatShortDate(oldStart) : '—'} />
+                    <span className="text-[11px] text-gray-400">→</span>
+                    <ImpactDatePill tone="new" label={newStart ? formatShortDate(newStart) : '—'} />
+                    <ImpactDeltaPill delta={delta} />
+                  </div>
+                </div>
+                {oldEnd && newEnd ? (
+                  <p className="text-[11px] text-gray-600 mt-2">
+                    End: {formatShortDate(oldEnd)} → {formatShortDate(newEnd)}
+                  </p>
+                ) : null}
+              </div>
+            )
+          })}
+          {sorted.length > maxItems ? <p className="text-xs text-gray-500">…and {sorted.length - maxItems} more</p> : null}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function BufferModal({ lot, task, org, onClose, onApply }) {
+  const [days, setDays] = useState(1)
+  const [bufferTaskId] = useState(() => uuid())
+
+  const preview = useMemo(() => {
+    const nextLot = insertBufferTaskAfter(lot, task.id, days, org, { buffer_task_id: bufferTaskId })
+    const beforeById = new Map((lot.tasks ?? []).map((t) => [t.id, t]))
+    const affected = (nextLot?.tasks ?? [])
+      .map((t) => {
+        const before = beforeById.get(t.id)
+        if (!before) return null
+        if (before.scheduled_start === t.scheduled_start && before.scheduled_end === t.scheduled_end) return null
+        return {
+          task_id: t.id,
+          task_name: t.name,
+          old_start: before.scheduled_start,
+          new_start: t.scheduled_start,
+          old_end: before.scheduled_end,
+          new_end: t.scheduled_end,
+          track: t.track,
+        }
+      })
+      .filter(Boolean)
+
+    const oldCompletion = getPredictedCompletionDate(lot)
+    const newCompletion = nextLot ? getPredictedCompletionDate(nextLot) : null
+    const bufferTask = (nextLot?.tasks ?? []).find((t) => t?.id === bufferTaskId) ?? null
+    const buffer = bufferTask
+      ? { start: bufferTask.scheduled_start, end: bufferTask.scheduled_end, duration_days: Number(bufferTask.duration_days ?? days) || null }
+      : null
+    return {
+      affected,
+      oldCompletion: oldCompletion ? formatISODate(oldCompletion) : null,
+      newCompletion: newCompletion ? formatISODate(newCompletion) : null,
+      buffer,
+    }
+  }, [lot, task.id, days, org, bufferTaskId])
+
+  const affected = preview.affected ?? []
+  const canApply = Math.max(0, Number(days) || 0) > 0
+
+  return (
+    <Modal
+      title="Insert Buffer Task"
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose} className="flex-1">
+            Cancel
+          </SecondaryButton>
+          <PrimaryButton onClick={() => onApply({ days, bufferTaskId })} className="flex-1" disabled={!canApply}>
+            Insert Buffer Task
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <Card className="bg-gray-50">
+          <p className="text-sm text-gray-600">
+            Inserts a buffer block after <span className="font-semibold">{task.name}</span> so the gap is visible on the schedule.
+          </p>
+        </Card>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Buffer duration (workdays)</span>
+          <input
+            type="number"
+            min="1"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+          />
+        </label>
+
+        <ImpactPreviewCard
+          affected={affected}
+          buffer={preview.buffer}
+          oldCompletion={preview.oldCompletion}
+          newCompletion={preview.newCompletion}
+          maxItems={6}
+        />
+      </div>
+    </Modal>
+  )
+}
+
+function CreateBufferModal({ lot, org, onClose, onCreate }) {
+  const getEligibleTasksInDisplayOrder = (sourceLot) => {
+    const tasks = (sourceLot?.tasks ?? [])
+      .filter((t) => !isBufferTask(t))
+      .filter((t) => t.status !== 'complete')
+      .slice()
+
+    const baseTracks = TASK_CATEGORIES.map((c) => c.track)
+    const known = new Set(baseTracks)
+    const extraTracks = []
+    for (const task of tasks) {
+      const track = task?.track ?? 'misc'
+      if (known.has(track)) continue
+      known.add(track)
+      extraTracks.push(track)
+    }
+    const tracks = [...baseTracks, ...extraTracks]
+
+    const ordered = []
+    for (const track of tracks) {
+      const group = tasks
+        .filter((t) => (t?.track ?? 'misc') === track)
+        .sort(
+          (a, b) =>
+            (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0) ||
+            String(a.scheduled_start ?? '').localeCompare(String(b.scheduled_start ?? '')) ||
+            String(a.name ?? '').localeCompare(String(b.name ?? '')),
+        )
+      ordered.push(...group)
+    }
+    return ordered
+  }
+
+  const [anchorTaskId, setAnchorTaskId] = useState(() => getEligibleTasksInDisplayOrder(lot)[0]?.id ?? '')
+  const [days, setDays] = useState(1)
+  const [bufferTaskId, setBufferTaskId] = useState(() => uuid())
+
+  useEffect(() => {
+    setBufferTaskId(uuid())
+  }, [anchorTaskId])
+
+  const anchorTask = useMemo(() => (lot?.tasks ?? []).find((t) => t.id === anchorTaskId) ?? null, [lot, anchorTaskId])
+
+  const preview = useMemo(() => {
+    if (!anchorTaskId) return { affected: [], oldCompletion: null, newCompletion: null, buffer: null }
+    const nextLot = insertBufferTaskAfter(lot, anchorTaskId, days, org, { buffer_task_id: bufferTaskId })
+    const beforeById = new Map((lot.tasks ?? []).map((t) => [t.id, t]))
+    const affected = (nextLot?.tasks ?? [])
+      .map((t) => {
+        const before = beforeById.get(t.id)
+        if (!before) return null
+        if (before.scheduled_start === t.scheduled_start && before.scheduled_end === t.scheduled_end) return null
+        return {
+          task_id: t.id,
+          task_name: t.name,
+          old_start: before.scheduled_start,
+          new_start: t.scheduled_start,
+          old_end: before.scheduled_end,
+          new_end: t.scheduled_end,
+          track: t.track,
+        }
+      })
+      .filter(Boolean)
+    const oldCompletion = getPredictedCompletionDate(lot)
+    const newCompletion = nextLot ? getPredictedCompletionDate(nextLot) : null
+    const bufferTask = (nextLot?.tasks ?? []).find((t) => t?.id === bufferTaskId) ?? null
+    const buffer = bufferTask
+      ? { start: bufferTask.scheduled_start, end: bufferTask.scheduled_end, duration_days: Number(bufferTask.duration_days ?? days) || null }
+      : null
+    return {
+      affected,
+      oldCompletion: oldCompletion ? formatISODate(oldCompletion) : null,
+      newCompletion: newCompletion ? formatISODate(newCompletion) : null,
+      buffer,
+    }
+  }, [lot, anchorTaskId, days, org, bufferTaskId])
+
+  const eligibleTasks = useMemo(() => {
+    return getEligibleTasksInDisplayOrder(lot)
+  }, [lot])
+
+  const canCreate = Boolean(anchorTaskId) && Math.max(1, Number(days) || 1) > 0 && Boolean(anchorTask?.scheduled_end)
+
+  return (
+    <Modal
+      title="Create Buffer"
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose} className="flex-1">
+            Cancel
+          </SecondaryButton>
+          <PrimaryButton
+            onClick={() => onCreate({ anchorTaskId, days, bufferTaskId })}
+            className="flex-1"
+            disabled={!canCreate}
+          >
+            Create Buffer
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <Card className="bg-gray-50">
+          <p className="text-sm text-gray-600">Creates a standalone Buffer task that shows up in the schedule.</p>
+        </Card>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Insert after task</span>
+          <select
+            value={anchorTaskId}
+            onChange={(e) => setAnchorTaskId(e.target.value)}
+            className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
+          >
+            {eligibleTasks.length === 0 ? <option value="">No eligible tasks</option> : null}
+            {eligibleTasks.map((t) => (
+              <option key={t.id} value={t.id}>
+                {(TASK_CATEGORIES.find((c) => c.track === t.track)?.label ?? t.track ?? 'Track')} • {t.name}
+              </option>
+            ))}
+          </select>
+          {!anchorTask?.scheduled_end && anchorTask ? (
+            <p className="text-xs text-red-700 mt-1">Selected task has no schedule dates yet.</p>
+          ) : null}
+        </label>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Buffer duration (workdays)</span>
+          <input
+            type="number"
+            min="1"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+          />
+        </label>
+
+        <ImpactPreviewCard
+          affected={preview.affected ?? []}
+          buffer={preview.buffer}
+          oldCompletion={preview.oldCompletion}
+          newCompletion={preview.newCompletion}
+          maxItems={6}
+        />
+      </div>
+    </Modal>
+  )
+}
+
 function DelayModal({ lot, task, org, onClose, onApply }) {
   const [days, setDays] = useState(1)
   const [reason, setReason] = useState('')
@@ -10396,7 +11461,7 @@ function RescheduleTaskModal({ lot, task, community, org, isOnline, initialDate,
   const normalizedDate = preview.normalized_date || ''
 
   const oldStart = task.scheduled_start ?? ''
-  const canApply = Boolean(normalizedDate) && !preview.dependency_violation && task.status !== 'complete'
+  const canApply = Boolean(normalizedDate) && task.status !== 'complete'
   const impacted = (preview.affected ?? []).filter((a) => a.old_start !== a.new_start)
 
   return (
@@ -10446,12 +11511,6 @@ function RescheduleTaskModal({ lot, task, community, org, isOnline, initialDate,
           {normalizedDate && normalizedDate !== date ? <p className="text-xs text-gray-600 mt-1">Adjusted to next workday: {formatShortDate(normalizedDate)}</p> : null}
         </label>
 
-        {preview.dependency_violation ? (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">
-            Dependency violation — earliest allowed start is {formatShortDate(preview.earliest_start)}.
-          </div>
-        ) : null}
-
         <label className="block">
           <span className="text-sm font-semibold">Reason (optional)</span>
           <textarea
@@ -10497,7 +11556,9 @@ function RescheduleTaskModal({ lot, task, community, org, isOnline, initialDate,
 function ScheduleInspectionModal({ lot, task, community, agencies, initialType, onClose, onSchedule }) {
   const inspectorOptions = community?.inspectors ?? []
   const defaultInspector = inspectorOptions[0] ?? { name: '', phone: '', email: '', agency_id: '' }
-  const defaultType = initialType ?? task.inspection_type ?? 'RME'
+  const scheduleableTypes = useMemo(() => INSPECTION_TYPES.filter((t) => t.code !== 'NOTE'), [])
+  const requestedType = initialType ?? task.inspection_type ?? 'RME'
+  const defaultType = scheduleableTypes.some((t) => t.code === requestedType) ? requestedType : scheduleableTypes[0]?.code ?? 'RME'
   const [type, setType] = useState(defaultType)
   const [scheduledDate, setScheduledDate] = useState(task.scheduled_end ?? '')
   const [scheduledTime, setScheduledTime] = useState('10:00 AM')
@@ -10573,7 +11634,7 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
         <label className="block">
           <span className="text-sm font-semibold">Type</span>
           <select value={type} onChange={(e) => setType(e.target.value)} className="mt-1 w-full px-3 py-3 border rounded-xl">
-            {INSPECTION_TYPES.map((t) => (
+            {scheduleableTypes.map((t) => (
               <option key={t.code} value={t.code}>
                 {t.label} ({t.code})
               </option>
@@ -11047,6 +12108,214 @@ function InspectionResultModal({ lot, task, inspection, subcontractors, isOnline
             </label>
           )}
           <p className="text-xs text-gray-600 mt-2">PDF/image up to 10MB (upload requires connection).</p>
+        </Card>
+      </div>
+    </Modal>
+  )
+}
+
+function InspectionNoteModal({ lot, community, tasks, inspection, isOnline, onClose, onSave, onDelete }) {
+  const isEdit = Boolean(inspection?.id)
+  const [draft, setDraft] = useState(() => ({
+    type: inspection?.type ?? 'NOTE',
+    scheduled_date: inspection?.scheduled_date ?? formatISODate(new Date()),
+    scheduled_time: inspection?.scheduled_time ?? '',
+    task_id: inspection?.task_id ?? '',
+    notes: inspection?.notes ?? '',
+    documents: inspection?.documents ?? [],
+  }))
+
+  useEffect(() => {
+    setDraft({
+      type: inspection?.type ?? 'NOTE',
+      scheduled_date: inspection?.scheduled_date ?? formatISODate(new Date()),
+      scheduled_time: inspection?.scheduled_time ?? '',
+      task_id: inspection?.task_id ?? '',
+      notes: inspection?.notes ?? '',
+      documents: inspection?.documents ?? [],
+    })
+  }, [inspection?.id])
+
+  const openAttachment = async (blobId) => {
+    if (!blobId) return
+    try {
+      const blob = await getBlob(blobId)
+      if (!blob) return alert('File not found on this device.')
+      const url = URL.createObjectURL(blob)
+      window.open(url, '_blank', 'noopener,noreferrer')
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    } catch (err) {
+      console.error(err)
+      alert('Unable to open file.')
+    }
+  }
+
+  const addAttachment = async (file) => {
+    if (!file) return
+    const max = 50 * 1024 * 1024
+    if (file.size > max) return alert('File must be ≤ 50MB.')
+
+    const blobId = uuid()
+    await putBlob(blobId, file)
+    const doc = {
+      id: uuid(),
+      file_name: file.name,
+      mime: file.type,
+      file_size: file.size,
+      blob_id: blobId,
+      uploaded_at: new Date().toISOString(),
+      type: 'inspection_attachment',
+    }
+    setDraft((p) => ({ ...p, documents: [...(p.documents ?? []), doc] }))
+  }
+
+  const removeAttachment = async (docId) => {
+    const doc = (draft.documents ?? []).find((d) => d.id === docId) ?? null
+    if (!doc) return
+    const ok = window.confirm(`Remove this file?\n\n${doc.file_name ?? 'File'}`)
+    if (!ok) return
+    if (doc.blob_id) await deleteBlob(doc.blob_id)
+    setDraft((p) => ({ ...p, documents: (p.documents ?? []).filter((d) => d.id !== docId) }))
+  }
+
+  const canSave = Boolean(draft.scheduled_date) && (String(draft.notes ?? '').trim() || (draft.documents ?? []).length > 0 || draft.type !== 'NOTE')
+
+  return (
+    <Modal
+      title={isEdit ? 'Inspection Note' : 'Add Inspection Note'}
+      onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          {isEdit ? (
+            <SecondaryButton onClick={onDelete} className="flex-1 border-red-200 text-red-700 bg-red-50">
+              Delete
+            </SecondaryButton>
+          ) : (
+            <SecondaryButton onClick={onClose} className="flex-1">
+              Cancel
+            </SecondaryButton>
+          )}
+          <PrimaryButton onClick={() => onSave(draft)} className="flex-1" disabled={!canSave}>
+            Save
+          </PrimaryButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <Card className="bg-gray-50">
+          <p className="text-sm text-gray-600">
+            {community?.name ?? 'Community'} • {lotCode(lot)}
+          </p>
+          <p className="text-xs text-gray-600 mt-1">Quick notes + files (mobile-friendly).</p>
+          {!isOnline ? <p className="text-xs text-orange-700 mt-1">Offline — files save on-device; sync later.</p> : null}
+        </Card>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Type</span>
+          <select
+            value={draft.type}
+            onChange={(e) => setDraft((p) => ({ ...p, type: e.target.value }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
+          >
+            {INSPECTION_TYPES.map((t) => (
+              <option key={t.code} value={t.code}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="text-sm font-semibold">Date</span>
+            <input
+              type="date"
+              value={draft.scheduled_date}
+              onChange={(e) => setDraft((p) => ({ ...p, scheduled_date: e.target.value }))}
+              className="mt-1 w-full px-3 py-3 border rounded-xl"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm font-semibold">Time</span>
+            <input
+              type="time"
+              value={draft.scheduled_time}
+              onChange={(e) => setDraft((p) => ({ ...p, scheduled_time: e.target.value }))}
+              className="mt-1 w-full px-3 py-3 border rounded-xl"
+            />
+          </label>
+        </div>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Related task (optional)</span>
+          <select
+            value={draft.task_id}
+            onChange={(e) => setDraft((p) => ({ ...p, task_id: e.target.value }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl text-sm"
+          >
+            <option value="">None</option>
+            {(tasks ?? []).map((t) => (
+              <option key={t.id} value={t.id}>
+                {(TASK_CATEGORIES.find((c) => c.track === t.track)?.label ?? t.track ?? 'Track')} • {t.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Notes</span>
+          <textarea
+            value={draft.notes}
+            onChange={(e) => setDraft((p) => ({ ...p, notes: e.target.value }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+            rows={4}
+            placeholder="Add notes about an inspection, inspector feedback, next steps, etc."
+          />
+        </label>
+
+        <Card>
+          <div className="flex items-center justify-between">
+            <p className="font-semibold">Files</p>
+            <label className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-semibold cursor-pointer">
+              + Add file
+              <input
+                type="file"
+                accept={FILE_ACCEPT}
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0]
+                  if (!file) return
+                  await addAttachment(file)
+                  e.target.value = ''
+                }}
+              />
+            </label>
+          </div>
+
+          {(draft.documents ?? []).length === 0 ? (
+            <p className="text-sm text-gray-600 mt-2">No files yet.</p>
+          ) : (
+            <div className="mt-2 space-y-2">
+              {(draft.documents ?? []).map((doc) => (
+                <div key={doc.id} className="bg-gray-50 border border-gray-200 rounded-xl p-3">
+                  <p className="font-semibold text-sm break-words">{doc.file_name || 'File'}</p>
+                  <p className="text-xs text-gray-600 mt-1">{doc.file_size ? `${Math.round(doc.file_size / 1024)} KB` : ''}</p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openAttachment(doc.blob_id)}
+                      className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                    >
+                      Open
+                    </button>
+                    <button type="button" onClick={() => removeAttachment(doc.id)} className="px-3 py-2 rounded-xl border border-red-200 bg-red-50 text-sm font-semibold text-red-700">
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       </div>
     </Modal>
@@ -11748,9 +13017,8 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     if (!iso) return
     if (dragTargetIso === iso && dragStatus?.taskId === task.id) return
     const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
-    const status = preview.dependency_violation ? 'invalid' : 'valid'
     setDragTargetIso(iso)
-    setDragStatus({ status, preview, taskId: task.id })
+    setDragStatus({ status: 'valid', preview, taskId: task.id })
   }
 
   const maybeFlipWeek = (task, clientX, rowRect) => {
@@ -11768,9 +13036,8 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
       const iso = getIsoForWeek(clientX, rowRect, next)
       if (iso) {
         const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
-        const status = preview.dependency_violation ? 'invalid' : 'valid'
         setDragTargetIso(iso)
-        setDragStatus({ status, preview, taskId: task.id })
+        setDragStatus({ status: 'valid', preview, taskId: task.id })
       }
       return true
     }
@@ -11783,9 +13050,8 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
       const iso = getIsoForWeek(clientX, rowRect, prev)
       if (iso) {
         const preview = buildReschedulePreview({ lot, task, targetDateIso: iso, org })
-        const status = preview.dependency_violation ? 'invalid' : 'valid'
         setDragTargetIso(iso)
-        setDragStatus({ status, preview, taskId: task.id })
+        setDragStatus({ status: 'valid', preview, taskId: task.id })
       }
       return true
     }
@@ -11894,11 +13160,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
     }, 250)
 
     if (dropIso && preview) {
-      if (preview.dependency_violation) {
-        alert(`Dependency violation. Earliest allowed start is ${formatShortDate(preview.earliest_start)}.`)
-      } else {
-        onRescheduleTask?.({ task, targetDateIso: dropIso, preview })
-      }
+      onRescheduleTask?.({ task, targetDateIso: dropIso, preview })
     }
 
     if (state.pointerId !== null && e.currentTarget?.releasePointerCapture) {
@@ -12111,9 +13373,9 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
   )
 }
 
-function InspectionsModal({ lot, community, onClose, onOpenInspection, onScheduleInspectionForTask }) {
+function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpenInspection, onScheduleInspectionForTask }) {
   const inspections = lot.inspections ?? []
-  const blockedTasks = (lot.tasks ?? []).filter((t) => t.requires_inspection && t.status === 'blocked' && !t.inspection_id)
+  const inspectionTasks = (lot.tasks ?? []).filter((t) => t.requires_inspection && t.status !== 'complete' && !t.inspection_id)
 
   return (
     <Modal title="🔍 Inspections" onClose={onClose}>
@@ -12122,14 +13384,23 @@ function InspectionsModal({ lot, community, onClose, onOpenInspection, onSchedul
           <p className="text-sm text-gray-600">
             {community?.name ?? 'Community'} • {lotCode(lot)}
           </p>
-          <p className="text-xs text-gray-600 mt-1">Tap an inspection to enter results.</p>
+          <p className="text-xs text-gray-600 mt-1">Add quick notes/files here (inspections do not block scheduling).</p>
         </Card>
 
-        {blockedTasks.length > 0 ? (
+        <div className="grid grid-cols-2 gap-2">
+          <PrimaryButton onClick={onAddInspectionNote} className="w-full">
+            + Add Note / Files
+          </PrimaryButton>
+          <SecondaryButton onClick={onClose} className="w-full">
+            Done
+          </SecondaryButton>
+        </div>
+
+        {inspectionTasks.length > 0 ? (
           <Card className="border-orange-200 bg-orange-50">
-            <p className="font-semibold text-orange-800 mb-2">Needs Scheduling</p>
+            <p className="font-semibold text-orange-800 mb-2">Inspection Requirements</p>
             <div className="space-y-2">
-              {blockedTasks.slice(0, 6).map((t) => (
+              {inspectionTasks.slice(0, 6).map((t) => (
                 <button
                   key={t.id}
                   onClick={() => onScheduleInspectionForTask(t.id)}
@@ -12154,6 +13425,8 @@ function InspectionsModal({ lot, community, onClose, onOpenInspection, onSchedul
                 .sort((a, b) => String(b.scheduled_date).localeCompare(String(a.scheduled_date)))
                 .map((i) => {
                   const label = INSPECTION_TYPES.find((t) => t.code === i.type)?.label ?? i.type
+                  const isNote = i.type === 'NOTE' || !i.task_id
+                  const attachmentCount = (i.documents ?? []).length + (i.report_document ? 1 : 0)
                   const badge =
                     i.result === 'pass'
                       ? STATUS_BADGE.complete
@@ -12175,11 +13448,18 @@ function InspectionsModal({ lot, community, onClose, onOpenInspection, onSchedul
                           </p>
                           <p className="text-xs text-gray-600 mt-1">
                             {formatShortDate(i.scheduled_date)} {i.scheduled_time ? `• ${i.scheduled_time}` : ''}
+                            {attachmentCount ? ` • ${attachmentCount} file${attachmentCount === 1 ? '' : 's'}` : ''}
                           </p>
                         </div>
-                        <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-lg border ${badge.cls}`}>
-                          {i.result ? i.result.toUpperCase() : 'SCHEDULED'}
-                        </span>
+                        {isNote ? (
+                          <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-lg border bg-indigo-50 text-indigo-700 border-indigo-200">
+                            NOTE
+                          </span>
+                        ) : (
+                          <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-lg border ${badge.cls}`}>
+                            {i.result ? i.result.toUpperCase() : 'SCHEDULED'}
+                          </span>
+                        )}
                       </div>
                     </button>
                   )
@@ -14626,15 +15906,24 @@ function SendToSubsModal({ open, lot, items, subcontractors, onClose, onDraft })
 }
 
 function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
-  if (!open || !draft) return null
-  const { sub, items, channel } = draft
-  const base = buildDraft(sub, items)
-  const [message, setMessage] = useState(base.body)
-  const subject = base.subject
-  const contactName = sub?.primary_contact?.name ?? ''
+  // Hooks must not be conditional; keep null render after hooks.
+  const base = useMemo(() => {
+    if (!open || !draft) return { subject: '', body: '' }
+    const built = buildDraft?.(draft.sub, draft.items)
+    return built && typeof built === 'object' ? built : { subject: '', body: '' }
+  }, [open, draft, buildDraft])
+
+  const [message, setMessage] = useState(base.body ?? '')
+
   useEffect(() => {
-    setMessage(base.body)
+    setMessage(base.body ?? '')
   }, [base.body])
+
+  if (!open || !draft) return null
+
+  const { sub, items, channel } = draft
+  const subject = base.subject ?? ''
+  const contactName = sub?.primary_contact?.name ?? ''
 
   const photos = items
     .flatMap((item) => {

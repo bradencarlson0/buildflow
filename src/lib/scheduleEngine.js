@@ -4,6 +4,15 @@ import { uuid } from './uuid.js'
 
 const bySortOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || String(a.name).localeCompare(String(b.name))
 
+const isBufferTask = (task) => {
+  if (!task) return false
+  if (task.is_buffer) return true
+  if (String(task.kind ?? '').toLowerCase() === 'buffer') return true
+  if (String(task.trade ?? '').toLowerCase() === 'buffer') return true
+  if (String(task.name ?? '').trim().toLowerCase() === 'buffer') return true
+  return false
+}
+
 const shiftByWorkdays = (iso, delta, helpers) => {
   if (!iso || !delta) return iso
   if (delta > 0) return formatISODate(helpers.addWorkDays(iso, delta))
@@ -47,38 +56,6 @@ export const buildReschedulePreview = ({ lot, task, targetDateIso, org }) => {
   })()
   out.normalized_date = normalizedDate
 
-  const durationMinus1 = Math.max(0, Number(task.duration ?? 0) - 1)
-  let earliest = getNextWorkDay(task.scheduled_start) ?? parseISODate(task.scheduled_start)
-
-  for (const dep of task.dependencies ?? []) {
-    const pred = (lot.tasks ?? []).find((t) => t.id === dep.depends_on_task_id)
-    if (!pred?.scheduled_start || !pred?.scheduled_end) continue
-    const lag = Math.max(0, Number(dep.lag_days ?? 0) || 0)
-
-    if (dep.type === 'FS') {
-      const d = helpers.addWorkDays(pred.scheduled_end, 1 + lag)
-      if (d && (!earliest || d > earliest)) earliest = d
-    } else if (dep.type === 'SS') {
-      const d = helpers.addWorkDays(pred.scheduled_start, lag)
-      if (d && (!earliest || d > earliest)) earliest = d
-    } else if (dep.type === 'FF') {
-      const requiredEnd = helpers.addWorkDays(pred.scheduled_end, lag)
-      const d = requiredEnd ? helpers.subtractWorkDays(requiredEnd, durationMinus1) : null
-      if (d && (!earliest || d > earliest)) earliest = d
-    } else if (dep.type === 'SF') {
-      const requiredEnd = helpers.addWorkDays(pred.scheduled_start, lag)
-      const d = requiredEnd ? helpers.subtractWorkDays(requiredEnd, durationMinus1) : null
-      if (d && (!earliest || d > earliest)) earliest = d
-    }
-  }
-
-  const earliestStart = earliest ? formatISODate(getNextWorkDay(earliest) ?? earliest) : null
-  out.earliest_start = earliestStart
-  if (earliestStart && parseISODate(normalizedDate) && parseISODate(earliestStart) && parseISODate(normalizedDate) < parseISODate(earliestStart)) {
-    out.dependency_violation = true
-    return out
-  }
-
   const shiftDays = workdayDiff(task.scheduled_start, normalizedDate, helpers)
   const tasks = (lot.tasks ?? []).slice().sort(bySortOrder)
 
@@ -99,10 +76,7 @@ export const buildReschedulePreview = ({ lot, task, targetDateIso, org }) => {
     if (!t?.scheduled_start || !t?.scheduled_end) continue
     if (t.status === 'complete') continue
     const isAfter = (t.sort_order ?? 0) > movedSort
-    const shouldShift =
-      t.id === task.id ||
-      (t.track === movedTrack && isAfter) ||
-      (t.dependencies ?? []).some((d) => d.depends_on_task_id === task.id)
+    const shouldShift = t.id === task.id || (t.track === movedTrack && isAfter)
 
     if (!shouldShift) continue
 
@@ -179,50 +153,8 @@ const scheduleSequential = (tasks, startDateLike, orgSettings, scheduledDatesByI
   }
 }
 
-const constraintStartForDependency = (dep, predDates, taskDuration, orgSettings) => {
-  const { addWorkDays, subtractWorkDays } = makeWorkdayHelpers(orgSettings)
-  const lag = Math.max(0, Number(dep?.lag_days ?? 0) || 0)
-  const durationMinus1 = Math.max(0, Number(taskDuration ?? 0) - 1)
-  if (!predDates) return null
-
-  if (dep.type === 'FS') {
-    return addWorkDays(predDates.end, 1 + lag)
-  }
-  if (dep.type === 'SS') {
-    return addWorkDays(predDates.start, lag)
-  }
-  if (dep.type === 'FF') {
-    const requiredEnd = addWorkDays(predDates.end, lag)
-    return subtractWorkDays(requiredEnd, durationMinus1)
-  }
-  if (dep.type === 'SF') {
-    // Rare; keep simple: dependent must finish after predecessor starts (+lag).
-    const requiredEnd = addWorkDays(predDates.start, lag)
-    return subtractWorkDays(requiredEnd, durationMinus1)
-  }
-
-  return null
-}
-
 const scheduleWithDependencies = (tasks, trackStartLike, orgSettings, scheduledDatesById) => {
-  const { getNextWorkDay, addWorkDays } = makeWorkdayHelpers(orgSettings)
-  const trackStart = getNextWorkDay(trackStartLike)
-  if (!trackStart) return
-
-  const sorted = tasks.slice().sort(bySortOrder)
-  for (const task of sorted) {
-    let earliest = new Date(trackStart)
-
-    for (const dep of task.dependencies ?? []) {
-      const pred = scheduledDatesById.get(dep.depends_on_task_id)
-      const constraint = constraintStartForDependency(dep, pred, task.duration, orgSettings)
-      if (constraint && constraint > earliest) earliest = constraint
-    }
-
-    const start = getNextWorkDay(earliest) ?? earliest
-    const end = addWorkDays(start, Math.max(0, (task.duration ?? 0) - 1))
-    scheduledDatesById.set(task.id, { start, end })
-  }
+  scheduleSequential(tasks, trackStartLike, orgSettings, scheduledDatesById)
 }
 
 const getDriedInDate = (allTasks, scheduledDatesById) => {
@@ -474,8 +406,7 @@ const buildDurationShift = (lot, taskId, nextDuration, orgSettings) => {
     if (t.id === target.id) return true
     if (t.status === 'complete') return false
     const isAfter = (t.sort_order ?? 0) > (target.sort_order ?? 0)
-    if (t.track === target.track && isAfter) return true
-    return (t.dependencies ?? []).some((d) => d.depends_on_task_id === target.id)
+    return t.track === target.track && isAfter
   }
 
   for (const t of sorted) {
@@ -593,24 +524,16 @@ export const applyDurationChange = (lot, taskId, nextDuration, orgSettings) => {
     return next
   })
 
-  return { ...lot, tasks: nextTasks }
+  return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
 }
 
 export const canParallelizeTasks = (lot, taskIds) => {
-  const selected = new Set(taskIds ?? [])
-  const blocked = []
-  for (const task of lot?.tasks ?? []) {
-    if (!selected.has(task.id)) continue
-    for (const dep of task.dependencies ?? []) {
-      if (selected.has(dep.depends_on_task_id)) {
-        blocked.push({ task_id: task.id, depends_on_task_id: dep.depends_on_task_id })
-      }
-    }
-  }
+  void lot
+  void taskIds
   return {
-    ok: blocked.length === 0,
-    blocked,
-    reason: blocked.length ? 'Selected tasks have dependencies between them.' : '',
+    ok: true,
+    blocked: [],
+    reason: '',
   }
 }
 
@@ -744,7 +667,7 @@ export const applyListReorder = (lot, dragTaskId, dropTaskId, orgSettings) => {
     return t
   })
 
-  return { ...lot, tasks: nextTasks }
+  return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
 }
 
 export const previewDelayImpact = (lot, taskId, delayDays, orgSettings) => {
@@ -770,7 +693,6 @@ export const previewDelayImpact = (lot, taskId, delayDays, orgSettings) => {
     const isAfterDelayed = (task.sort_order ?? 0) > delayedSort
     if (task.id === delayed.id) shouldShift = true
     else if (task.track === delayedTrack && isAfterDelayed) shouldShift = true
-    else if ((task.dependencies ?? []).some((d) => d.depends_on_task_id === delayed.id)) shouldShift = true
 
     if (!shouldShift) continue
 
@@ -873,9 +795,8 @@ export const applyDelayCascade = (lot, taskId, delayDays, reason, notes, orgSett
   for (const task of sorted) {
     if (task.id === delayed.id) continue
     const isAfterDelayed = (task.sort_order ?? 0) > delayedSort
-    const dependsOnDelayed = (task.dependencies ?? []).some((d) => d.depends_on_task_id === delayed.id)
     const sameTrack = task.track === delayedTrack && isAfterDelayed
-    if (dependsOnDelayed || sameTrack) shiftTask(task)
+    if (sameTrack) shiftTask(task)
   }
 
   // Final track waits on bottleneck
@@ -897,21 +818,243 @@ export const applyDelayCascade = (lot, taskId, delayDays, reason, notes, orgSett
   }
 
   nextLot.tasks = tasks
-  return nextLot
+  return { ...nextLot, tasks: refreshReadyStatuses(tasks) }
+}
+
+export const applyBufferAfterTask = (lot, taskId, bufferDays, orgSettings) => {
+  if (!lot) return lot
+  const days = Math.max(0, Number(bufferDays) || 0)
+  if (days <= 0) return lot
+  const helpers = makeWorkdayHelpers(orgSettings)
+  const tasks = (lot.tasks ?? []).map((t) => ({ ...t }))
+  const target = tasks.find((t) => t.id === taskId)
+  if (!target) return lot
+
+  const targetTrack = target.track
+  const targetSort = target.sort_order ?? 0
+
+  const shiftTask = (t, delta) => {
+    if (!t.scheduled_start || !t.scheduled_end) return
+    t.scheduled_start = shiftByWorkdays(t.scheduled_start, delta, helpers)
+    t.scheduled_end = shiftByWorkdays(t.scheduled_end, delta, helpers)
+  }
+
+  for (const task of tasks) {
+    const isAfter = (task.sort_order ?? 0) > targetSort
+    if (task.track === targetTrack && isAfter) {
+      shiftTask(task, days)
+    }
+  }
+
+  // If this track blocks final, ensure final track doesn't start before new bottleneck
+  const blockingEnd = maxDateLike(
+    tasks
+      .filter((t) => t.track !== 'final' && t.blocks_final !== false)
+      .map((t) => t.scheduled_end)
+      .filter(Boolean),
+  )
+  const finalTasks = tasks.filter((t) => t.track === 'final').sort(bySortOrder)
+  if (blockingEnd && finalTasks.length > 0) {
+    const desiredFinalStart = formatISODate(helpers.addWorkDays(blockingEnd, 1))
+    const firstFinal = finalTasks[0]
+    if (firstFinal?.scheduled_start) {
+      const shift = workdayDiff(firstFinal.scheduled_start, desiredFinalStart, helpers)
+      if (shift > 0) {
+        for (const ft of finalTasks) shiftTask(ft, shift)
+      }
+    }
+  }
+
+  return { ...lot, tasks: refreshReadyStatuses(tasks) }
+}
+
+export const insertBufferTaskAfter = (lot, afterTaskId, bufferDays, orgSettings, options = {}) => {
+  if (!lot) return lot
+  const days = Math.max(1, Number(bufferDays) || 1)
+  const helpers = makeWorkdayHelpers(orgSettings)
+  const tasks = (lot.tasks ?? []).map((t) => ({ ...t }))
+  const target = tasks.find((t) => t.id === afterTaskId)
+  if (!target || !target.scheduled_end) return lot
+
+  const track = target.track ?? 'misc'
+  const targetSort = Number(target.sort_order ?? 0) || 0
+
+  const bufferStart = formatISODate(helpers.addWorkDays(target.scheduled_end, 1))
+  const bufferEnd = formatISODate(helpers.addWorkDays(bufferStart, days - 1))
+
+  const now = new Date().toISOString()
+  const bufferTask = {
+    id: options.buffer_task_id ?? uuid(),
+    lot_id: lot.id,
+    name: 'Buffer',
+    description: 'Schedule buffer',
+    trade: 'buffer',
+    phase: 'misc',
+    track,
+    sub_id: null,
+    duration: days,
+    scheduled_start: bufferStart,
+    scheduled_end: bufferEnd,
+    actual_start: null,
+    actual_end: null,
+    dependencies: [],
+    status: 'pending',
+    delay_days: 0,
+    delay_reason: null,
+    delay_notes: null,
+    delay_logged_at: null,
+    delay_logged_by: null,
+    requires_inspection: false,
+    inspection_type: null,
+    inspection_id: null,
+    is_outdoor: false,
+    is_critical_path: false,
+    blocks_final: false,
+    lead_time_days: 0,
+    photos: [],
+    documents: [],
+    notes: [],
+    sort_order: targetSort + 0.5,
+    created_at: now,
+    updated_at: now,
+    is_buffer: true,
+    kind: 'buffer',
+  }
+
+  // Shift later tasks in track forward by buffer days.
+  for (const task of tasks) {
+    const isAfter = (Number(task.sort_order ?? 0) || 0) > targetSort
+    if (task.track === track && isAfter) {
+      if (task.status === 'complete' || task.status === 'in_progress') continue
+      if (!task.scheduled_start || !task.scheduled_end) continue
+      task.scheduled_start = shiftByWorkdays(task.scheduled_start, days, helpers)
+      task.scheduled_end = shiftByWorkdays(task.scheduled_end, days, helpers)
+      task.updated_at = now
+    }
+  }
+
+  tasks.push(bufferTask)
+
+  // Normalize sort order for the track so we don't store fractional sort_order.
+  const trackTasks = tasks.filter((t) => (t.track ?? 'misc') === track).sort(bySortOrder)
+  for (let idx = 0; idx < trackTasks.length; idx++) {
+    trackTasks[idx].sort_order = idx + 1
+  }
+
+  // If this track blocks final, ensure final track doesn't start before new bottleneck.
+  const blockingEnd = maxDateLike(
+    tasks
+      .filter((t) => t.track !== 'final' && t.blocks_final !== false)
+      .map((t) => t.scheduled_end)
+      .filter(Boolean),
+  )
+  const finalTasks = tasks.filter((t) => t.track === 'final').sort(bySortOrder)
+  if (blockingEnd && finalTasks.length > 0) {
+    const desiredFinalStart = formatISODate(helpers.addWorkDays(blockingEnd, 1))
+    const firstFinal = finalTasks[0]
+    if (firstFinal?.scheduled_start) {
+      const shift = workdayDiff(firstFinal.scheduled_start, desiredFinalStart, helpers)
+      if (shift > 0) {
+        for (const ft of finalTasks) {
+          if (!ft.scheduled_start || !ft.scheduled_end) continue
+          ft.scheduled_start = shiftByWorkdays(ft.scheduled_start, shift, helpers)
+          ft.scheduled_end = shiftByWorkdays(ft.scheduled_end, shift, helpers)
+          ft.updated_at = now
+        }
+      }
+    }
+  }
+
+  return { ...lot, tasks: refreshReadyStatuses(tasks) }
+}
+
+export const removeBufferTask = (lot, bufferTaskId, orgSettings) => {
+  if (!lot) return lot
+  const helpers = makeWorkdayHelpers(orgSettings)
+  const tasks = (lot.tasks ?? []).map((t) => ({ ...t }))
+  const buffer = tasks.find((t) => t.id === bufferTaskId)
+  if (!buffer || !isBufferTask(buffer)) return lot
+
+  const days = Math.max(1, Number(buffer.duration ?? 1) || 1)
+  const track = buffer.track ?? 'misc'
+  const sort = Number(buffer.sort_order ?? 0) || 0
+
+  const nextTasks = tasks.filter((t) => t.id !== bufferTaskId)
+  const now = new Date().toISOString()
+
+  for (const task of nextTasks) {
+    const isAfter = (Number(task.sort_order ?? 0) || 0) > sort
+    if (task.track === track && isAfter) {
+      if (task.status === 'complete' || task.status === 'in_progress') continue
+      if (!task.scheduled_start || !task.scheduled_end) continue
+      task.scheduled_start = shiftByWorkdays(task.scheduled_start, -days, helpers)
+      task.scheduled_end = shiftByWorkdays(task.scheduled_end, -days, helpers)
+      task.updated_at = now
+    }
+  }
+
+  return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
+}
+
+export const rebuildTrackSchedule = (lot, track, orgSettings, options = {}) => {
+  if (!lot) return lot
+  const helpers = makeWorkdayHelpers(orgSettings)
+  const { getNextWorkDay, addWorkDays } = helpers
+
+  const tasks = (lot.tasks ?? []).map((t) => ({ ...t }))
+  const resolvedTrack = track ?? 'misc'
+
+  const normalizeIso = (iso) => {
+    if (!iso) return null
+    const next = getNextWorkDay(iso) ?? parseISODate(iso)
+    return next ? formatISODate(next) : iso
+  }
+
+  const scheduleGroup = (group, startIsoLike) => {
+    let cursorIso = normalizeIso(startIsoLike)
+    if (!cursorIso) return
+    for (const task of group.sort(bySortOrder)) {
+      const duration = Math.max(1, Number(task.duration ?? 1) || 1)
+      task.scheduled_start = cursorIso
+      task.scheduled_end = formatISODate(addWorkDays(cursorIso, duration - 1))
+      cursorIso = formatISODate(addWorkDays(task.scheduled_end, 1))
+    }
+  }
+
+  const group = tasks.filter((t) => (t.track ?? 'misc') === resolvedTrack)
+  if (group.length > 0) {
+    const providedStart = normalizeIso(options.start_date ?? options.startDateIso ?? '')
+    const derivedStart =
+      providedStart ??
+      (() => {
+        const earliest = minDateLike(group.map((t) => t.scheduled_start).filter(Boolean))
+        if (earliest) return formatISODate(earliest)
+        return normalizeIso(lot.start_date)
+      })()
+    scheduleGroup(group, derivedStart)
+  }
+
+  // Keep the final track anchored to the non-final bottleneck.
+  const blockingEnd = maxDateLike(
+    tasks
+      .filter((t) => t.track !== 'final' && t.blocks_final !== false)
+      .map((t) => t.scheduled_end)
+      .filter(Boolean),
+  )
+  const finalTasks = tasks.filter((t) => t.track === 'final')
+  if (blockingEnd && finalTasks.length > 0) {
+    const desiredFinalStart = formatISODate(addWorkDays(blockingEnd, 1))
+    scheduleGroup(finalTasks, desiredFinalStart)
+  }
+
+  return { ...lot, tasks: refreshReadyStatuses(tasks) }
 }
 
 export const canCompleteTask = (task, inspections, photoRequirements) => {
-  if (!task?.requires_inspection) return true
-  const related = (inspections ?? []).find((i) => i.task_id === task.id && i.result === 'pass')
-  if (!related) return false
-
-  // Photo requirement (spec-aligned defaults)
-  const key = Object.keys(photoRequirements ?? {}).find((k) => String(task.name).includes(k))
-  const requirement = key ? photoRequirements?.[key] : null
-  if (!requirement) return true
-
-  const photoCount = Array.isArray(task.photos) ? task.photos.length : 0
-  return photoCount >= requirement.min
+  void task
+  void inspections
+  void photoRequirements
+  return true
 }
 
 export const getBlockedInspectionTypesForTask = (taskName) =>
@@ -920,47 +1063,53 @@ export const getBlockedInspectionTypesForTask = (taskName) =>
 export const hasPassedInspection = (inspections, inspectionType) =>
   (inspections ?? []).some((i) => i.type === inspectionType && i.result === 'pass')
 
-const isBlockedByExistingInspection = (taskName, inspections) => {
-  const blockingTypes = getBlockedInspectionTypesForTask(taskName)
-  for (const code of blockingTypes) {
-    const existing = (inspections ?? []).filter((i) => i.type === code)
-    if (existing.length === 0) continue
-    if (!existing.some((i) => i.result === 'pass')) return true
-  }
-  return false
-}
-
 export const canStartTask = (task, schedule, inspections) => {
-  // Check hard dependency completion
-  for (const dep of task.dependencies ?? []) {
-    const predecessor = (schedule ?? []).find((t) => t.id === dep.depends_on_task_id)
-    if (!predecessor || predecessor.status !== 'complete') {
-      return false
-    }
-  }
-
-  // Check inspection gates based on inspection table "Blocks Next Task"
-  if (isBlockedByExistingInspection(task.name, inspections)) return false
-
-  return true
+  void schedule
+  void inspections
+  return Boolean(task) && task.status !== 'complete'
 }
 
 export const deriveTaskStatus = (task, schedule, inspections) => {
+  void schedule
+  void inspections
   if (!task) return 'pending'
-  if (task.status === 'complete') return 'complete'
-  if (task.status === 'in_progress') return 'in_progress'
-  if (task.status === 'delayed') return 'delayed'
-  if (task.status === 'blocked') return 'blocked'
+  const status = task.status ?? 'pending'
+  if (status === 'complete') return 'complete'
+  if (status === 'in_progress') return 'in_progress'
+  if (status === 'delayed') return 'delayed'
+  if (status === 'blocked') return 'blocked'
+  if (status === 'ready') return 'ready'
+  return 'pending'
+}
 
-  const deps = task.dependencies ?? []
-  for (const dep of deps) {
-    const predecessor = (schedule ?? []).find((t) => t.id === dep.depends_on_task_id)
-    if (predecessor?.status === 'blocked') return 'blocked'
+export const refreshReadyStatuses = (tasks) => {
+  const list = (tasks ?? []).map((t) => ({ ...t }))
+  const byTrack = new Map()
+  for (const task of list) {
+    const track = task.track ?? 'misc'
+    const group = byTrack.get(track) ?? []
+    group.push(task)
+    byTrack.set(track, group)
   }
 
-  if (isBlockedByExistingInspection(task.name, inspections)) return 'blocked'
+  const isEligible = (task) => !isBufferTask(task) && !['complete', 'in_progress', 'delayed', 'blocked'].includes(task.status)
 
-  return canStartTask(task, schedule, inspections) ? 'ready' : 'pending'
+  for (const group of byTrack.values()) {
+    const eligible = group.filter(isEligible)
+    if (eligible.length === 0) continue
+    eligible.sort((a, b) => {
+      const aDate = a.scheduled_start ? parseISODate(a.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY
+      const bDate = b.scheduled_start ? parseISODate(b.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY
+      if (aDate !== bDate) return aDate - bDate
+      return (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0)
+    })
+    const nextReady = eligible[0]
+    for (const task of eligible) {
+      task.status = task.id === nextReady.id ? 'ready' : 'pending'
+    }
+  }
+
+  return list
 }
 
 export const calculateLotProgress = (lot) => {
@@ -1038,13 +1187,17 @@ export const startLotFromTemplate = ({
   orgSettings,
   subcontractors,
   existingLots,
+  draftTasks,
+  draft_tasks,
 }) => {
   const { getNextWorkDay } = makeWorkdayHelpers(orgSettings)
   const normalizedStart = start_date ? formatISODate(getNextWorkDay(start_date) ?? start_date) : null
   if (!normalizedStart) return lot
 
-  const tasks = buildLotTasksFromTemplate(lot.id, normalizedStart, template, orgSettings)
-  const tasksWithSubs = assignSubsToTasks(tasks, subcontractors, existingLots)
+  const providedTasks = (draftTasks ?? draft_tasks ?? []).map((t) => ({ ...t }))
+  const baseTasks = providedTasks.length > 0 ? providedTasks : buildLotTasksFromTemplate(lot.id, normalizedStart, template, orgSettings)
+  const tasksWithSubs = assignSubsToTasks(baseTasks, subcontractors, existingLots)
+  const nextTasks = refreshReadyStatuses(tasksWithSubs)
 
   const effectiveBuildDays = template?.build_days ?? lot.build_days
   const target_completion_date = calculateTargetCompletionDate(normalizedStart, effectiveBuildDays, orgSettings)
@@ -1062,7 +1215,7 @@ export const startLotFromTemplate = ({
     build_days: effectiveBuildDays ?? lot.build_days,
     target_completion_date,
     custom_fields: custom_fields ?? lot.custom_fields ?? {},
-    tasks: tasksWithSubs,
+    tasks: nextTasks,
     inspections: [],
     punch_list: null,
     daily_logs: lot.daily_logs ?? [],

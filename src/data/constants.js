@@ -72,6 +72,7 @@ export const COMMUNITY_SPEC_CATEGORIES = [
 ]
 
 export const INSPECTION_TYPES = [
+  { code: 'NOTE', label: 'Notes / Docs', trigger: null, blocksNext: null },
   { code: 'PRE', label: 'Pre-Pour', trigger: 'Footings', blocksNext: 'Foundation Pour' },
   { code: 'FND', label: 'Foundation', trigger: 'Foundation Cure', blocksNext: 'Backfill' },
   { code: 'FRM', label: 'Framing', trigger: 'Roofing', blocksNext: 'Windows/Doors' },

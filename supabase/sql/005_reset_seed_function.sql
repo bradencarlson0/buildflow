@@ -9,7 +9,7 @@ security definer
 set search_path = public
 as $$
 declare
-  org_id uuid := coalesce(target_org_id, public.current_profile_org_id());
+  v_org_id uuid := coalesce(target_org_id, public.current_profile_org_id());
   is_admin boolean := false;
   is_anon boolean := false;
 begin
@@ -27,11 +27,11 @@ begin
     raise exception 'Anonymous users cannot reset seed data';
   end if;
 
-  if org_id is null then
+  if v_org_id is null then
     raise exception 'No org id available';
   end if;
 
-  if org_id <> '97165bae-19d5-41f6-978c-352876ac108b'::uuid then
+  if v_org_id <> '97165bae-19d5-41f6-978c-352876ac108b'::uuid then
     raise exception 'Seed reset only configured for the BuildFlow demo org.';
   end if;
 
