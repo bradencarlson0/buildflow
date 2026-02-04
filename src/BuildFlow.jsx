@@ -52,7 +52,16 @@ import {
   TRADES,
   WEATHER_THRESHOLDS,
 } from './data/constants.js'
-import { addCalendarDays, daysBetweenCalendar, formatISODate, formatLongDate, formatShortDate, makeWorkdayHelpers, parseISODate } from './lib/date.js'
+import {
+  addCalendarDays,
+  daysBetweenCalendar,
+  formatISODate,
+  formatLongDate,
+  formatShortDate,
+  formatShortDateWithWeekday,
+  makeWorkdayHelpers,
+  parseISODate,
+} from './lib/date.js'
 import { fillTemplate } from './lib/templating.js'
 import { clearAppState, loadAppState, saveAppState } from './lib/storage.js'
 import { normalizeRange, toRangeString, validateAssignments } from './lib/utils.js'
@@ -875,6 +884,9 @@ export default function BuildFlow() {
   const [scheduledReportModal, setScheduledReportModal] = useState(false)
   const [subContactModalId, setSubContactModalId] = useState(null)
   const [editingSubId, setEditingSubId] = useState(null)
+  const [subFilterCategory, setSubFilterCategory] = useState('all')
+  const [subFilterTrade, setSubFilterTrade] = useState('all')
+  const [subContactIndexById, setSubContactIndexById] = useState({})
   const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
@@ -923,6 +935,7 @@ export default function BuildFlow() {
     track: null,
     pointerType: '',
     scrollEl: null,
+    startScrollTop: 0,
     scrollRaf: null,
   })
   const listDropPulseTimerRef = useRef(null)
@@ -2133,6 +2146,19 @@ export default function BuildFlow() {
     state.scrollRaf = null
   }
 
+  const getListScrollTop = (state) => {
+    const scrollEl = state.scrollEl ?? document.scrollingElement ?? document.documentElement
+    if (!scrollEl) return 0
+    return scrollEl.scrollTop ?? 0
+  }
+
+  const computeListDragOffset = (state) => {
+    const scrollTop = getListScrollTop(state)
+    const base = Number.isFinite(state.startScrollTop) ? state.startScrollTop : scrollTop
+    const deltaScroll = scrollTop - base
+    return state.lastY - state.startY + deltaScroll
+  }
+
   const stepListAutoScroll = () => {
     const state = listDragRef.current
     if (!state.active) {
@@ -2159,6 +2185,7 @@ export default function BuildFlow() {
       return
     }
     scrollEl.scrollTop += speed
+    setListDragOffset(computeListDragOffset(state))
     updateListDropTarget(state.lastX, state.lastY)
     state.scrollRaf = requestAnimationFrame(stepListAutoScroll)
   }
@@ -2179,6 +2206,7 @@ export default function BuildFlow() {
     state.taskId = null
     state.track = null
     state.scrollEl = null
+    state.startScrollTop = 0
     setListDraggingTaskId(null)
     setListDropTaskId(null)
     setListDragOffset(0)
@@ -2233,6 +2261,7 @@ export default function BuildFlow() {
     state.track = task.track
     state.pointerType = e.pointerType
     state.scrollEl = resolveListScrollContainer(e.currentTarget)
+    state.startScrollTop = getListScrollTop(state)
 
     const targetEl = e.currentTarget
     const pointerId = e.pointerId
@@ -2242,7 +2271,8 @@ export default function BuildFlow() {
       state.active = true
       setListDraggingTaskId(task.id)
       setListDropTaskId(task.id)
-      setListDragOffset(0)
+      state.startScrollTop = getListScrollTop(state)
+      setListDragOffset(computeListDragOffset(state))
       if (!state.scrollEl) state.scrollEl = resolveListScrollContainer(targetEl)
       if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(12)
       if (targetEl?.setPointerCapture) {
@@ -2271,7 +2301,8 @@ export default function BuildFlow() {
         state.active = true
         setListDraggingTaskId(task.id)
         setListDropTaskId(task.id)
-        setListDragOffset(state.lastY - state.startY)
+        state.startScrollTop = getListScrollTop(state)
+        setListDragOffset(computeListDragOffset(state))
         if (!state.scrollEl) state.scrollEl = resolveListScrollContainer(e.currentTarget)
         if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(10)
         if (e.currentTarget?.setPointerCapture && state.pointerId !== null) {
@@ -2290,7 +2321,7 @@ export default function BuildFlow() {
     }
 
     e.preventDefault()
-    setListDragOffset(state.lastY - state.startY)
+    setListDragOffset(computeListDragOffset(state))
     updateListDropTarget(state.lastX, state.lastY)
     maybeStartListAutoScroll()
   }
@@ -3410,6 +3441,26 @@ export default function BuildFlow() {
     return list.sort((a, b) => a.daysRemaining - b.daysRemaining)
   }, [app.lots, communitiesById, todayIso])
 
+  const upcomingInspections = useMemo(() => {
+    const list = []
+    for (const lot of app.lots ?? []) {
+      for (const inspection of lot.inspections ?? []) {
+        if (!inspection?.scheduled_date) continue
+        if (inspection.type === 'NOTE') continue
+        if (inspection.status && inspection.status !== 'scheduled') continue
+        if (inspection.scheduled_date < todayIso) continue
+        const community = communitiesById.get(lot.community_id) ?? null
+        const task = lot.tasks?.find((t) => t.id === inspection.task_id) ?? null
+        list.push({ lot, community, inspection, task })
+      }
+    }
+    return list.sort((a, b) => {
+      const dateSort = String(a.inspection.scheduled_date).localeCompare(String(b.inspection.scheduled_date))
+      if (dateSort !== 0) return dateSort
+      return String(a.inspection.scheduled_time ?? '').localeCompare(String(b.inspection.scheduled_time ?? ''))
+    })
+  }, [app.lots, communitiesById, todayIso])
+
   const todaysTasks = useMemo(() => {
     const items = []
     for (const lot of activeLots) {
@@ -3966,6 +4017,48 @@ export default function BuildFlow() {
       : 'BuildFlow'
 
   const tradeOptions = useMemo(() => mergeTradeOptions(app.custom_trades ?? []), [app.custom_trades])
+  const tradeToCategory = useMemo(() => {
+    const map = new Map()
+    for (const preset of TASK_PRESETS) {
+      if (preset.trade && preset.category) map.set(preset.trade, preset.category)
+    }
+    for (const template of app.templates ?? []) {
+      for (const task of template?.tasks ?? []) {
+        const trade = String(task?.trade ?? '').trim()
+        const track = String(task?.track ?? task?.category ?? task?.phase ?? '').trim()
+        if (trade && track) map.set(trade, track)
+      }
+    }
+    return map
+  }, [app.templates])
+
+  const filteredSubs = useMemo(() => {
+    const list = (app.subcontractors ?? []).slice()
+    return list.filter((sub) => {
+      const trades = new Set([sub?.trade, ...(sub?.secondary_trades ?? [])].filter(Boolean))
+      if (subFilterTrade !== 'all' && !trades.has(subFilterTrade)) return false
+      if (subFilterCategory !== 'all') {
+        let match = false
+        for (const trade of trades) {
+          if (tradeToCategory.get(trade) === subFilterCategory) {
+            match = true
+            break
+          }
+        }
+        if (!match) return false
+      }
+      return true
+    })
+  }, [app.subcontractors, subFilterCategory, subFilterTrade, tradeToCategory])
+
+  const stepSubContactIndex = (subId, delta, count) => {
+    if (!count) return
+    setSubContactIndexById((prev) => {
+      const current = Number(prev[subId] ?? 0) || 0
+      const next = (current + delta + count) % count
+      return { ...prev, [subId]: next }
+    })
+  }
 
   const adminSections = [
     { id: 'product_types', label: 'Product Types', description: 'Define categories, build days, and templates.', count: productTypes.length },
@@ -4820,6 +4913,36 @@ export default function BuildFlow() {
                       </p>
                     </button>
                   ))}
+                </div>
+              )}
+            </Card>
+            <Card>
+              <h3 className="font-semibold mb-3">Upcoming Inspections</h3>
+              {upcomingInspections.length === 0 ? (
+                <p className="text-sm text-gray-500">None scheduled currently.</p>
+              ) : (
+                <div className="space-y-2">
+                  {upcomingInspections.slice(0, 5).map(({ lot, community, inspection, task }) => {
+                    const label = INSPECTION_TYPES.find((t) => t.code === inspection.type)?.label ?? inspection.type
+                    return (
+                      <button
+                        key={inspection.id}
+                        onClick={() => setInspectionsLotId(lot.id)}
+                        className="w-full p-3 rounded-xl text-left bg-gray-50"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">{community?.name ?? ''} • {lotCode(lot)}</span>
+                          <span className="text-xs text-gray-600">{inspection.scheduled_time ?? ''}</span>
+                        </div>
+                        <p className="text-xs text-gray-600 mt-1">
+                          {label}{task?.name ? ` • ${task.name}` : ''}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatShortDateWithWeekday(inspection.scheduled_date)}
+                        </p>
+                      </button>
+                    )
+                  })}
                 </div>
               )}
             </Card>
@@ -5947,7 +6070,8 @@ export default function BuildFlow() {
                                   <TaskStatusBadge status={status} />
                                 </div>
                                 <p className="text-xs text-gray-600 mt-1">
-                                  {sub?.company_name ?? 'Unassigned'} • {formatShortDate(task.scheduled_start)} - {formatShortDate(task.scheduled_end)}
+                                  {sub?.company_name ?? 'Unassigned'} • {formatShortDateWithWeekday(task.scheduled_start)} -{' '}
+                                  {formatShortDateWithWeekday(task.scheduled_end)}
                                 </p>
                               </div>
                             )
@@ -6213,8 +6337,8 @@ export default function BuildFlow() {
                                               >
                                                 {task.name}
                                               </p>
-                                              <p className="text-xs text-gray-600 mt-1">
-                                                {formatShortDate(task.scheduled_start)} - {formatShortDate(task.scheduled_end)} •
+                                              <p className="text-[11px] text-gray-600 mt-1 whitespace-nowrap">
+                                                {formatShortDateWithWeekday(task.scheduled_start)} - {formatShortDateWithWeekday(task.scheduled_end)} •
                                                 <span className="ml-1 inline-flex items-center gap-1">
                                                   <span className="text-[10px] uppercase text-gray-500">Duration</span>
                                                   {bufferTask ? (
@@ -6349,11 +6473,64 @@ export default function BuildFlow() {
                   + Add Sub
                 </button>
               </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+                <label className="block">
+                  <span className="text-xs text-gray-500">Filter by Category</span>
+                  <select
+                    value={subFilterCategory}
+                    onChange={(e) => setSubFilterCategory(e.target.value)}
+                    className="mt-1 w-full px-3 py-2 border rounded-xl text-sm"
+                  >
+                    <option value="all">All categories</option>
+                    {TASK_CATEGORIES.map((c) => (
+                      <option key={c.id} value={c.track}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs text-gray-500">Filter by Task Type</span>
+                  <select
+                    value={subFilterTrade}
+                    onChange={(e) => setSubFilterTrade(e.target.value)}
+                    className="mt-1 w-full px-3 py-2 border rounded-xl text-sm"
+                  >
+                    <option value="all">All task types</option>
+                    {tradeOptions.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               <div className="space-y-2">
-                {app.subcontractors.map((sub) => {
-                  const contactName = (sub.primary_contact?.name ?? '').trim()
-                  const contactPhone = (sub.primary_contact?.phone ?? '').trim()
-                  const contactEmail = (sub.primary_contact?.email ?? '').trim()
+                {filteredSubs.map((sub) => {
+                  const primary = sub.primary_contact ?? {}
+                  const additional = Array.isArray(sub.additional_contacts) ? sub.additional_contacts : []
+                  const contacts = [
+                    {
+                      id: primary.id ?? 'primary',
+                      name: primary.name ?? '',
+                      phone: primary.phone ?? '',
+                      email: primary.email ?? '',
+                      role: 'Primary Contact',
+                    },
+                    ...additional.map((c, idx) => ({
+                      id: c.id ?? `${sub.id}-extra-${idx}`,
+                      name: c.name ?? '',
+                      phone: c.phone ?? '',
+                      email: c.email ?? '',
+                      role: `Additional Contact`,
+                    })),
+                  ].filter((c) => (c.name || c.phone || c.email))
+
+                  const contactCount = contacts.length
+                  const index = Math.min(subContactIndexById[sub.id] ?? 0, Math.max(0, contactCount - 1))
+                  const activeContact = contactCount > 0 ? contacts[index] : null
+                  const contactPhone = (activeContact?.phone ?? '').trim()
+                  const contactEmail = (activeContact?.email ?? '').trim()
 
                   return (
                     <div key={sub.id} className="bg-gray-50 rounded-xl border border-gray-200 p-4">
@@ -6367,27 +6544,60 @@ export default function BuildFlow() {
                       </div>
                       <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                         <div className="space-y-2">
-                          {contactName ? <p className="text-xs text-gray-500">Contact: {contactName}</p> : null}
-                          <div className="flex flex-wrap items-center gap-2 text-xs">
-                            {contactPhone ? (
-                              <a
-                                href={`tel:${contactPhone}`}
-                                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
-                              >
-                                <Phone className="w-3.5 h-3.5 text-blue-600" />
-                                <span className="tracking-tight">{contactPhone}</span>
-                              </a>
-                            ) : null}
-                            {contactEmail ? (
-                              <a
-                                href={`mailto:${contactEmail}`}
-                                title={contactEmail}
-                                className="inline-flex min-w-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
-                              >
-                                <Mail className="w-3.5 h-3.5 text-blue-600" />
-                                <span className="max-w-[220px] truncate sm:max-w-none">{contactEmail}</span>
-                              </a>
-                            ) : null}
+                          <div className="bg-white border border-gray-200 rounded-xl p-3">
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs text-gray-500">{activeContact?.role ?? 'Contact'}</p>
+                              <p className="text-xs text-gray-500">{contactCount > 0 ? `${index + 1}/${contactCount}` : '0/0'}</p>
+                            </div>
+                            {activeContact ? (
+                              <>
+                                <p className="text-sm font-semibold mt-1">{activeContact.name || 'Unnamed Contact'}</p>
+                                <div className="flex flex-wrap items-center gap-2 text-xs mt-2">
+                                  {contactPhone ? (
+                                    <a
+                                      href={`tel:${contactPhone}`}
+                                      className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
+                                    >
+                                      <Phone className="w-3.5 h-3.5 text-blue-600" />
+                                      <span className="tracking-tight">{contactPhone}</span>
+                                    </a>
+                                  ) : null}
+                                  {contactEmail ? (
+                                    <a
+                                      href={`mailto:${contactEmail}`}
+                                      title={contactEmail}
+                                      className="inline-flex min-w-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
+                                    >
+                                      <Mail className="w-3.5 h-3.5 text-blue-600" />
+                                      <span className="max-w-[220px] truncate sm:max-w-none">{contactEmail}</span>
+                                    </a>
+                                  ) : null}
+                                </div>
+                                {contactCount > 1 ? (
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => stepSubContactIndex(sub.id, -1, contactCount)}
+                                      className="h-8 w-8 rounded-full border border-gray-200 bg-white flex items-center justify-center text-gray-500"
+                                      aria-label="Previous contact"
+                                    >
+                                      <ChevronLeft className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => stepSubContactIndex(sub.id, 1, contactCount)}
+                                      className="h-8 w-8 rounded-full border border-gray-200 bg-white flex items-center justify-center text-gray-500"
+                                      aria-label="Next contact"
+                                    >
+                                      <ChevronRight className="w-4 h-4" />
+                                    </button>
+                                    <p className="text-xs text-gray-500">Swipe to flip</p>
+                                  </div>
+                                ) : null}
+                              </>
+                            ) : (
+                              <p className="text-xs text-gray-500 mt-1">No contacts yet.</p>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -9534,6 +9744,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
   const [draftTasks, setDraftTasks] = useState([])
   const [previewTouched, setPreviewTouched] = useState(false)
   const [previewAddTaskOpen, setPreviewAddTaskOpen] = useState(false)
+  const [previewBufferOpen, setPreviewBufferOpen] = useState(false)
   const [previewDraggingTaskId, setPreviewDraggingTaskId] = useState(null)
   const [previewDropTaskId, setPreviewDropTaskId] = useState(null)
   const previewDragRef = useRef({
@@ -10113,6 +10324,13 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
                 >
                   + Add Task
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewBufferOpen(true)}
+                  className="h-10 px-3 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-sm font-semibold"
+                >
+                  + Add Buffer
+                </button>
               </div>
             </div>
 
@@ -10185,8 +10403,8 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
                                       <div className="min-w-0 flex-1">
                                         <p className="text-sm font-semibold text-gray-900">{task.name}</p>
                                         <p className="text-[11px] text-gray-600 mt-0.5">
-                                          {task.scheduled_start ? formatShortDate(task.scheduled_start) : '—'} –{' '}
-                                          {task.scheduled_end ? formatShortDate(task.scheduled_end) : '—'}
+                                          {task.scheduled_start ? formatShortDateWithWeekday(task.scheduled_start) : '—'} –{' '}
+                                          {task.scheduled_end ? formatShortDateWithWeekday(task.scheduled_end) : '—'}
                                           {task.trade ? ` • ${task.trade}` : ''}
                                         </p>
                                       </div>
@@ -10318,6 +10536,25 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
         />
       ) : null}
 
+      {previewBufferOpen && previewLot ? (
+        <CreateBufferModal
+          lot={previewLot}
+          org={org}
+          onClose={() => setPreviewBufferOpen(false)}
+          onCreate={({ anchorTaskId, days, bufferTaskId }) => {
+            setPreviewBufferOpen(false)
+            if (!resolvedLot || !anchorTaskId) return
+            const value = Math.max(1, Number(days) || 1)
+            setPreviewTouched(true)
+            setDraftTasks((prev) => {
+              const base = { ...resolvedLot, tasks: prev }
+              const nextLot = insertBufferTaskAfter(base, anchorTaskId, value, org, { buffer_task_id: bufferTaskId })
+              return nextLot?.tasks ?? prev
+            })
+          }}
+        />
+      ) : null}
+
       {previewGhost ? (
         <div
           className="fixed left-0 top-0 z-[9999] pointer-events-none"
@@ -10335,8 +10572,8 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold text-gray-900 truncate">{previewGhost.name}</p>
                   <p className="text-[11px] text-gray-600 mt-0.5 truncate">
-                    {previewGhost.start ? formatShortDate(previewGhost.start) : '—'} –{' '}
-                    {previewGhost.end ? formatShortDate(previewGhost.end) : '—'}
+                    {previewGhost.start ? formatShortDateWithWeekday(previewGhost.start) : '—'} –{' '}
+                    {previewGhost.end ? formatShortDateWithWeekday(previewGhost.end) : '—'}
                     {previewGhost.trade ? ` • ${previewGhost.trade}` : ''}
                   </p>
                 </div>
@@ -10436,7 +10673,7 @@ function TaskModal({
                 {community?.name ?? 'Community'} • {lotCode(lot)}
               </p>
               <p className="text-xs text-gray-600 mt-1">
-                Scheduled: {formatShortDate(task.scheduled_start)} - {formatShortDate(task.scheduled_end)} • {task.duration}d
+                Scheduled: {formatShortDateWithWeekday(task.scheduled_start)} - {formatShortDateWithWeekday(task.scheduled_end)} • {task.duration}d
               </p>
               <p className="text-xs text-gray-600 mt-1">
                 Sub: {sub?.company_name ?? 'Unassigned'}
@@ -11013,16 +11250,16 @@ function ImpactPreviewCard({ affected, buffer, oldCompletion, newCompletion, max
           <p className="text-sm font-semibold text-gray-800">Impact Preview</p>
           <p className="text-xs text-gray-600">
             {sorted.length} task{sorted.length === 1 ? '' : 's'} shifting
-            {newCompletion ? ` • New completion: ${formatShortDate(newCompletion)}` : ''}
+            {newCompletion ? ` • New completion: ${formatShortDateWithWeekday(newCompletion)}` : ''}
           </p>
         </div>
         {oldCompletion && newCompletion ? (
           <div className="text-right">
             <p className="text-[11px] text-gray-500 font-semibold">Completion</p>
             <div className="mt-1 flex items-center justify-end gap-2">
-              <ImpactDatePill tone="old" label={formatShortDate(oldCompletion)} />
+              <ImpactDatePill tone="old" label={formatShortDateWithWeekday(oldCompletion)} />
               <span className="text-[11px] text-gray-400">→</span>
-              <ImpactDatePill tone="new" label={formatShortDate(newCompletion)} />
+              <ImpactDatePill tone="new" label={formatShortDateWithWeekday(newCompletion)} />
               {completionDelta ? <ImpactDeltaPill delta={completionDelta} /> : null}
             </div>
           </div>
@@ -11038,9 +11275,9 @@ function ImpactPreviewCard({ affected, buffer, oldCompletion, newCompletion, max
             </span>
           </div>
           <div className="mt-2 flex items-center gap-2 flex-wrap">
-            <ImpactDatePill tone="buffer" label={formatShortDate(buffer.start)} />
+            <ImpactDatePill tone="buffer" label={formatShortDateWithWeekday(buffer.start)} />
             <span className="text-[11px] text-amber-700">to</span>
-            <ImpactDatePill tone="buffer" label={formatShortDate(buffer.end)} />
+            <ImpactDatePill tone="buffer" label={formatShortDateWithWeekday(buffer.end)} />
           </div>
         </div>
       ) : null}
@@ -11065,15 +11302,15 @@ function ImpactPreviewCard({ affected, buffer, oldCompletion, newCompletion, max
                     </p>
                   </div>
                   <div className="flex items-center gap-2 flex-wrap justify-end">
-                    <ImpactDatePill tone="old" label={oldStart ? formatShortDate(oldStart) : '—'} />
+                    <ImpactDatePill tone="old" label={oldStart ? formatShortDateWithWeekday(oldStart) : '—'} />
                     <span className="text-[11px] text-gray-400">→</span>
-                    <ImpactDatePill tone="new" label={newStart ? formatShortDate(newStart) : '—'} />
+                    <ImpactDatePill tone="new" label={newStart ? formatShortDateWithWeekday(newStart) : '—'} />
                     <ImpactDeltaPill delta={delta} />
                   </div>
                 </div>
                 {oldEnd && newEnd ? (
                   <p className="text-[11px] text-gray-600 mt-2">
-                    End: {formatShortDate(oldEnd)} → {formatShortDate(newEnd)}
+                    End: {formatShortDateWithWeekday(oldEnd)} → {formatShortDateWithWeekday(newEnd)}
                   </p>
                 ) : null}
               </div>
@@ -11151,13 +11388,31 @@ function BufferModal({ lot, task, org, onClose, onApply }) {
 
         <label className="block">
           <span className="text-sm font-semibold">Buffer duration (workdays)</span>
-          <input
-            type="number"
-            min="1"
-            value={days}
-            onChange={(e) => setDays(e.target.value)}
-            className="mt-1 w-full px-3 py-3 border rounded-xl"
-          />
+          <div className="mt-1 grid grid-cols-[44px_1fr_44px] gap-2">
+            <button
+              type="button"
+              onClick={() => setDays((d) => Math.max(1, (Number(d) || 1) - 1))}
+              className="h-11 rounded-xl border border-gray-200 bg-white text-xl font-semibold"
+              title="Decrease"
+            >
+              −
+            </button>
+            <input
+              type="number"
+              min="1"
+              value={days}
+              onChange={(e) => setDays(e.target.value)}
+              className="h-11 w-full px-3 border rounded-xl text-center"
+            />
+            <button
+              type="button"
+              onClick={() => setDays((d) => (Number(d) || 1) + 1)}
+              className="h-11 rounded-xl border border-gray-200 bg-white text-xl font-semibold"
+              title="Increase"
+            >
+              +
+            </button>
+          </div>
         </label>
 
         <ImpactPreviewCard
@@ -11300,13 +11555,31 @@ function CreateBufferModal({ lot, org, onClose, onCreate }) {
 
         <label className="block">
           <span className="text-sm font-semibold">Buffer duration (workdays)</span>
-          <input
-            type="number"
-            min="1"
-            value={days}
-            onChange={(e) => setDays(e.target.value)}
-            className="mt-1 w-full px-3 py-3 border rounded-xl"
-          />
+          <div className="mt-1 grid grid-cols-[44px_1fr_44px] gap-2">
+            <button
+              type="button"
+              onClick={() => setDays((d) => Math.max(1, (Number(d) || 1) - 1))}
+              className="h-11 rounded-xl border border-gray-200 bg-white text-xl font-semibold"
+              title="Decrease"
+            >
+              −
+            </button>
+            <input
+              type="number"
+              min="1"
+              value={days}
+              onChange={(e) => setDays(e.target.value)}
+              className="h-11 w-full px-3 border rounded-xl text-center"
+            />
+            <button
+              type="button"
+              onClick={() => setDays((d) => (Number(d) || 1) + 1)}
+              className="h-11 rounded-xl border border-gray-200 bg-white text-xl font-semibold"
+              title="Increase"
+            >
+              +
+            </button>
+          </div>
         </label>
 
         <ImpactPreviewCard
@@ -13392,32 +13665,41 @@ function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpen
             + Add Note / Files
           </PrimaryButton>
           <SecondaryButton onClick={onClose} className="w-full">
-            Done
+            Close
           </SecondaryButton>
         </div>
 
         {inspectionTasks.length > 0 ? (
           <Card className="border-orange-200 bg-orange-50">
             <p className="font-semibold text-orange-800 mb-2">Inspection Requirements</p>
+            <p className="text-xs text-orange-700 mb-3">Schedule the required inspections for these tasks.</p>
             <div className="space-y-2">
               {inspectionTasks.slice(0, 6).map((t) => (
-                <button
+                <div
                   key={t.id}
-                  onClick={() => onScheduleInspectionForTask(t.id)}
-                  className="w-full bg-white border border-orange-200 rounded-xl p-3 text-left"
+                  className="w-full bg-white border border-orange-200 rounded-xl p-3 flex items-center justify-between gap-3"
                 >
-                  <p className="font-semibold">{t.inspection_type ?? 'Inspection'} • {t.name}</p>
-                  <p className="text-xs text-gray-600 mt-1">Schedule inspection</p>
-                </button>
+                  <div className="text-left">
+                    <p className="font-semibold">{t.inspection_type ?? 'Inspection'} • {t.name}</p>
+                    <p className="text-xs text-gray-600 mt-1">Needs scheduling before completion.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onScheduleInspectionForTask(t.id)}
+                    className="px-3 py-2 rounded-xl bg-white border border-orange-200 text-sm font-semibold text-orange-700"
+                  >
+                    Schedule
+                  </button>
+                </div>
               ))}
             </div>
           </Card>
         ) : null}
 
         <Card>
-          <p className="font-semibold mb-2">All Inspections</p>
+          <p className="font-semibold mb-2">Scheduled + Notes</p>
           {inspections.length === 0 ? (
-            <p className="text-sm text-gray-600">No inspections yet.</p>
+            <p className="text-sm text-gray-600">No inspections yet. Add a note or schedule one above.</p>
           ) : (
             <div className="space-y-2">
               {inspections
@@ -13447,7 +13729,7 @@ function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpen
                             {label} ({i.type})
                           </p>
                           <p className="text-xs text-gray-600 mt-1">
-                            {formatShortDate(i.scheduled_date)} {i.scheduled_time ? `• ${i.scheduled_time}` : ''}
+                            {formatShortDateWithWeekday(i.scheduled_date)} {i.scheduled_time ? `• ${i.scheduled_time}` : ''}
                             {attachmentCount ? ` • ${attachmentCount} file${attachmentCount === 1 ? '' : 's'}` : ''}
                           </p>
                         </div>

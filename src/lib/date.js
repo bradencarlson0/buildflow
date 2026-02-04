@@ -23,6 +23,14 @@ export const formatShortDate = (dateLike) => {
   return d ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
 }
 
+export const formatShortDateWithWeekday = (dateLike) => {
+  const d = parseISODate(dateLike)
+  if (!d) return ''
+  const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const weekday = d.toLocaleDateString('en-US', { weekday: 'short' })
+  return `${datePart} (${weekday})`
+}
+
 export const formatLongDate = (dateLike) => {
   const d = parseISODate(dateLike)
   return d
