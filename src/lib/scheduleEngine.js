@@ -667,6 +667,23 @@ export const applyListReorder = (lot, dragTaskId, dropTaskId, orgSettings) => {
     return t
   })
 
+  const trackTasksReflow = nextTasks.filter((t) => t.track === dragTask.track).sort(bySortOrder)
+  const hasBuffer = trackTasksReflow.some((t) => isBufferTask(t))
+  if (hasBuffer) {
+    const earliest = minDateLike(trackTasksReflow.map((t) => t.scheduled_start).filter(Boolean))
+    let cursor = normalizeStart(earliest ? formatISODate(earliest) : lot.start_date)
+    const now = new Date().toISOString()
+    if (cursor) {
+      for (const task of trackTasksReflow) {
+        const duration = Math.max(1, Number(task.duration ?? 1) || 1)
+        task.scheduled_start = cursor
+        task.scheduled_end = formatISODate(addWorkDays(cursor, duration - 1))
+        task.updated_at = now
+        cursor = formatISODate(addWorkDays(task.scheduled_end, 1))
+      }
+    }
+  }
+
   return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
 }
 
