@@ -1662,6 +1662,21 @@ export default function BuildFlow() {
   const pendingSyncOps = app.sync?.pending ?? []
   const pendingSyncCount = pendingSyncOps.length
   const lastSyncedAt = app.sync?.last_synced_at ?? null
+  const supabaseConnected = Boolean(supabaseUser?.id) && supabaseStatus.phase === 'ready'
+  const isGuestSession = Boolean(supabaseUser?.is_anonymous)
+  const cloudHasPending = Boolean(supabaseUser?.id) && (writeSyncState.phase === 'pending' || writeSyncState.phase === 'syncing')
+  const cloudLastSyncedAt = writeSyncState.lastSyncedAt ?? null
+  const showSyncPill = !isOnline || pendingSyncCount > 0 || Boolean(supabaseUser?.id)
+  const syncPillLabel = (() => {
+    if (!isOnline) return 'Offline'
+    if (!supabaseUser?.id) return pendingSyncCount > 0 ? 'Sync' : 'Local'
+    if (supabaseStatus.phase !== 'ready') return 'Connecting'
+    if (writeSyncState.phase === 'error') return 'Sync error'
+    if (writeSyncState.phase === 'syncing') return 'Syncing'
+    if (writeSyncState.phase === 'pending') return 'Pending'
+    if (writeSyncState.phase === 'synced') return 'Synced'
+    return 'Sync'
+  })()
 
   const enqueueSyncOp = ({ type, lot_id, entity_type, entity_id, summary }) => {
     const now = new Date().toISOString()
@@ -4628,14 +4643,16 @@ export default function BuildFlow() {
         )}
 
         <div className="flex items-center gap-2">
-          {(!isOnline || pendingSyncCount > 0) && (
+          {showSyncPill && (
             <button
               onClick={() => setShowOfflineStatus(true)}
-              className="px-2 py-1 rounded-lg bg-white/15 text-xs flex items-center gap-1"
-              title={!isOnline ? 'Offline mode' : 'Pending sync items'}
+              className={`px-2 py-1 rounded-lg text-xs flex items-center gap-1 ${
+                !isOnline || writeSyncState.phase === 'error' ? 'bg-red-500/20' : writeSyncState.phase === 'syncing' ? 'bg-yellow-500/20' : 'bg-white/15'
+              }`}
+              title={!isOnline ? 'Offline mode' : 'Sync status'}
             >
               <WifiOff className="w-4 h-4" />
-              {!isOnline ? 'Offline' : 'Sync'}
+              {syncPillLabel}
               {pendingSyncCount > 0 ? ` • ${pendingSyncCount}` : ''}
             </button>
           )}
@@ -7701,9 +7718,16 @@ export default function BuildFlow() {
           isOnline={isOnline}
           pending={pendingSyncOps}
           lastSyncedAt={lastSyncedAt}
+          supabaseStatus={supabaseStatus}
+          writeSyncState={writeSyncState}
+          supabaseUser={supabaseUser}
+          isGuestSession={isGuestSession}
+          cloudHasPending={cloudHasPending}
+          cloudLastSyncedAt={cloudLastSyncedAt}
           onClose={() => setShowOfflineStatus(false)}
           onSyncNow={() => {
             syncNow()
+            if (supabaseUser?.id) void flushSupabaseWrite()
             setShowOfflineStatus(false)
           }}
         />
@@ -9819,7 +9843,19 @@ export default function BuildFlow() {
   )
 }
 
-function OfflineStatusModal({ isOnline, pending, lastSyncedAt, onClose, onSyncNow }) {
+function OfflineStatusModal({
+  isOnline,
+  pending,
+  lastSyncedAt,
+  supabaseStatus,
+  writeSyncState,
+  supabaseUser,
+  isGuestSession,
+  cloudHasPending,
+  cloudLastSyncedAt,
+  onClose,
+  onSyncNow,
+}) {
   const pendingList = useMemo(() => (Array.isArray(pending) ? pending : []), [pending])
   const pendingCount = pendingList.length
 
@@ -9832,6 +9868,16 @@ function OfflineStatusModal({ isOnline, pending, lastSyncedAt, onClose, onSyncNo
     return Array.from(map.entries()).sort((a, b) => b[1] - a[1])
   }, [pendingList])
 
+  const cloudPhaseLabel = (() => {
+    if (!supabaseUser?.id) return 'Signed out (local only)'
+    if (supabaseStatus?.phase !== 'ready') return 'Connecting to Supabase...'
+    if (writeSyncState?.phase === 'error') return `Sync error: ${writeSyncState?.error || 'write failed'}`
+    if (writeSyncState?.phase === 'syncing') return 'Syncing changes...'
+    if (writeSyncState?.phase === 'pending') return 'Pending sync'
+    if (writeSyncState?.phase === 'synced') return 'Synced'
+    return 'Idle'
+  })()
+
   return (
     <Modal
       title={isOnline ? 'Sync Status' : '📴 You\u2019re Offline'}
@@ -9841,7 +9887,11 @@ function OfflineStatusModal({ isOnline, pending, lastSyncedAt, onClose, onSyncNo
           <SecondaryButton onClick={onClose} className="flex-1">
             Close
           </SecondaryButton>
-          <PrimaryButton onClick={onSyncNow} className="flex-1" disabled={!isOnline || pendingCount === 0}>
+          <PrimaryButton
+            onClick={onSyncNow}
+            className="flex-1"
+            disabled={!isOnline || (pendingCount === 0 && !cloudHasPending)}
+          >
             Sync Now
           </PrimaryButton>
         </div>
@@ -9853,6 +9903,20 @@ function OfflineStatusModal({ isOnline, pending, lastSyncedAt, onClose, onSyncNo
           <p className="text-sm text-gray-700 mt-1">
             {isOnline ? 'Pending changes will sync now.' : 'Changes save locally and sync when connected.'}
           </p>
+        </Card>
+
+        <Card className="bg-gray-50">
+          <p className="text-sm font-semibold">Cloud Sync (Supabase)</p>
+          <p className="text-sm text-gray-700 mt-1">{cloudPhaseLabel}</p>
+          {supabaseUser?.id ? (
+            <p className="text-xs text-gray-600 mt-1">
+              {isGuestSession ? 'Guest session — edits sync to this org.' : 'Signed in — edits sync to this org.'}
+            </p>
+          ) : null}
+          {cloudLastSyncedAt ? (
+            <p className="text-xs text-gray-600 mt-1">Last cloud sync: {formatSyncTimestamp(cloudLastSyncedAt)}</p>
+          ) : null}
+          {supabaseStatus?.warning ? <p className="text-xs text-amber-700 mt-1">{supabaseStatus.warning}</p> : null}
         </Card>
 
         <Card>
@@ -9877,9 +9941,12 @@ function OfflineStatusModal({ isOnline, pending, lastSyncedAt, onClose, onSyncNo
         </Card>
 
         <div className="text-xs text-gray-600">
-          Last synced:{' '}
+          Local last synced:{' '}
           <span className="font-semibold">{lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : '—'}</span>
         </div>
+        <p className="text-[11px] text-gray-500">
+          Conflict resolution UI is not enabled yet. During testing, avoid editing the same item on two devices at the same time.
+        </p>
       </div>
     </Modal>
   )
