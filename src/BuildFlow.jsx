@@ -8742,7 +8742,7 @@ export default function BuildFlow() {
       {scheduleInspectionModal && (() => {
         const lot = lotsById.get(scheduleInspectionModal.lot_id) ?? null
         const task = lot?.tasks?.find((t) => t.id === scheduleInspectionModal.task_id) ?? null
-        if (!lot || !task) return null
+        if (!lot) return null
         const community = communitiesById.get(lot.community_id) ?? null
         return (
           <ScheduleInspectionModal
@@ -8753,7 +8753,8 @@ export default function BuildFlow() {
             initialType={scheduleInspectionModal.type_override ?? null}
             onClose={() => setScheduleInspectionModal(null)}
             onSchedule={(payload) => {
-              const inspectionId = scheduleInspectionForTask(lot.id, task.id, {
+              const taskId = task?.id ?? null
+              const inspectionId = scheduleInspectionForTask(lot.id, taskId, {
                 ...payload,
                 parent_inspection_id: scheduleInspectionModal.parent_inspection_id ?? null,
               })
@@ -8778,7 +8779,7 @@ export default function BuildFlow() {
         const lot = lotsById.get(inspectionResultModal.lot_id) ?? null
         const inspection = lot?.inspections?.find((i) => i.id === inspectionResultModal.inspection_id) ?? null
         const task = inspection ? lot?.tasks?.find((t) => t.id === inspection.task_id) ?? null : null
-        if (!lot || !inspection || !task) return null
+        if (!lot || !inspection) return null
         const community = communitiesById.get(lot.community_id) ?? null
         return (
           <InspectionResultModal
@@ -8788,6 +8789,7 @@ export default function BuildFlow() {
             subcontractors={app.subcontractors}
             isOnline={isOnline}
             onClose={() => setInspectionResultModal(null)}
+            onOpenNotes={() => setInspectionNoteModal({ lot_id: lot.id, inspection_id: inspection.id })}
             onAddInspectionPhoto={async ({ file, caption }) => {
               if (!file) return null
               return addPhoto({
@@ -8989,11 +8991,10 @@ export default function BuildFlow() {
             lot={lot}
             community={community}
             onClose={() => setInspectionsLotId(null)}
-            onAddInspectionNote={() => setInspectionNoteModal({ lot_id: lot.id, inspection_id: null })}
             onOpenInspection={(inspectionId) => {
               const inspection = (lot.inspections ?? []).find((i) => i.id === inspectionId) ?? null
               if (!inspection) return
-              if (!inspection.task_id || inspection.type === 'NOTE') {
+              if (inspection.type === 'NOTE') {
                 setInspectionNoteModal({ lot_id: lot.id, inspection_id: inspectionId })
                 return
               }
@@ -11832,10 +11833,10 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
   const inspectorOptions = community?.inspectors ?? []
   const defaultInspector = inspectorOptions[0] ?? { name: '', phone: '', email: '', agency_id: '' }
   const scheduleableTypes = useMemo(() => INSPECTION_TYPES.filter((t) => t.code !== 'NOTE'), [])
-  const requestedType = initialType ?? task.inspection_type ?? 'RME'
+  const requestedType = initialType ?? task?.inspection_type ?? 'RME'
   const defaultType = scheduleableTypes.some((t) => t.code === requestedType) ? requestedType : scheduleableTypes[0]?.code ?? 'RME'
   const [type, setType] = useState(defaultType)
-  const [scheduledDate, setScheduledDate] = useState(task.scheduled_end ?? '')
+  const [scheduledDate, setScheduledDate] = useState(task?.scheduled_end ?? formatISODate(new Date()))
   const [scheduledTime, setScheduledTime] = useState('10:00 AM')
   const [inspectorMode, setInspectorMode] = useState(() => (inspectorOptions.length > 0 ? 'existing' : 'new'))
   const [selectedInspectorId, setSelectedInspectorId] = useState(defaultInspector.id ?? '')
@@ -11903,7 +11904,9 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
             {community?.name ?? 'Community'} • {lotCode(lot)}
           </p>
           <p className="font-semibold">{typeLabel}</p>
-          <p className="text-xs text-gray-600 mt-1">Triggered by: {task.name}</p>
+          <p className="text-xs text-gray-600 mt-1">
+            {task ? `Triggered by: ${task.name}` : 'Manual inspection (not tied to a task).'}
+          </p>
         </Card>
 
         <label className="block">
@@ -12039,7 +12042,7 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
   )
 }
 
-function InspectionResultModal({ lot, task, inspection, subcontractors, isOnline, onClose, onSave, onAddInspectionPhoto }) {
+function InspectionResultModal({ lot, task, inspection, subcontractors, isOnline, onClose, onSave, onAddInspectionPhoto, onOpenNotes }) {
   const [result, setResult] = useState(inspection.result ?? 'pass')
   const [failureItems, setFailureItems] = useState(() => inspection.failure_items ?? [])
   const [reportDoc, setReportDoc] = useState(() => inspection.report_document ?? null)
@@ -12143,12 +12146,23 @@ function InspectionResultModal({ lot, task, inspection, subcontractors, isOnline
       <div className="space-y-3">
         <Card className="bg-gray-50">
           <p className="text-sm text-gray-600">
-            {lotCode(lot)} • {task.name}
+            {lotCode(lot)} • {task?.name ?? 'Manual Inspection'}
           </p>
           <p className="text-xs text-gray-600 mt-1">
             Scheduled: {formatShortDate(inspection.scheduled_date)} {inspection.scheduled_time ? `• ${inspection.scheduled_time}` : ''}
           </p>
           {inspection.parent_inspection_id ? <p className="text-xs text-gray-600 mt-1">Re-inspection</p> : null}
+          {onOpenNotes ? (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={onOpenNotes}
+                className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+              >
+                Add Notes / Files
+              </button>
+            </div>
+          ) : null}
         </Card>
 
         {!isOnline ? (
@@ -13648,7 +13662,7 @@ function HybridScheduleView({ lot, subcontractors, org, scale = 'week', onSelect
   )
 }
 
-function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpenInspection, onScheduleInspectionForTask }) {
+function InspectionsModal({ lot, community, onClose, onOpenInspection, onScheduleInspectionForTask }) {
   const inspections = lot.inspections ?? []
   const inspectionTasks = (lot.tasks ?? []).filter((t) => t.requires_inspection && t.status !== 'complete' && !t.inspection_id)
 
@@ -13659,12 +13673,12 @@ function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpen
           <p className="text-sm text-gray-600">
             {community?.name ?? 'Community'} • {lotCode(lot)}
           </p>
-          <p className="text-xs text-gray-600 mt-1">Add quick notes/files here (inspections do not block scheduling).</p>
+          <p className="text-xs text-gray-600 mt-1">Schedule inspections by type and track results here.</p>
         </Card>
 
         <div className="grid grid-cols-2 gap-2">
-          <PrimaryButton onClick={onAddInspectionNote} className="w-full">
-            + Add Note / Files
+          <PrimaryButton onClick={() => onScheduleInspectionForTask(null)} className="w-full">
+            + New Inspection
           </PrimaryButton>
           <SecondaryButton onClick={onClose} className="w-full">
             Close
@@ -13701,7 +13715,7 @@ function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpen
         <Card>
           <p className="font-semibold mb-2">Scheduled + Notes</p>
           {inspections.length === 0 ? (
-            <p className="text-sm text-gray-600">No inspections yet. Add a note or schedule one above.</p>
+            <p className="text-sm text-gray-600">No inspections yet. Schedule one above.</p>
           ) : (
             <div className="space-y-2">
               {inspections
@@ -13709,7 +13723,7 @@ function InspectionsModal({ lot, community, onClose, onAddInspectionNote, onOpen
                 .sort((a, b) => String(b.scheduled_date).localeCompare(String(a.scheduled_date)))
                 .map((i) => {
                   const label = INSPECTION_TYPES.find((t) => t.code === i.type)?.label ?? i.type
-                  const isNote = i.type === 'NOTE' || !i.task_id
+                  const isNote = i.type === 'NOTE'
                   const attachmentCount = (i.documents ?? []).length + (i.report_document ? 1 : 0)
                   const badge =
                     i.result === 'pass'
