@@ -4083,6 +4083,8 @@ export default function BuildFlow() {
   const [communityWizardStep, setCommunityWizardStep] = useState(1)
   const [realtorPersonaId, setRealtorPersonaId] = useState('')
   const [builderPersonaId, setBuilderPersonaId] = useState('')
+  const [inspectorLibraryKey, setInspectorLibraryKey] = useState('')
+  const [agencyLibraryKey, setAgencyLibraryKey] = useState('')
   const createDraftRealtor = () => ({ id: uuid(), name: '', phone: '', email: '', company: '' })
   const createDraftInspector = () => ({ id: uuid(), name: '', phone: '', email: '', agency_id: '' })
   const createDraftBuilder = (index = 0) => ({
@@ -4179,6 +4181,70 @@ export default function BuildFlow() {
     !String(builder?.phone ?? '').trim() &&
     !String(builder?.email ?? '').trim()
 
+  const isBlankInspector = (inspector) =>
+    !String(inspector?.name ?? '').trim() &&
+    !String(inspector?.phone ?? '').trim() &&
+    !String(inspector?.email ?? '').trim()
+
+  const inspectorLibrary = useMemo(() => {
+    const list = []
+    const seen = new Set()
+    const orgAgencyById = new Map((agencies ?? []).map((a) => [a.id, a]))
+    for (const community of app.communities ?? []) {
+      const communityAgencies = community?.agencies ?? []
+      const communityAgencyById = new Map(communityAgencies.map((a) => [a.id, a]))
+      for (const inspector of community?.inspectors ?? []) {
+        const name = String(inspector?.name ?? '').trim()
+        const phone = String(inspector?.phone ?? '').trim()
+        const email = String(inspector?.email ?? '').trim()
+        const key = `${name}|${email}|${phone}`.toLowerCase()
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        const agencyId = inspector?.agency_id ?? ''
+        const agency = communityAgencyById.get(agencyId) ?? orgAgencyById.get(agencyId) ?? null
+        list.push({
+          key,
+          name,
+          phone,
+          email,
+          agency_id: agencyId,
+          agency,
+          source: community?.name ?? 'Community',
+        })
+      }
+    }
+    return list
+  }, [app.communities, agencies])
+
+  const agencyLibrary = useMemo(() => {
+    const list = []
+    const seen = new Set()
+    const addAgency = (agency, source, isOrg) => {
+      const name = String(agency?.name ?? '').trim()
+      if (!name) return
+      const key = name.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      list.push({
+        key,
+        id: agency?.id ?? null,
+        name,
+        inspection_types: agency?.inspection_types ?? [],
+        source,
+        isOrg,
+      })
+    }
+    for (const agency of agencies ?? []) {
+      addAgency(agency, 'Org', true)
+    }
+    for (const community of app.communities ?? []) {
+      for (const agency of community?.agencies ?? []) {
+        addAgency(agency, community?.name ?? 'Community', false)
+      }
+    }
+    return list
+  }, [agencies, app.communities])
+
   const addRealtorFromLibrary = (personaId) => {
     const persona = contactLibraryRealtors.find((r) => r.id === personaId)
     if (!persona) return
@@ -4200,6 +4266,56 @@ export default function BuildFlow() {
       }
 
       return { ...d, realtors: nextRealtors }
+    })
+  }
+
+  const addInspectorFromLibrary = (key) => {
+    const inspector = inspectorLibrary.find((i) => i.key === key)
+    if (!inspector) return
+    setCommunityDraft((d) => {
+      const nextInspectors = [...(d.inspectors ?? [])]
+      const blankIndex = nextInspectors.findIndex((i) => isBlankInspector(i))
+      const hasAgency = (agencyId) =>
+        Boolean(agencyId) &&
+        ((agencies ?? []).some((a) => a.id === agencyId) || (d.agencies ?? []).some((a) => a.id === agencyId))
+      const payload = {
+        name: inspector.name ?? '',
+        phone: inspector.phone ?? '',
+        email: inspector.email ?? '',
+        agency_id: hasAgency(inspector.agency_id) ? inspector.agency_id : '',
+      }
+
+      if (blankIndex >= 0) {
+        const existing = nextInspectors[blankIndex]
+        nextInspectors[blankIndex] = { ...existing, ...payload }
+      } else {
+        nextInspectors.push({ id: uuid(), ...payload })
+      }
+      return { ...d, inspectors: nextInspectors }
+    })
+  }
+
+  const addAgencyFromLibrary = (key) => {
+    const agency = agencyLibrary.find((a) => a.key === key)
+    if (!agency) return
+    if (agency.isOrg && agency.id) {
+      setCommunityDraft((d) => {
+        const next = new Set(d.agency_ids ?? [])
+        next.add(agency.id)
+        return { ...d, agency_ids: Array.from(next) }
+      })
+      return
+    }
+    setCommunityDraft((d) => {
+      const exists = (d.agencies ?? []).some((a) => String(a.name ?? '').trim().toLowerCase() === agency.key)
+      if (exists) return d
+      return {
+        ...d,
+        agencies: [
+          ...(d.agencies ?? []),
+          { id: uuid(), name: agency.name, inspection_types: agency.inspection_types ?? [] },
+        ],
+      }
     })
   }
 
@@ -8034,13 +8150,37 @@ export default function BuildFlow() {
               <Card className="bg-gray-50">
                 <div className="flex items-center justify-between mb-2">
                   <p className="font-semibold">City Inspectors</p>
-                  <button
-                    onClick={() => setCommunityDraft((d) => ({ ...d, inspectors: [...(d.inspectors ?? []), createDraftInspector()] }))}
-                    className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
-                  >
-                    + Add
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {inspectorLibrary.length > 0 ? (
+                      <select
+                        value={inspectorLibraryKey}
+                        onChange={(e) => {
+                          const nextKey = e.target.value
+                          if (!nextKey) return
+                          addInspectorFromLibrary(nextKey)
+                          setInspectorLibraryKey('')
+                        }}
+                        className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                      >
+                        <option value="">Add existing...</option>
+                        {inspectorLibrary.map((i) => (
+                          <option key={i.key} value={i.key}>
+                            {(i.name || 'Inspector') + (i.email ? ` - ${i.email}` : '') + (i.phone ? ` - ${i.phone}` : '')}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      onClick={() => setCommunityDraft((d) => ({ ...d, inspectors: [...(d.inspectors ?? []), createDraftInspector()] }))}
+                      className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                    >
+                      + Add
+                    </button>
+                  </div>
                 </div>
+                {inspectorLibrary.length === 0 ? (
+                  <p className="text-xs text-gray-500">No saved inspectors yet. Add them in another community first.</p>
+                ) : null}
                 <div className="space-y-2">
                   {(communityDraft.inspectors ?? []).map((i) => (
                     <div key={i.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
@@ -8110,7 +8250,28 @@ export default function BuildFlow() {
               </Card>
 
               <Card className="bg-gray-50">
-                <p className="font-semibold mb-2">Agencies</p>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="font-semibold">Agencies</p>
+                  {agencyLibrary.length > 0 ? (
+                    <select
+                      value={agencyLibraryKey}
+                      onChange={(e) => {
+                        const nextKey = e.target.value
+                        if (!nextKey) return
+                        addAgencyFromLibrary(nextKey)
+                        setAgencyLibraryKey('')
+                      }}
+                      className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                    >
+                      <option value="">Add existing...</option>
+                      {agencyLibrary.map((a) => (
+                        <option key={a.key} value={a.key}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </div>
                 <div className="space-y-2">
                   {agencies.length === 0 ? <p className="text-xs text-gray-600">No org agencies yet.</p> : null}
                   {agencies.map((a) => (
