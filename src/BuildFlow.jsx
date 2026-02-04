@@ -1043,6 +1043,17 @@ export default function BuildFlow() {
         return
       }
 
+      if (localTestMode && supabaseUser?.is_anonymous) {
+        setSupabaseStatus((prev) => ({
+          ...prev,
+          phase: 'ready',
+          message: 'Local test mode is active. Cloud sync is paused.',
+          loadedAt: new Date().toISOString(),
+          warning: 'Local test mode is on for this guest session.',
+        }))
+        return
+      }
+
       setSupabaseStatus((prev) => ({
         ...prev,
         phase: 'loading',
@@ -1247,7 +1258,7 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [supabaseUser?.id, supabaseBootstrapVersion])
+  }, [supabaseUser?.id, supabaseBootstrapVersion, localTestMode])
 
   const flushSupabaseWrite = async () => {
     if (supabaseWriteInFlightRef.current) return
@@ -1417,6 +1428,10 @@ export default function BuildFlow() {
   }
 
   useEffect(() => {
+    if (localTestMode) {
+      setWriteSyncState((prev) => ({ ...prev, phase: 'idle', error: '' }))
+      return
+    }
     if (!supabaseUser?.id || !supabaseStatus.orgId || supabaseStatus.phase === 'loading') return
 
     const orgId = supabaseStatus.orgId
@@ -1505,7 +1520,7 @@ export default function BuildFlow() {
         supabaseWriteTimerRef.current = null
       }
     }
-  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase, supabaseStatus.role, flushSupabaseWrite])
+  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase, supabaseStatus.role, localTestMode, flushSupabaseWrite])
 
   useEffect(() => {
     if (supabaseUser?.id) return
@@ -1662,12 +1677,14 @@ export default function BuildFlow() {
   const pendingSyncOps = app.sync?.pending ?? []
   const pendingSyncCount = pendingSyncOps.length
   const lastSyncedAt = app.sync?.last_synced_at ?? null
+  const localTestMode = Boolean(app.sync?.local_test_mode)
   const supabaseConnected = Boolean(supabaseUser?.id) && supabaseStatus.phase === 'ready'
   const isGuestSession = Boolean(supabaseUser?.is_anonymous)
   const cloudHasPending = Boolean(supabaseUser?.id) && (writeSyncState.phase === 'pending' || writeSyncState.phase === 'syncing')
   const cloudLastSyncedAt = writeSyncState.lastSyncedAt ?? null
   const showSyncPill = !isOnline || pendingSyncCount > 0 || Boolean(supabaseUser?.id)
   const syncPillLabel = (() => {
+    if (localTestMode) return 'Local Test'
     if (!isOnline) return 'Offline'
     if (!supabaseUser?.id) return pendingSyncCount > 0 ? 'Sync' : 'Local'
     if (supabaseStatus.phase !== 'ready') return 'Connecting'
@@ -7722,14 +7739,21 @@ export default function BuildFlow() {
           writeSyncState={writeSyncState}
           supabaseUser={supabaseUser}
           isGuestSession={isGuestSession}
+          localTestMode={localTestMode}
           cloudHasPending={cloudHasPending}
           cloudLastSyncedAt={cloudLastSyncedAt}
           onClose={() => setShowOfflineStatus(false)}
           onSyncNow={() => {
             syncNow()
-            if (supabaseUser?.id) void flushSupabaseWrite()
+            if (supabaseUser?.id && !localTestMode) void flushSupabaseWrite()
             setShowOfflineStatus(false)
           }}
+          onToggleLocalTestMode={() =>
+            setApp((prev) => ({
+              ...prev,
+              sync: { ...(prev.sync ?? {}), local_test_mode: !Boolean(prev.sync?.local_test_mode) },
+            }))
+          }
         />
       )}
 
@@ -9851,10 +9875,12 @@ function OfflineStatusModal({
   writeSyncState,
   supabaseUser,
   isGuestSession,
+  localTestMode,
   cloudHasPending,
   cloudLastSyncedAt,
   onClose,
   onSyncNow,
+  onToggleLocalTestMode,
 }) {
   const pendingList = useMemo(() => (Array.isArray(pending) ? pending : []), [pending])
   const pendingCount = pendingList.length
@@ -9870,6 +9896,7 @@ function OfflineStatusModal({
 
   const cloudPhaseLabel = (() => {
     if (!supabaseUser?.id) return 'Signed out (local only)'
+    if (localTestMode) return 'Local Test Mode (cloud sync paused)'
     if (supabaseStatus?.phase !== 'ready') return 'Connecting to Supabase...'
     if (writeSyncState?.phase === 'error') return `Sync error: ${writeSyncState?.error || 'write failed'}`
     if (writeSyncState?.phase === 'syncing') return 'Syncing changes...'
@@ -9890,7 +9917,7 @@ function OfflineStatusModal({
           <PrimaryButton
             onClick={onSyncNow}
             className="flex-1"
-            disabled={!isOnline || (pendingCount === 0 && !cloudHasPending)}
+            disabled={!isOnline || localTestMode || (pendingCount === 0 && !cloudHasPending)}
           >
             Sync Now
           </PrimaryButton>
@@ -9918,6 +9945,26 @@ function OfflineStatusModal({
           ) : null}
           {supabaseStatus?.warning ? <p className="text-xs text-amber-700 mt-1">{supabaseStatus.warning}</p> : null}
         </Card>
+
+        {supabaseUser?.is_anonymous ? (
+          <Card className="border-amber-200 bg-amber-50">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-amber-900">Local Test Mode</p>
+                <p className="text-xs text-amber-800 mt-1">
+                  Keep changes on this device (skip cloud sync) while testing.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onToggleLocalTestMode}
+                className="px-3 py-2 rounded-xl border border-amber-200 bg-white text-xs font-semibold"
+              >
+                {localTestMode ? 'Disable' : 'Enable'}
+              </button>
+            </div>
+          </Card>
+        ) : null}
 
         <Card>
           <p className="font-semibold mb-2">{pendingCount} changes pending</p>
