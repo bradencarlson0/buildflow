@@ -6337,9 +6337,11 @@ export default function BuildFlow() {
                                               >
                                                 {task.name}
                                               </p>
-                                              <p className="text-[11px] text-gray-600 mt-1 whitespace-nowrap">
-                                                {formatShortDateWithWeekday(task.scheduled_start)} - {formatShortDateWithWeekday(task.scheduled_end)} •
-                                                <span className="ml-1 inline-flex items-center gap-1">
+                                              <div className="text-[11px] text-gray-600 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                <span className="min-w-0">
+                                                  {formatShortDateWithWeekday(task.scheduled_start)} - {formatShortDateWithWeekday(task.scheduled_end)}
+                                                </span>
+                                                <span className="inline-flex items-center gap-1 whitespace-nowrap">
                                                   <span className="text-[10px] uppercase text-gray-500">Duration</span>
                                                   {bufferTask ? (
                                                     <div className="inline-flex items-center gap-1">
@@ -6398,7 +6400,7 @@ export default function BuildFlow() {
                                                     </select>
                                                   )}
                                                 </span>
-                                              </p>
+                                              </div>
                                             </button>
                                             <TaskStatusBadge status={status} />
                                           </div>
