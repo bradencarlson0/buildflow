@@ -11933,9 +11933,6 @@ function ScheduleInspectionModal({ lot, task, community, agencies, initialType, 
             {community?.name ?? 'Community'} • {lotCode(lot)}
           </p>
           <p className="font-semibold">{typeLabel}</p>
-          <p className="text-xs text-gray-600 mt-1">
-            {task ? `Triggered by: ${task.name}` : 'Manual inspection (not tied to a task).'}
-          </p>
         </Card>
 
         <label className="block">
@@ -13706,7 +13703,13 @@ function InspectionsModal({ lot, community, onClose, onOpenInspection, onSchedul
         </Card>
 
         <div className="grid grid-cols-2 gap-2">
-          <PrimaryButton onClick={() => onScheduleInspectionForTask(null)} className="w-full">
+          <PrimaryButton
+            onClick={() => {
+              onScheduleInspectionForTask(null)
+              onClose?.()
+            }}
+            className="w-full"
+          >
             + New Inspection
           </PrimaryButton>
           <SecondaryButton onClick={onClose} className="w-full">
@@ -13730,7 +13733,10 @@ function InspectionsModal({ lot, community, onClose, onOpenInspection, onSchedul
                   </div>
                   <button
                     type="button"
-                    onClick={() => onScheduleInspectionForTask(t.id)}
+                    onClick={() => {
+                      onScheduleInspectionForTask(t.id)
+                      onClose?.()
+                    }}
                     className="px-3 py-2 rounded-xl bg-white border border-orange-200 text-sm font-semibold text-orange-700"
                   >
                     Schedule
