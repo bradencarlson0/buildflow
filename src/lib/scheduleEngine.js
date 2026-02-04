@@ -527,6 +527,32 @@ export const applyDurationChange = (lot, taskId, nextDuration, orgSettings) => {
   return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
 }
 
+export const applyManualStartDate = (lot, taskId, nextStartIso, orgSettings) => {
+  if (!lot || !taskId || !nextStartIso) return lot
+  const helpers = makeWorkdayHelpers(orgSettings)
+  const { getNextWorkDay, addWorkDays } = helpers
+  const normalized = (() => {
+    const next = getNextWorkDay(nextStartIso) ?? parseISODate(nextStartIso)
+    return next ? formatISODate(next) : ''
+  })()
+  if (!normalized) return lot
+
+  const now = new Date().toISOString()
+  const nextTasks = (lot.tasks ?? []).map((t) => {
+    if (t.id !== taskId) return t
+    const duration = Math.max(1, Number(t.duration ?? 1) || 1)
+    const newEnd = formatISODate(addWorkDays(normalized, duration - 1))
+    return {
+      ...t,
+      scheduled_start: normalized,
+      scheduled_end: newEnd,
+      updated_at: now,
+    }
+  })
+
+  return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
+}
+
 export const canParallelizeTasks = (lot, taskIds) => {
   void lot
   void taskIds

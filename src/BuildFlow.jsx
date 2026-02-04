@@ -69,6 +69,7 @@ import {
   applyDelayCascade,
   applyDurationChange,
   applyListReorder,
+  applyManualStartDate,
   buildReschedulePreview,
   calculateLotProgress,
   calculateTargetCompletionDate,
@@ -1889,6 +1890,11 @@ export default function BuildFlow() {
 
   const updateTaskDuration = (lotId, taskId, nextDuration) => {
     updateLot(lotId, (lot) => applyDurationChange(lot, taskId, nextDuration, org))
+  }
+
+  const updateTaskStartDate = (lotId, taskId, nextStartIso) => {
+    if (!nextStartIso) return
+    updateLot(lotId, (lot) => applyManualStartDate(lot, taskId, nextStartIso, org))
   }
 
   const updateTaskSub = (lotId, taskId, subId) => {
@@ -6401,6 +6407,18 @@ export default function BuildFlow() {
                                                   )}
                                                 </span>
                                               </div>
+                                              <div className="mt-2 flex items-center gap-2">
+                                                <span className="text-[10px] uppercase text-gray-500">Start</span>
+                                                <input
+                                                  type="date"
+                                                  value={task.scheduled_start ?? ''}
+                                                  onChange={(e) => updateTaskStartDate(selectedLot.id, task.id, e.target.value)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  onPointerDown={(e) => e.stopPropagation()}
+                                                  className="h-8 px-2 border border-gray-200 rounded-md text-[11px] bg-white disabled:opacity-50"
+                                                  disabled={task.status === 'complete' || bufferTask}
+                                                />
+                                              </div>
                                             </button>
                                             <TaskStatusBadge status={status} />
                                           </div>
@@ -10433,6 +10451,17 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
 
                                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
                                       <label className="block">
+                                        <span className="text-[11px] font-semibold text-gray-600">Start date</span>
+                                        <input
+                                          type="date"
+                                          value={task.scheduled_start ?? ''}
+                                          onChange={(e) => updateDraftLot((current) => applyManualStartDate(current, task.id, e.target.value, org))}
+                                          className="mt-1 w-full px-3 py-3 border border-gray-200 rounded-xl text-sm"
+                                          disabled={isBufferTask(task)}
+                                        />
+                                      </label>
+
+                                      <label className="block">
                                         <span className="text-[11px] font-semibold text-gray-600">Duration (days)</span>
                                         <div className="mt-1 grid grid-cols-[44px_1fr_44px] gap-2">
                                           <button
@@ -10474,7 +10503,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
                                         </div>
                                       </label>
 
-                                      <label className="block">
+                                      <label className="block sm:col-span-2">
                                         <span className="text-[11px] font-semibold text-gray-600">Assign Sub</span>
                                         <select
                                           value={task.sub_id ?? ''}
