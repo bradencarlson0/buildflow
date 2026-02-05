@@ -23,9 +23,7 @@ begin
   exception when others then
     is_anon := false;
   end;
-  if is_anon then
-    raise exception 'Anonymous users cannot reset seed data';
-  end if;
+  -- Anonymous users are allowed to reset seed data for the demo org.
 
   if v_org_id is null then
     raise exception 'No org id available';

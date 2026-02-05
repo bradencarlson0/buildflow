@@ -1148,7 +1148,17 @@ export const createSeedState = () => {
     lots,
     messages: [],
     notifications: [],
-    sync: { pending: [], last_synced_at: null },
+    sync: {
+      pending: [],
+      last_synced_at: null,
+      cloud_queue: [],
+      cloud_last_synced_at: null,
+      cloud_last_synced_hash: '',
+      cloud_last_queued_hash: '',
+      cloud_last_error: '',
+      cloud_last_error_at: null,
+      deleted_task_ids: [],
+    },
     notification_preferences: {
       user_id: '',
       quiet_hours: { enabled: false, start: '22:00', end: '07:00', timezone: 'America/Chicago' },

@@ -908,6 +908,7 @@ export default function BuildFlow() {
     lastSyncedAt: null,
     error: '',
   })
+  const [cloudRetryTick, setCloudRetryTick] = useState(0)
   const [resetSeedBusy, setResetSeedBusy] = useState(false)
 
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
@@ -941,11 +942,7 @@ export default function BuildFlow() {
   })
   const listDropPulseTimerRef = useRef(null)
   const listSuppressClickRef = useRef(false)
-  const supabaseWriteTimerRef = useRef(null)
   const supabaseWriteInFlightRef = useRef(false)
-  const supabasePendingPayloadRef = useRef(null)
-  const supabasePendingHashRef = useRef('')
-  const supabaseLastSyncedHashRef = useRef('')
 
   useEffect(() => {
     saveAppState(app)
@@ -1043,15 +1040,10 @@ export default function BuildFlow() {
         return
       }
 
-      if (localTestMode && supabaseUser?.is_anonymous) {
-        setSupabaseStatus((prev) => ({
-          ...prev,
-          phase: 'ready',
-          message: 'Local test mode is active. Cloud sync is paused.',
-          loadedAt: new Date().toISOString(),
-          warning: 'Local test mode is on for this guest session.',
-        }))
-        return
+      let guestProvision = null
+      if (supabaseUser?.is_anonymous) {
+        guestProvision = await ensureGuestOrg()
+        if (!guestProvision?.org_id && !guestProvision?.orgId) return
       }
 
       setSupabaseStatus((prev) => ({
@@ -1080,7 +1072,9 @@ export default function BuildFlow() {
       }
 
       const profile = (profileResult.data ?? [])[0] ?? null
-      const orgId = profile?.org_id ?? (SUPABASE_ORG_ID_FALLBACK || null)
+      const guestOrgId = guestProvision?.org_id ?? guestProvision?.orgId ?? null
+      const guestRole = guestProvision?.role ?? null
+      const orgId = profile?.org_id ?? guestOrgId ?? (SUPABASE_ORG_ID_FALLBACK || null)
       const usedEnvOrgFallback = !profile?.org_id && Boolean(SUPABASE_ORG_ID_FALLBACK)
 
       if (!orgId) {
@@ -1101,7 +1095,7 @@ export default function BuildFlow() {
           phase: 'error',
           message: `Organization lookup failed: ${orgResult.error.message}`,
           orgId,
-          role: profile?.role ?? null,
+          role: profile?.role ?? guestRole ?? null,
           loadedAt: new Date().toISOString(),
         }))
         return
@@ -1258,181 +1252,144 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [supabaseUser?.id, supabaseBootstrapVersion, localTestMode])
+  }, [supabaseUser?.id, supabaseBootstrapVersion])
 
-  const flushSupabaseWrite = async () => {
-    if (supabaseWriteInFlightRef.current) return
+  const syncPayloadToSupabase = async (pendingPayload) => {
+    const {
+      orgId,
+      userId,
+      role,
+      orgRow,
+      productTypes,
+      plansRows,
+      agenciesRows,
+      communitiesRows,
+      subcontractorRows,
+      lotRows,
+      taskRows,
+      dependencyRows,
+      deletedTaskIds,
+    } = pendingPayload ?? {}
 
-    const pendingPayload = supabasePendingPayloadRef.current
-    const pendingHash = supabasePendingHashRef.current
-    if (!pendingPayload || !pendingHash || pendingHash === supabaseLastSyncedHashRef.current) return
+    if (!orgId || !userId) {
+      throw new Error('Missing org or user for sync')
+    }
 
-    supabaseWriteInFlightRef.current = true
-    setWriteSyncState((prev) => ({ ...prev, phase: 'syncing', error: '' }))
-    supabasePendingPayloadRef.current = null
-    supabasePendingHashRef.current = ''
+    const profileUpsert = await supabase.from('profiles').upsert(
+      {
+        id: userId,
+        org_id: orgId,
+        role: role || 'admin',
+      },
+      { onConflict: 'id' },
+    )
+    if (profileUpsert.error) {
+      throw new Error(`Profile upsert failed: ${profileUpsert.error.message}`)
+    }
 
-    try {
-      const {
-        orgId,
-        userId,
-        role,
-        orgRow,
-        productTypes,
-        plansRows,
-        agenciesRows,
-        communitiesRows,
-        subcontractorRows,
-        lotRows,
-        taskRows,
-        dependencyRows,
-        deletedTaskIds,
-      } = pendingPayload
+    const orgUpdate = await supabase
+      .from('organizations')
+      .update({
+        name: orgRow.name,
+        builder_name: orgRow.builder_name,
+        default_build_days: orgRow.default_build_days,
+        work_days: orgRow.work_days,
+        holidays: orgRow.holidays,
+      })
+      .eq('id', orgId)
+    if (orgUpdate.error) {
+      throw new Error(`Organization update failed: ${orgUpdate.error.message}`)
+    }
 
-      if (!orgId || !userId) return
-
-      const profileUpsert = await supabase.from('profiles').upsert(
-        {
-          id: userId,
-          org_id: orgId,
-          role: role || 'admin',
-        },
-        { onConflict: 'id' },
-      )
-      if (profileUpsert.error) {
-        throw new Error(`Profile upsert failed: ${profileUpsert.error.message}`)
-      }
-
-      const orgUpdate = await supabase
-        .from('organizations')
-        .update({
-          name: orgRow.name,
-          builder_name: orgRow.builder_name,
-          default_build_days: orgRow.default_build_days,
-          work_days: orgRow.work_days,
-          holidays: orgRow.holidays,
-        })
-        .eq('id', orgId)
-      if (orgUpdate.error) {
-        throw new Error(`Organization update failed: ${orgUpdate.error.message}`)
-      }
-
-      const upsertRows = async (tableName, rows, onConflict) => {
-        if (!Array.isArray(rows) || rows.length === 0) return
-        for (const chunk of chunkArray(rows, 200)) {
-          const result = await supabase.from(tableName).upsert(chunk, { onConflict })
-          if (result.error) {
-            throw new Error(`${tableName} sync failed: ${result.error.message}`)
-          }
+    const upsertRows = async (tableName, rows, onConflict) => {
+      if (!Array.isArray(rows) || rows.length === 0) return
+      for (const chunk of chunkArray(rows, 200)) {
+        const result = await supabase.from(tableName).upsert(chunk, { onConflict })
+        if (result.error) {
+          throw new Error(`${tableName} sync failed: ${result.error.message}`)
         }
-      }
-
-      await upsertRows('product_types', productTypes, 'id')
-      await upsertRows('plans', plansRows, 'id')
-      await upsertRows('agencies', agenciesRows, 'id')
-      await upsertRows('communities', communitiesRows, 'id')
-      await upsertRows('subcontractors', subcontractorRows, 'id')
-      await upsertRows('lots', lotRows, 'id')
-
-      const deletedIds = Array.from(new Set(coerceArray(deletedTaskIds).filter(Boolean)))
-      if (deletedIds.length > 0) {
-        for (const chunk of chunkArray(deletedIds, 200)) {
-          const depDeleteTask = await supabase.from('task_dependencies').delete().in('task_id', chunk)
-          if (depDeleteTask.error && !isMissingSupabaseTableError(depDeleteTask.error)) {
-            throw new Error(`Task dependency delete failed: ${depDeleteTask.error.message}`)
-          }
-          const depDeleteDepends = await supabase.from('task_dependencies').delete().in('depends_on_task_id', chunk)
-          if (depDeleteDepends.error && !isMissingSupabaseTableError(depDeleteDepends.error)) {
-            throw new Error(`Task dependency delete failed: ${depDeleteDepends.error.message}`)
-          }
-
-          const taskDelete = await supabase.from('tasks').delete().in('id', chunk)
-          if (taskDelete.error && !isMissingSupabaseTableError(taskDelete.error)) {
-            throw new Error(`Task delete failed: ${taskDelete.error.message}`)
-          }
-        }
-      }
-
-      await upsertRows('tasks', taskRows, 'id')
-
-      const taskIds = taskRows.map((row) => row.id).filter(Boolean)
-      if (taskIds.length > 0) {
-        for (const idChunk of chunkArray(taskIds, 200)) {
-          const depDelete = await supabase.from('task_dependencies').delete().in('task_id', idChunk)
-          if (depDelete.error) {
-            throw new Error(`Task dependency cleanup failed: ${depDelete.error.message}`)
-          }
-        }
-      }
-
-      if (dependencyRows.length > 0) {
-        for (const chunk of chunkArray(dependencyRows, 200)) {
-          const depInsert = await supabase.from('task_dependencies').upsert(chunk, {
-            onConflict: 'task_id,depends_on_task_id,type,lag_days',
-          })
-          if (depInsert.error) {
-            throw new Error(`Task dependency sync failed: ${depInsert.error.message}`)
-          }
-        }
-      }
-
-      supabaseLastSyncedHashRef.current = pendingHash
-      const syncedAt = new Date().toISOString()
-      setSupabaseStatus((prev) => ({
-        ...prev,
-        phase: 'ready',
-        message: 'Supabase connected. Remote data is loaded.',
-        loadedAt: syncedAt,
-        counts: {
-          communities: communitiesRows.length,
-          lots: lotRows.length,
-          tasks: taskRows.length,
-          subcontractors: subcontractorRows.length,
-          product_types: productTypes.length,
-        },
-      }))
-      setWriteSyncState({ phase: 'synced', lastSyncedAt: syncedAt, error: '' })
-
-      if (deletedIds.length > 0) {
-        const deletedSet = new Set(deletedIds)
-        setApp((prev) => {
-          const sync = prev.sync ?? {}
-          const remaining = coerceArray(sync.deleted_task_ids).filter((id) => !deletedSet.has(id))
-          if (remaining.length === coerceArray(sync.deleted_task_ids).length) return prev
-          return { ...prev, sync: { ...sync, deleted_task_ids: remaining } }
-        })
-      }
-    } catch (error) {
-      setSupabaseStatus((prev) => ({
-        ...prev,
-        phase: 'error',
-        message: `Supabase write failed: ${error.message}`,
-        loadedAt: new Date().toISOString(),
-      }))
-      setWriteSyncState((prev) => ({ ...prev, phase: 'error', error: error.message || 'Unknown sync error' }))
-    } finally {
-      supabaseWriteInFlightRef.current = false
-      if (
-        supabasePendingPayloadRef.current &&
-        supabasePendingHashRef.current &&
-        supabasePendingHashRef.current !== supabaseLastSyncedHashRef.current
-      ) {
-        if (supabaseWriteTimerRef.current) {
-          clearTimeout(supabaseWriteTimerRef.current)
-        }
-        supabaseWriteTimerRef.current = setTimeout(() => {
-          void flushSupabaseWrite()
-        }, 250)
       }
     }
+
+    await upsertRows('product_types', productTypes, 'id')
+    await upsertRows('plans', plansRows, 'id')
+    await upsertRows('agencies', agenciesRows, 'id')
+    await upsertRows('communities', communitiesRows, 'id')
+    await upsertRows('subcontractors', subcontractorRows, 'id')
+    await upsertRows('lots', lotRows, 'id')
+
+    const deletedIds = Array.from(new Set(coerceArray(deletedTaskIds).filter(Boolean)))
+    if (deletedIds.length > 0) {
+      for (const chunk of chunkArray(deletedIds, 200)) {
+        const depDeleteTask = await supabase.from('task_dependencies').delete().in('task_id', chunk)
+        if (depDeleteTask.error && !isMissingSupabaseTableError(depDeleteTask.error)) {
+          throw new Error(`Task dependency delete failed: ${depDeleteTask.error.message}`)
+        }
+        const depDeleteDepends = await supabase.from('task_dependencies').delete().in('depends_on_task_id', chunk)
+        if (depDeleteDepends.error && !isMissingSupabaseTableError(depDeleteDepends.error)) {
+          throw new Error(`Task dependency delete failed: ${depDeleteDepends.error.message}`)
+        }
+
+        const taskDelete = await supabase.from('tasks').delete().in('id', chunk)
+        if (taskDelete.error && !isMissingSupabaseTableError(taskDelete.error)) {
+          throw new Error(`Task delete failed: ${taskDelete.error.message}`)
+        }
+      }
+    }
+
+    await upsertRows('tasks', taskRows, 'id')
+
+    const taskIds = taskRows.map((row) => row.id).filter(Boolean)
+    if (taskIds.length > 0) {
+      for (const idChunk of chunkArray(taskIds, 200)) {
+        const depDelete = await supabase.from('task_dependencies').delete().in('task_id', idChunk)
+        if (depDelete.error) {
+          throw new Error(`Task dependency cleanup failed: ${depDelete.error.message}`)
+        }
+      }
+    }
+
+    if (dependencyRows.length > 0) {
+      for (const chunk of chunkArray(dependencyRows, 200)) {
+        const depInsert = await supabase.from('task_dependencies').upsert(chunk, {
+          onConflict: 'task_id,depends_on_task_id,type,lag_days',
+        })
+        if (depInsert.error) {
+          throw new Error(`Task dependency sync failed: ${depInsert.error.message}`)
+        }
+      }
+    }
+
+    const syncedAt = new Date().toISOString()
+    setSupabaseStatus((prev) => ({
+      ...prev,
+      phase: 'ready',
+      message: 'Supabase connected. Remote data is loaded.',
+      loadedAt: syncedAt,
+      counts: {
+        communities: communitiesRows.length,
+        lots: lotRows.length,
+        tasks: taskRows.length,
+        subcontractors: subcontractorRows.length,
+        product_types: productTypes.length,
+      },
+    }))
+
+    if (deletedIds.length > 0) {
+      const deletedSet = new Set(deletedIds)
+      setApp((prev) => {
+        const sync = prev.sync ?? {}
+        const remaining = coerceArray(sync.deleted_task_ids).filter((id) => !deletedSet.has(id))
+        if (remaining.length === coerceArray(sync.deleted_task_ids).length) return prev
+        return { ...prev, sync: { ...sync, deleted_task_ids: remaining } }
+      })
+    }
+
+    return { syncedAt }
   }
 
-  useEffect(() => {
-    if (localTestMode) {
-      setWriteSyncState((prev) => ({ ...prev, phase: 'idle', error: '' }))
-      return
-    }
-    if (!supabaseUser?.id || !supabaseStatus.orgId || supabaseStatus.phase === 'loading') return
+  const buildCloudPayload = () => {
+    if (!supabaseUser?.id || !supabaseStatus.orgId) return null
 
     const orgId = supabaseStatus.orgId
     const orgConfig = app.org ?? {}
@@ -1495,45 +1452,189 @@ export default function BuildFlow() {
       deletedTaskIds,
     }
     const nextHash = JSON.stringify(nextPayload)
-
-    if (nextHash === supabaseLastSyncedHashRef.current || nextHash === supabasePendingHashRef.current) return
-
-    supabasePendingPayloadRef.current = nextPayload
-    supabasePendingHashRef.current = nextHash
-    setWriteSyncState((prev) => ({
-      ...prev,
-      phase: prev.phase === 'syncing' ? 'syncing' : 'pending',
-      error: '',
-    }))
-
-    if (supabaseWriteTimerRef.current) {
-      clearTimeout(supabaseWriteTimerRef.current)
+    return {
+      payload: nextPayload,
+      hash: nextHash,
     }
-
-    supabaseWriteTimerRef.current = setTimeout(() => {
-      void flushSupabaseWrite()
-    }, 700)
-
-    return () => {
-      if (supabaseWriteTimerRef.current) {
-        clearTimeout(supabaseWriteTimerRef.current)
-        supabaseWriteTimerRef.current = null
-      }
-    }
-  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase, supabaseStatus.role, localTestMode, flushSupabaseWrite])
+  }
 
   useEffect(() => {
-    if (supabaseUser?.id) return
-    if (supabaseWriteTimerRef.current) {
-      clearTimeout(supabaseWriteTimerRef.current)
-      supabaseWriteTimerRef.current = null
+    if (!supabaseUser?.id || !supabaseStatus.orgId || supabaseStatus.phase === 'loading') return
+
+    const built = buildCloudPayload()
+    if (!built) return
+    const { hash } = built
+
+    let didEnqueue = false
+    setApp((prev) => {
+      const sync = prev.sync ?? {}
+      const lastSynced = sync.cloud_last_synced_hash ?? ''
+      const lastQueued = sync.cloud_last_queued_hash ?? ''
+      if (hash === lastSynced || hash === lastQueued) return prev
+      const now = new Date().toISOString()
+      const nextQueue = [{ id: uuid(), hash, created_at: now, attempts: 0, last_error: '', next_retry_at: null }]
+      didEnqueue = true
+      return {
+        ...prev,
+        sync: {
+          ...sync,
+          cloud_queue: nextQueue,
+          cloud_last_queued_hash: hash,
+          cloud_last_error: '',
+          cloud_last_error_at: null,
+        },
+      }
+    })
+
+    if (didEnqueue) {
+      setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
     }
-    supabaseWriteInFlightRef.current = false
-    supabasePendingPayloadRef.current = null
-    supabasePendingHashRef.current = ''
-    supabaseLastSyncedHashRef.current = ''
-    setWriteSyncState({ phase: 'idle', lastSyncedAt: null, error: '' })
-  }, [supabaseUser?.id])
+  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase])
+
+  const pendingSyncOps = app.sync?.pending ?? []
+  const pendingSyncCount = pendingSyncOps.length
+  const lastSyncedAt = app.sync?.last_synced_at ?? null
+  const isGuestSession = Boolean(supabaseUser?.is_anonymous)
+  const cloudQueue = Array.isArray(app.sync?.cloud_queue) ? app.sync.cloud_queue : []
+  const cloudQueueCount = cloudQueue.length
+  const cloudHasPending =
+    cloudQueueCount > 0 ||
+    writeSyncState.phase === 'pending' ||
+    writeSyncState.phase === 'syncing' ||
+    writeSyncState.phase === 'error'
+  const cloudLastSyncedAt = app.sync?.cloud_last_synced_at ?? writeSyncState.lastSyncedAt ?? null
+  const cloudLastError = app.sync?.cloud_last_error ?? writeSyncState.error ?? ''
+  const cloudLastErrorAt = app.sync?.cloud_last_error_at ?? null
+  const cloudNextRetryAt = useMemo(() => {
+    if (cloudQueue.length === 0) return null
+    const times = cloudQueue
+      .map((item) => (item?.next_retry_at ? new Date(item.next_retry_at).getTime() : null))
+      .filter((value) => Number.isFinite(value))
+    if (times.length === 0) return null
+    return new Date(Math.min(...times)).toISOString()
+  }, [cloudQueue])
+  const showSyncPill = !isOnline || pendingSyncCount > 0 || Boolean(supabaseUser?.id)
+  const syncPillLabel = (() => {
+    if (!isOnline) return 'Offline'
+    if (!supabaseUser?.id) return pendingSyncCount > 0 ? 'Sync' : 'Local'
+    if (supabaseStatus.phase !== 'ready') return 'Connecting'
+    if (writeSyncState.phase === 'error') return 'Sync error'
+    if (writeSyncState.phase === 'syncing') return 'Syncing'
+    if (cloudQueueCount > 0 || writeSyncState.phase === 'pending') return 'Pending'
+    return 'Synced'
+  })()
+
+  useEffect(() => {
+    if (!supabaseUser?.id) {
+      setWriteSyncState({ phase: 'idle', lastSyncedAt: null, error: '' })
+      return
+    }
+    if (cloudQueue.length === 0 && writeSyncState.phase !== 'syncing') {
+      setWriteSyncState((prev) => (prev.phase === 'synced' ? prev : { ...prev, phase: 'synced', error: '' }))
+    }
+  }, [cloudQueue.length, supabaseUser?.id])
+
+  useEffect(() => {
+    if (cloudQueue.length === 0) return
+    const times = cloudQueue
+      .map((item) => (item?.next_retry_at ? new Date(item.next_retry_at).getTime() : null))
+      .filter((value) => Number.isFinite(value))
+    if (times.length === 0) return
+    const nextTime = Math.min(...times)
+    const delay = Math.max(250, nextTime - Date.now())
+    const timer = setTimeout(() => setCloudRetryTick((prev) => prev + 1), delay)
+    return () => clearTimeout(timer)
+  }, [cloudQueue, cloudRetryTick])
+
+  useEffect(() => {
+    if (!supabaseUser?.id || supabaseStatus.phase !== 'ready' || !isOnline) return
+    if (cloudQueue.length === 0) return
+    if (supabaseWriteInFlightRef.current) return
+
+    const latest = cloudQueue[cloudQueue.length - 1]
+    if (!latest) return
+    const retryAt = latest.next_retry_at ? new Date(latest.next_retry_at).getTime() : 0
+    if (retryAt && retryAt > Date.now()) return
+
+    const built = buildCloudPayload()
+    if (!built) return
+    const { payload, hash } = built
+
+    supabaseWriteInFlightRef.current = true
+    setWriteSyncState((prev) => ({ ...prev, phase: 'syncing', error: '' }))
+
+    let cancelled = false
+    const runSync = async () => {
+      try {
+        const { syncedAt } = await syncPayloadToSupabase(payload)
+        if (cancelled) return
+
+        setApp((prev) => {
+          const sync = prev.sync ?? {}
+          const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
+          const queueLatest = queue[queue.length - 1]
+          const hasNewer = queueLatest && queueLatest.hash !== hash
+          return {
+            ...prev,
+            sync: {
+              ...sync,
+              cloud_queue: hasNewer ? queue : [],
+              cloud_last_synced_at: syncedAt,
+              cloud_last_synced_hash: hash,
+              cloud_last_error: '',
+              cloud_last_error_at: null,
+            },
+          }
+        })
+
+        const hasNewer = cloudQueue[cloudQueue.length - 1]?.hash && cloudQueue[cloudQueue.length - 1]?.hash !== hash
+        setWriteSyncState({ phase: hasNewer ? 'pending' : 'synced', lastSyncedAt: syncedAt, error: '' })
+      } catch (err) {
+        if (cancelled) return
+        console.error('Supabase sync failed', err)
+        const message = String(err?.message ?? 'Supabase sync failed')
+        const attempts = (latest.attempts ?? 0) + 1
+        const delayMs = Math.min(300000, 5000 * Math.pow(2, Math.max(0, attempts - 1)))
+        const nextRetryAt = new Date(Date.now() + delayMs).toISOString()
+        const errorAt = new Date().toISOString()
+
+        setApp((prev) => {
+          const sync = prev.sync ?? {}
+          const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
+          const queueLatest = queue[queue.length - 1]
+          if (!queueLatest || queueLatest.hash !== hash) {
+            return { ...prev, sync: { ...sync, cloud_last_error: message, cloud_last_error_at: errorAt } }
+          }
+          const nextQueue = [
+            {
+              ...queueLatest,
+              attempts,
+              last_error: message,
+              next_retry_at: nextRetryAt,
+            },
+          ]
+          return {
+            ...prev,
+            sync: {
+              ...sync,
+              cloud_queue: nextQueue,
+              cloud_last_error: message,
+              cloud_last_error_at: errorAt,
+            },
+          }
+        })
+
+        setWriteSyncState((prev) => ({ ...prev, phase: 'error', error: message }))
+      } finally {
+        supabaseWriteInFlightRef.current = false
+      }
+    }
+
+    runSync()
+    return () => {
+      cancelled = true
+    }
+  }, [cloudQueue, supabaseUser?.id, supabaseStatus.phase, isOnline, cloudRetryTick])
 
   useEffect(() => {
     const onOnline = () => {
@@ -1674,27 +1775,6 @@ export default function BuildFlow() {
     [app.notifications],
   )
 
-  const pendingSyncOps = app.sync?.pending ?? []
-  const pendingSyncCount = pendingSyncOps.length
-  const lastSyncedAt = app.sync?.last_synced_at ?? null
-  const localTestMode = Boolean(app.sync?.local_test_mode)
-  const supabaseConnected = Boolean(supabaseUser?.id) && supabaseStatus.phase === 'ready'
-  const isGuestSession = Boolean(supabaseUser?.is_anonymous)
-  const cloudHasPending = Boolean(supabaseUser?.id) && (writeSyncState.phase === 'pending' || writeSyncState.phase === 'syncing')
-  const cloudLastSyncedAt = writeSyncState.lastSyncedAt ?? null
-  const showSyncPill = !isOnline || pendingSyncCount > 0 || Boolean(supabaseUser?.id)
-  const syncPillLabel = (() => {
-    if (localTestMode) return 'Local Test'
-    if (!isOnline) return 'Offline'
-    if (!supabaseUser?.id) return pendingSyncCount > 0 ? 'Sync' : 'Local'
-    if (supabaseStatus.phase !== 'ready') return 'Connecting'
-    if (writeSyncState.phase === 'error') return 'Sync error'
-    if (writeSyncState.phase === 'syncing') return 'Syncing'
-    if (writeSyncState.phase === 'pending') return 'Pending'
-    if (writeSyncState.phase === 'synced') return 'Synced'
-    return 'Sync'
-  })()
-
   const enqueueSyncOp = ({ type, lot_id, entity_type, entity_id, summary }) => {
     const now = new Date().toISOString()
     const op = {
@@ -1722,6 +1802,9 @@ export default function BuildFlow() {
     if (!isOnline) return
     setApp((prev) => {
       const now = new Date().toISOString()
+      const sync = prev.sync ?? {}
+      const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
+      const refreshedQueue = queue.map((item) => ({ ...item, next_retry_at: null }))
       return {
         ...prev,
         lots: (prev.lots ?? []).map((lot) => ({
@@ -1732,12 +1815,19 @@ export default function BuildFlow() {
           m && m.status === 'queued' ? { ...m, status: 'sent', sent_at: now } : m,
         ),
         sync: {
-          ...(prev.sync ?? {}),
+          ...sync,
           pending: [],
           last_synced_at: now,
+          cloud_queue: refreshedQueue,
+          cloud_last_error: '',
+          cloud_last_error_at: null,
         },
       }
     })
+    if (supabaseUser?.id) {
+      setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
+      setCloudRetryTick((prev) => prev + 1)
+    }
   }
 
   const resetDemo = () => {
@@ -1751,6 +1841,22 @@ export default function BuildFlow() {
 
   const setAuthField = (field, value) => {
     setAuthDraft((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const ensureGuestOrg = async () => {
+    if (!supabaseUser?.is_anonymous) return null
+    const { data, error } = await supabase.rpc('ensure_guest_org')
+    if (error) {
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Guest org provisioning failed: ${error.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+      return null
+    }
+    const row = Array.isArray(data) ? data[0] ?? null : data
+    return row
   }
 
   const signInAsGuest = async () => {
@@ -1770,10 +1876,21 @@ export default function BuildFlow() {
       return
     }
 
+    const { error: provisionError } = await supabase.rpc('ensure_guest_org')
+    if (provisionError) {
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Guest org provisioning failed: ${provisionError.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+      return
+    }
+
     setSupabaseStatus((prev) => ({
       ...prev,
       phase: 'loading',
-      message: 'Guest session created. Syncing with Supabase...',
+      message: 'Guest session ready. Syncing with Supabase...',
       loadedAt: new Date().toISOString(),
       warning: '',
     }))
@@ -1856,15 +1973,6 @@ export default function BuildFlow() {
 
   const resetRemoteSeed = async () => {
     if (!supabaseUser?.id) return
-    if (supabaseUser?.is_anonymous) {
-      setSupabaseStatus((prev) => ({
-        ...prev,
-        phase: 'error',
-        message: 'Seed reset requires a full login (anonymous sessions cannot reset).',
-        loadedAt: new Date().toISOString(),
-      }))
-      return
-    }
 
     const confirmed = typeof window === 'undefined' ? false : window.confirm('Reset all remote data back to the seed baseline? This will overwrite current Supabase data for this org.')
     if (!confirmed) return
@@ -4800,7 +4908,7 @@ export default function BuildFlow() {
                   </SecondaryButton>
                   {supabaseUser?.is_anonymous ? (
                     <p className="col-span-2 text-xs text-amber-700">
-                      Sign in with a full account to run a seed reset.
+                      Guest reset affects the shared demo data for all guest users.
                     </p>
                   ) : null}
                 </div>
@@ -7739,21 +7847,17 @@ export default function BuildFlow() {
           writeSyncState={writeSyncState}
           supabaseUser={supabaseUser}
           isGuestSession={isGuestSession}
-          localTestMode={localTestMode}
           cloudHasPending={cloudHasPending}
+          cloudQueueCount={cloudQueueCount}
           cloudLastSyncedAt={cloudLastSyncedAt}
+          cloudLastError={cloudLastError}
+          cloudLastErrorAt={cloudLastErrorAt}
+          cloudNextRetryAt={cloudNextRetryAt}
           onClose={() => setShowOfflineStatus(false)}
           onSyncNow={() => {
             syncNow()
-            if (supabaseUser?.id && !localTestMode) void flushSupabaseWrite()
             setShowOfflineStatus(false)
           }}
-          onToggleLocalTestMode={() =>
-            setApp((prev) => ({
-              ...prev,
-              sync: { ...(prev.sync ?? {}), local_test_mode: !Boolean(prev.sync?.local_test_mode) },
-            }))
-          }
         />
       )}
 
@@ -9875,12 +9979,14 @@ function OfflineStatusModal({
   writeSyncState,
   supabaseUser,
   isGuestSession,
-  localTestMode,
   cloudHasPending,
+  cloudQueueCount,
   cloudLastSyncedAt,
+  cloudLastError,
+  cloudLastErrorAt,
+  cloudNextRetryAt,
   onClose,
   onSyncNow,
-  onToggleLocalTestMode,
 }) {
   const pendingList = useMemo(() => (Array.isArray(pending) ? pending : []), [pending])
   const pendingCount = pendingList.length
@@ -9896,7 +10002,6 @@ function OfflineStatusModal({
 
   const cloudPhaseLabel = (() => {
     if (!supabaseUser?.id) return 'Signed out (local only)'
-    if (localTestMode) return 'Local Test Mode (cloud sync paused)'
     if (supabaseStatus?.phase !== 'ready') return 'Connecting to Supabase...'
     if (writeSyncState?.phase === 'error') return `Sync error: ${writeSyncState?.error || 'write failed'}`
     if (writeSyncState?.phase === 'syncing') return 'Syncing changes...'
@@ -9917,7 +10022,7 @@ function OfflineStatusModal({
           <PrimaryButton
             onClick={onSyncNow}
             className="flex-1"
-            disabled={!isOnline || localTestMode || (pendingCount === 0 && !cloudHasPending)}
+            disabled={!isOnline || (pendingCount === 0 && !cloudHasPending)}
           >
             Sync Now
           </PrimaryButton>
@@ -9943,28 +10048,24 @@ function OfflineStatusModal({
           {cloudLastSyncedAt ? (
             <p className="text-xs text-gray-600 mt-1">Last cloud sync: {formatSyncTimestamp(cloudLastSyncedAt)}</p>
           ) : null}
+          <p className="text-xs text-gray-600 mt-1">Queue: {cloudQueueCount ?? 0} snapshot{cloudQueueCount === 1 ? '' : 's'}</p>
+          {cloudLastError ? (
+            <div className="text-xs text-red-600 mt-1">
+              <p className="font-semibold">Last error: {cloudLastError}</p>
+              {cloudLastErrorAt ? <p>Seen at {formatSyncTimestamp(cloudLastErrorAt)}</p> : null}
+            </div>
+          ) : null}
+          {cloudNextRetryAt ? (
+            <p className="text-xs text-amber-700 mt-1">Next retry: {formatSyncTimestamp(cloudNextRetryAt)}</p>
+          ) : null}
           {supabaseStatus?.warning ? <p className="text-xs text-amber-700 mt-1">{supabaseStatus.warning}</p> : null}
         </Card>
-
-        {supabaseUser?.is_anonymous ? (
-          <Card className="border-amber-200 bg-amber-50">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold text-amber-900">Local Test Mode</p>
-                <p className="text-xs text-amber-800 mt-1">
-                  Keep changes on this device (skip cloud sync) while testing.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={onToggleLocalTestMode}
-                className="px-3 py-2 rounded-xl border border-amber-200 bg-white text-xs font-semibold"
-              >
-                {localTestMode ? 'Disable' : 'Enable'}
-              </button>
-            </div>
-          </Card>
-        ) : null}
+        <Card className="bg-blue-50 border-blue-200">
+          <p className="text-sm font-semibold text-blue-900">Conflict Policy</p>
+          <p className="text-xs text-blue-800 mt-1">
+            Last write wins. If the same item is edited on two devices, the most recent sync overwrites earlier edits.
+          </p>
+        </Card>
 
         <Card>
           <p className="font-semibold mb-2">{pendingCount} changes pending</p>
@@ -9991,9 +10092,6 @@ function OfflineStatusModal({
           Local last synced:{' '}
           <span className="font-semibold">{lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : '—'}</span>
         </div>
-        <p className="text-[11px] text-gray-500">
-          Conflict resolution UI is not enabled yet. During testing, avoid editing the same item on two devices at the same time.
-        </p>
       </div>
     </Modal>
   )
