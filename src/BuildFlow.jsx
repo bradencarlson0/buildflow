@@ -1488,6 +1488,7 @@ export default function BuildFlow() {
 
     if (didEnqueue) {
       setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
+      setCloudRetryTick((prev) => prev + 1)
     }
   }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase])
 
@@ -1503,6 +1504,8 @@ export default function BuildFlow() {
     writeSyncState.phase === 'syncing' ||
     writeSyncState.phase === 'error'
   const cloudLastSyncedAt = app.sync?.cloud_last_synced_at ?? writeSyncState.lastSyncedAt ?? null
+  const uiLastSyncedAt = cloudLastSyncedAt ?? writeSyncState.lastSyncedAt ?? null
+  const uiLastCheckAt = supabaseStatus.loadedAt ?? uiLastSyncedAt ?? null
   const cloudLastError = app.sync?.cloud_last_error ?? writeSyncState.error ?? ''
   const cloudLastErrorAt = app.sync?.cloud_last_error_at ?? null
   const cloudNextRetryAt = useMemo(() => {
@@ -4808,9 +4811,9 @@ export default function BuildFlow() {
                   {supabaseStatus.role ? (
                     <p className="text-xs text-gray-600 mt-1">Role: {supabaseStatus.role}</p>
                   ) : null}
-                  {supabaseStatus.loadedAt ? (
-                    <p className="text-xs text-gray-500 mt-1">Last check: {formatSyncTimestamp(supabaseStatus.loadedAt)}</p>
-                  ) : null}
+                  <p className="text-xs text-gray-500 mt-1">
+                    Last check: {uiLastCheckAt ? formatSyncTimestamp(uiLastCheckAt) : '—'}
+                  </p>
                   {supabaseUser?.id ? (
                     <p
                       className={`text-xs mt-1 ${
@@ -4823,11 +4826,13 @@ export default function BuildFlow() {
                     >
                       {writeSyncState.phase === 'error'
                         ? `Sync error: ${writeSyncState.error || 'write failed'}`
-                        : writeSyncState.phase === 'synced' && writeSyncState.lastSyncedAt
-                          ? `Last synced: ${formatSyncTimestamp(writeSyncState.lastSyncedAt)}`
-                          : writeSyncState.phase === 'idle'
-                            ? 'Sync idle'
-                            : 'Syncing changes...'}
+                        : writeSyncState.phase === 'syncing'
+                          ? `Syncing changes...${uiLastSyncedAt ? ` Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}` : ''}`
+                          : uiLastSyncedAt
+                            ? `Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}`
+                            : writeSyncState.phase === 'idle'
+                              ? 'Sync idle'
+                              : 'Sync pending'}
                     </p>
                   ) : null}
                   {supabaseStatus.warning ? (
