@@ -8300,9 +8300,9 @@ export default function BuildFlow() {
               </Card>
 
               <Card className="bg-gray-50">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-2">
                   <p className="font-semibold">City Inspectors</p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                     {inspectorLibrary.length > 0 ? (
                       <select
                         value={inspectorLibraryKey}
@@ -8312,9 +8312,9 @@ export default function BuildFlow() {
                           addInspectorFromLibrary(nextKey)
                           setInspectorLibraryKey('')
                         }}
-                        className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                        className="flex-1 min-w-[150px] text-xs px-2 py-2 rounded-xl border border-gray-200 bg-white"
                       >
-                        <option value="">Add existing...</option>
+                        <option value="">Add existing</option>
                         {inspectorLibrary.map((i) => (
                           <option key={i.key} value={i.key}>
                             {(i.name || 'Inspector') + (i.email ? ` - ${i.email}` : '') + (i.phone ? ` - ${i.phone}` : '')}
@@ -8324,7 +8324,7 @@ export default function BuildFlow() {
                     ) : null}
                     <button
                       onClick={() => setCommunityDraft((d) => ({ ...d, inspectors: [...(d.inspectors ?? []), createDraftInspector()] }))}
-                      className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                      className="text-xs font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
                     >
                       + Add
                     </button>
@@ -8509,9 +8509,9 @@ export default function BuildFlow() {
               </Card>
 
               <Card className="bg-gray-50">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-2">
                   <p className="font-semibold">Builders / Superintendents</p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                     {contactLibraryBuilders.length > 0 ? (
                       <select
                         value={builderPersonaId}
@@ -8521,9 +8521,9 @@ export default function BuildFlow() {
                           addBuilderFromLibrary(nextId)
                           setBuilderPersonaId('')
                         }}
-                        className="text-sm px-2 py-1 rounded-xl border border-gray-200 bg-white"
+                        className="flex-1 min-w-[150px] text-xs px-2 py-2 rounded-xl border border-gray-200 bg-white"
                       >
-                        <option value="">Add from library...</option>
+                        <option value="">Add from library</option>
                         {contactLibraryBuilders.map((b) => (
                           <option key={b.id} value={b.id}>
                             {(b.name ?? 'Unnamed') + (b.email ? ` - ${b.email}` : '')}
@@ -8538,7 +8538,7 @@ export default function BuildFlow() {
                           builders: [...(d.builders ?? []), createDraftBuilder((d.builders ?? []).length)],
                         }))
                       }
-                      className="text-sm font-semibold px-3 py-1 rounded-xl border border-gray-200 bg-white"
+                      className="text-xs font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
                     >
                       + Add
                     </button>
