@@ -27,6 +27,7 @@ import {
   Sun,
   Upload,
   Users,
+  Wifi,
   WifiOff,
   X,
 } from 'lucide-react'
@@ -4779,7 +4780,7 @@ export default function BuildFlow() {
               }`}
               title={!isOnline ? 'Offline mode' : 'Sync status'}
             >
-              <WifiOff className="w-4 h-4" />
+              {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
               {syncPillLabel}
               {pendingSyncCount > 0 ? ` • ${pendingSyncCount}` : ''}
             </button>
