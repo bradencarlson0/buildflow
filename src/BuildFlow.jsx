@@ -4813,7 +4813,10 @@ export default function BuildFlow() {
                     <p className="text-xs text-gray-600 mt-1">Role: {supabaseStatus.role}</p>
                   ) : null}
                   <p className="text-xs text-gray-500 mt-1">
-                    Last check: {uiLastCheckAt ? formatSyncTimestamp(uiLastCheckAt) : '—'}
+                    Last check:{' '}
+                    {uiLastCheckAt && formatSyncTimestamp(uiLastCheckAt)
+                      ? formatSyncTimestamp(uiLastCheckAt)
+                      : 'Not yet'}
                   </p>
                   {supabaseUser?.id ? (
                     <p
@@ -4829,11 +4832,11 @@ export default function BuildFlow() {
                         ? `Sync error: ${writeSyncState.error || 'write failed'}`
                         : writeSyncState.phase === 'syncing'
                           ? `Syncing changes...${uiLastSyncedAt ? ` Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}` : ''}`
-                          : uiLastSyncedAt
+                          : uiLastSyncedAt && formatSyncTimestamp(uiLastSyncedAt)
                             ? `Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}`
                             : writeSyncState.phase === 'idle'
                               ? 'Sync idle'
-                              : 'Sync pending'}
+                              : 'Sync pending (not yet synced)'}
                     </p>
                   ) : null}
                   {supabaseStatus.warning ? (
