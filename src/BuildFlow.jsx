@@ -1421,17 +1421,11 @@ export default function BuildFlow() {
     const lotRows = (app.lots ?? []).map((row) => mapLotToSupabase(row, orgId)).filter((row) => row?.id)
 
     const taskRows = []
-    const dependencyRows = []
     for (const lot of app.lots ?? []) {
       for (const task of lot?.tasks ?? []) {
         const mappedTask = mapTaskToSupabase(task, lot.id, orgId)
         if (!mappedTask?.id) continue
         taskRows.push(mappedTask)
-        for (const dep of task?.dependencies ?? []) {
-          const mappedDep = mapDependencyToSupabase(task.id, dep)
-          if (!mappedDep.task_id || !mappedDep.depends_on_task_id) continue
-          dependencyRows.push(mappedDep)
-        }
       }
     }
 
@@ -1449,7 +1443,7 @@ export default function BuildFlow() {
       subcontractorRows,
       lotRows,
       taskRows,
-      dependencyRows,
+      dependencyRows: [],
       deletedTaskIds,
     }
     const nextHash = JSON.stringify(nextPayload)
