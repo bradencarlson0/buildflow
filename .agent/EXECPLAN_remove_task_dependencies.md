@@ -17,8 +17,8 @@ This change removes task dependencies everywhere in BuildFlow so the app no long
 
 ## Surprises & Discoveries
 
-- Observation: The template file still contains legacy `dependencies` entries, but they are stripped at runtime via `stripDependenciesFromTask`.
-  Evidence: `buildflow/src/data/template.js` now applies a strip before use.
+- Observation: Legacy dependency literals were removed entirely from `src/data/template.js` after the runtime strip was added.
+  Evidence: `rg -n "dependencies" buildflow/src/data/template.js` returns no matches.
 - Observation: Lint still reports existing hook dependency warnings in `BuildFlow.jsx` unrelated to this change.
   Evidence: `npm run lint` output (warnings only).
 
