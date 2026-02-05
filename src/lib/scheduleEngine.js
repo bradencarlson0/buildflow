@@ -135,11 +135,6 @@ export const getTradeLabel = (tradeId) => {
     .join(' ')
 }
 
-const resolveTemplateDeps = (templateTasks) => {
-  const nameToId = new Map(templateTasks.map((t) => [t.name, t.id]))
-  return { nameToId }
-}
-
 const scheduleSequential = (tasks, startDateLike, orgSettings, scheduledDatesById) => {
   const { getNextWorkDay, addWorkDays } = makeWorkdayHelpers(orgSettings)
   let cursor = getNextWorkDay(startDateLike)
@@ -153,10 +148,6 @@ const scheduleSequential = (tasks, startDateLike, orgSettings, scheduledDatesByI
   }
 }
 
-const scheduleWithDependencies = (tasks, trackStartLike, orgSettings, scheduledDatesById) => {
-  scheduleSequential(tasks, trackStartLike, orgSettings, scheduledDatesById)
-}
-
 const getDriedInDate = (allTasks, scheduledDatesById) => {
   const windowsTask = allTasks.find((t) => String(t.name).toLowerCase().includes('window'))
   const roofTask = allTasks.find((t) => String(t.name).toLowerCase().includes('roof'))
@@ -168,7 +159,6 @@ const getDriedInDate = (allTasks, scheduledDatesById) => {
 
 export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSettings) => {
   const templateTasks = (template?.tasks ?? []).slice()
-  const { nameToId } = resolveTemplateDeps(templateTasks)
 
   const created = templateTasks.map((tt) => {
     const id = uuid()
@@ -186,17 +176,6 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
       scheduled_end: null,
       actual_start: null,
       actual_end: null,
-      dependencies: (tt.dependencies ?? [])
-        .map((dep) => {
-          const predTemplateId = nameToId.get(dep.task_name)
-          if (!predTemplateId) return null
-          return {
-            depends_on_template_id: predTemplateId,
-            type: dep.type,
-            lag_days: dep.lag_days ?? 0,
-          }
-        })
-        .filter(Boolean),
       status: 'pending',
       delay_days: 0,
       delay_reason: null,
@@ -219,23 +198,6 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
     }
   })
 
-  // Map template ids -> new task ids
-  const templateIdToNewId = new Map()
-  templateTasks.forEach((tt, idx) => {
-    templateIdToNewId.set(tt.id, created[idx].id)
-  })
-
-  // Rewrite dependencies to depends_on_task_id
-  for (const task of created) {
-    task.dependencies = (task.dependencies ?? [])
-      .map((dep) => {
-        const depends_on_task_id = templateIdToNewId.get(dep.depends_on_template_id)
-        if (!depends_on_task_id) return null
-        return { depends_on_task_id, type: dep.type, lag_days: dep.lag_days ?? 0 }
-      })
-      .filter(Boolean)
-  }
-
   // Schedule dates by track using spec-style workday logic
   const scheduledDatesById = new Map()
 
@@ -256,8 +218,8 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
   const trackStart = driedInDate ? addWorkDays(driedInDate, 1) : null
 
   if (trackStart) {
-    scheduleWithDependencies(interiorTasks, trackStart, orgSettings, scheduledDatesById)
-    scheduleWithDependencies(exteriorTasks, trackStart, orgSettings, scheduledDatesById)
+    scheduleSequential(interiorTasks, trackStart, orgSettings, scheduledDatesById)
+    scheduleSequential(exteriorTasks, trackStart, orgSettings, scheduledDatesById)
   }
 
   const blockingTasks = created.filter((t) => t.track !== 'final' && t.blocks_final !== false)
@@ -570,19 +532,8 @@ export const buildParallelStartPlan = (lot, taskIds, orgSettings, options = {}) 
   }
 
   const originalById = new Map((lot.tasks ?? []).map((t) => [t.id, t]))
-  const baseTasks = (lot.tasks ?? []).map((t) => ({
-    ...t,
-    dependencies: (t.dependencies ?? []).map((d) => ({ ...d })),
-  }))
-  const workingLot = { ...lot, tasks: baseTasks }
+  const workingLot = { ...lot, tasks: (lot.tasks ?? []).map((t) => ({ ...t })) }
   const selectedSet = new Set(selected)
-
-  if (options.overrideDependencies) {
-    for (const task of workingLot.tasks) {
-      if (!selectedSet.has(task.id)) continue
-      task.dependencies = (task.dependencies ?? []).filter((d) => !selectedSet.has(d.depends_on_task_id))
-    }
-  }
 
   const blockedDependencies = canParallelizeTasks(workingLot, selected).blocked ?? []
   if (blockedDependencies.length > 0 && !options.overrideDependencies) {
@@ -940,7 +891,6 @@ export const insertBufferTaskAfter = (lot, afterTaskId, bufferDays, orgSettings,
     scheduled_end: bufferEnd,
     actual_start: null,
     actual_end: null,
-    dependencies: [],
     status: 'pending',
     delay_days: 0,
     delay_reason: null,

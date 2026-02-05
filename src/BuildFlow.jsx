@@ -460,23 +460,12 @@ const isMissingSupabaseTableError = (error) => {
   )
 }
 
-const normalizeTaskDependency = (dep) => {
-  if (!dep?.depends_on_task_id) return null
+const mapTaskFromSupabase = (taskRow) => {
+  const { dependencies: _dependencies, ...rest } = taskRow ?? {}
   return {
-    depends_on_task_id: dep.depends_on_task_id,
-    type: dep.type ?? 'FS',
-    lag_days: Number.isFinite(Number(dep.lag_days)) ? Number(dep.lag_days) : 0,
-  }
-}
-
-const mapTaskFromSupabase = (taskRow, dependencyRows = []) => {
-  const dependencyList = coerceArray(dependencyRows).map(normalizeTaskDependency).filter(Boolean)
-  const existingDependencies = coerceArray(taskRow?.dependencies).map(normalizeTaskDependency).filter(Boolean)
-  return {
-    ...taskRow,
+    ...rest,
     duration: Math.max(1, Number(taskRow?.duration ?? 1) || 1),
     sort_order: Number.isFinite(Number(taskRow?.sort_order)) ? Number(taskRow.sort_order) : 0,
-    dependencies: existingDependencies.length > 0 ? existingDependencies : dependencyList,
   }
 }
 
@@ -651,15 +640,7 @@ const mapTaskToSupabase = (row, lotId, orgId) => ({
   notes: row?.notes ?? null,
   delay_reason: row?.delay_reason ?? null,
   delay_days: Number.isFinite(Number(row?.delay_days)) ? Number(row.delay_days) : 0,
-  dependencies: coerceArray(row?.dependencies),
   custom_fields: row?.custom_fields ?? {},
-})
-
-const mapDependencyToSupabase = (taskId, dep) => ({
-  task_id: taskId,
-  depends_on_task_id: dep?.depends_on_task_id,
-  type: dep?.type ?? 'FS',
-  lag_days: Number.isFinite(Number(dep?.lag_days)) ? Number(dep.lag_days) : 0,
 })
 
 const chunkArray = (rows, chunkSize = 200) => {
@@ -950,6 +931,44 @@ export default function BuildFlow() {
   }, [app])
 
   useEffect(() => {
+    setApp((prev) => {
+      const sync = prev.sync ?? {}
+      if (sync.dependencies_cleanup_done) return prev
+      let changed = false
+
+      const stripTask = (task) => {
+        if (!task || !Object.prototype.hasOwnProperty.call(task, 'dependencies')) return task
+        const { dependencies: _dependencies, ...rest } = task
+        changed = true
+        return rest
+      }
+
+      const nextLots = (prev.lots ?? []).map((lot) => {
+        if (!Array.isArray(lot?.tasks)) return lot
+        const nextTasks = lot.tasks.map(stripTask)
+        return nextTasks === lot.tasks ? lot : { ...lot, tasks: nextTasks }
+      })
+
+      const nextTemplates = (prev.templates ?? []).map((template) => {
+        if (!Array.isArray(template?.tasks)) return template
+        const nextTasks = template.tasks.map(stripTask)
+        return nextTasks === template.tasks ? template : { ...template, tasks: nextTasks }
+      })
+
+      if (!changed) {
+        return { ...prev, sync: { ...sync, dependencies_cleanup_done: true } }
+      }
+
+      return {
+        ...prev,
+        lots: nextLots,
+        templates: nextTemplates,
+        sync: { ...sync, dependencies_cleanup_done: true },
+      }
+    })
+  }, [])
+
+  useEffect(() => {
     let active = true
 
     const readSession = async () => {
@@ -1136,43 +1155,11 @@ export default function BuildFlow() {
       if (plansRead.missing) missingTables.push('plans')
       if (agenciesRead.missing) missingTables.push('agencies')
 
-      let dependencyRows = []
-      const taskIds = (tasksRead.rows ?? []).map((task) => task?.id).filter(Boolean)
-      if (taskIds.length > 0) {
-        const depResult = await supabase.from('task_dependencies').select('*').in('task_id', taskIds)
-        if (depResult.error) {
-          if (isMissingSupabaseTableError(depResult.error)) {
-            missingTables.push('task_dependencies')
-          } else {
-            setSupabaseStatus((prev) => ({
-              ...prev,
-              phase: 'error',
-              message: `Task dependency read failed: ${depResult.error.message}`,
-              orgId,
-              role: profile?.role ?? null,
-              loadedAt: new Date().toISOString(),
-            }))
-            return
-          }
-        } else {
-          dependencyRows = depResult.data ?? []
-        }
-      }
-
-      const dependenciesByTaskId = new Map()
-      for (const dep of dependencyRows) {
-        if (!dep?.task_id) continue
-        const list = dependenciesByTaskId.get(dep.task_id) ?? []
-        list.push(dep)
-        dependenciesByTaskId.set(dep.task_id, list)
-      }
-
       const tasksByLotId = new Map()
       for (const taskRow of tasksRead.rows ?? []) {
         const lotId = taskRow?.lot_id
         if (!lotId) continue
-        const dependencyList = dependenciesByTaskId.get(taskRow.id) ?? []
-        const mappedTask = mapTaskFromSupabase(taskRow, dependencyList)
+        const mappedTask = mapTaskFromSupabase(taskRow)
         const list = tasksByLotId.get(lotId) ?? []
         list.push(mappedTask)
         tasksByLotId.set(lotId, list)
@@ -1268,7 +1255,6 @@ export default function BuildFlow() {
       subcontractorRows,
       lotRows,
       taskRows,
-      dependencyRows,
       deletedTaskIds,
     } = pendingPayload ?? {}
 
@@ -1322,15 +1308,6 @@ export default function BuildFlow() {
     const deletedIds = Array.from(new Set(coerceArray(deletedTaskIds).filter(Boolean)))
     if (deletedIds.length > 0) {
       for (const chunk of chunkArray(deletedIds, 200)) {
-        const depDeleteTask = await supabase.from('task_dependencies').delete().in('task_id', chunk)
-        if (depDeleteTask.error && !isMissingSupabaseTableError(depDeleteTask.error)) {
-          throw new Error(`Task dependency delete failed: ${depDeleteTask.error.message}`)
-        }
-        const depDeleteDepends = await supabase.from('task_dependencies').delete().in('depends_on_task_id', chunk)
-        if (depDeleteDepends.error && !isMissingSupabaseTableError(depDeleteDepends.error)) {
-          throw new Error(`Task dependency delete failed: ${depDeleteDepends.error.message}`)
-        }
-
         const taskDelete = await supabase.from('tasks').delete().in('id', chunk)
         if (taskDelete.error && !isMissingSupabaseTableError(taskDelete.error)) {
           throw new Error(`Task delete failed: ${taskDelete.error.message}`)
@@ -1339,27 +1316,6 @@ export default function BuildFlow() {
     }
 
     await upsertRows('tasks', taskRows, 'id')
-
-    const taskIds = taskRows.map((row) => row.id).filter(Boolean)
-    if (taskIds.length > 0) {
-      for (const idChunk of chunkArray(taskIds, 200)) {
-        const depDelete = await supabase.from('task_dependencies').delete().in('task_id', idChunk)
-        if (depDelete.error) {
-          throw new Error(`Task dependency cleanup failed: ${depDelete.error.message}`)
-        }
-      }
-    }
-
-    if (dependencyRows.length > 0) {
-      for (const chunk of chunkArray(dependencyRows, 200)) {
-        const depInsert = await supabase.from('task_dependencies').upsert(chunk, {
-          onConflict: 'task_id,depends_on_task_id,type,lag_days',
-        })
-        if (depInsert.error) {
-          throw new Error(`Task dependency sync failed: ${depInsert.error.message}`)
-        }
-      }
-    }
 
     const syncedAt = new Date().toISOString()
     setSupabaseStatus((prev) => ({
@@ -1443,7 +1399,6 @@ export default function BuildFlow() {
       subcontractorRows,
       lotRows,
       taskRows,
-      dependencyRows: [],
       deletedTaskIds,
     }
     const nextHash = JSON.stringify(nextPayload)
@@ -11472,7 +11427,6 @@ function AddTaskModal({ lot, org, subcontractors, onClose, onSave }) {
                 scheduled_end: endDate,
                 actual_start: null,
                 actual_end: null,
-                dependencies: [],
                 status: 'pending',
                 delay_days: 0,
                 delay_reason: null,

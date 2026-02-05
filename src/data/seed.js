@@ -1158,6 +1158,7 @@ export const createSeedState = () => {
       cloud_last_error: '',
       cloud_last_error_at: null,
       deleted_task_ids: [],
+      dependencies_cleanup_done: true,
     },
     notification_preferences: {
       user_id: '',

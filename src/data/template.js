@@ -3,6 +3,12 @@ import { uuid } from '../lib/uuid.js'
 
 const isOutdoor = (name) => OUTDOOR_TASK_NAMES.includes(name)
 
+const stripDependenciesFromTask = (task) => {
+  if (!task) return task
+  const { dependencies: _dependencies, ...rest } = task
+  return rest
+}
+
 export const DEFAULT_TEMPLATE = {
   id: 'template-standard-60',
   name: 'Base 60-Day Schedule',
@@ -621,12 +627,17 @@ export const DEFAULT_TEMPLATE = {
   ],
 }
 
+DEFAULT_TEMPLATE.tasks = DEFAULT_TEMPLATE.tasks.map(stripDependenciesFromTask)
+
 const cloneTasks = (tasks, durationScale = 1) =>
-  (tasks ?? []).map((task) => ({
-    ...task,
-    id: uuid(),
-    duration: Math.max(1, Math.round((task.duration ?? 1) * durationScale)),
-  }))
+  (tasks ?? []).map((task) => {
+    const cleanTask = stripDependenciesFromTask(task)
+    return {
+      ...cleanTask,
+      id: uuid(),
+      duration: Math.max(1, Math.round((cleanTask.duration ?? 1) * durationScale)),
+    }
+  })
 
 const buildTemplateVariant = ({ id, name, build_days, durationScale }) => ({
   id,
