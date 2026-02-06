@@ -11143,6 +11143,10 @@ function OfflineStatusModal({
     return 'Idle'
   })()
 
+  const conflictPolicyText = syncV2Enabled
+    ? 'Sync v2: Conflicts are detected. Server rejects edits when the item changed on another device (no silent overwrite). Your edit stays queued locally until you refresh/retry.'
+    : 'Snapshot sync: Last write wins. If the same item is edited on two devices, the most recent sync overwrites earlier edits.'
+
   return (
     <Modal
       title={isOnline ? 'Sync Status' : '📴 You\u2019re Offline'}
@@ -11222,7 +11226,7 @@ function OfflineStatusModal({
         <Card className="bg-blue-50 border-blue-200">
           <p className="text-sm font-semibold text-blue-900">Conflict Policy</p>
           <p className="text-xs text-blue-800 mt-1">
-            Last write wins. If the same item is edited on two devices, the most recent sync overwrites earlier edits.
+            {conflictPolicyText}
           </p>
         </Card>
 
