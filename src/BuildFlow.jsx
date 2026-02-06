@@ -1785,11 +1785,16 @@ export default function BuildFlow() {
 
   useEffect(() => {
     if (!syncV2Enabled) return
-    if (!supabaseUser?.id || supabaseStatus.phase !== 'ready' || !isOnline) return
+    if (!supabaseUser?.id || supabaseStatus.phase !== 'ready') return
 
     let cancelled = false
     let timer = null
     let inFlight = false
+
+    const looksLikeNetworkError = (err) => {
+      const msg = String(err?.message ?? err ?? '').toLowerCase()
+      return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('fetch failed')
+    }
 
     const scheduleNext = (ms) => {
       if (cancelled) return
@@ -1830,6 +1835,8 @@ export default function BuildFlow() {
               error: msg,
             }))
 
+            if (!missing && looksLikeNetworkError(pushRes.error)) setIsOnline(false)
+
             // Retry later (unless missing RPCs; then back off longer).
             const delayMs = missing ? 60000 : 8000
             for (const op of due) {
@@ -1844,6 +1851,7 @@ export default function BuildFlow() {
           }
 
           await outboxAck(due.map((op) => op.id))
+          setIsOnline(true)
           setSyncV2Status((prev) => ({ ...prev, last_pushed_at: pushRes.server_time ?? new Date().toISOString() }))
         }
 
@@ -1860,10 +1868,12 @@ export default function BuildFlow() {
             warning: pullRes.missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
             error: msg,
           }))
+          if (!pullRes.missing && looksLikeNetworkError(pullRes.error)) setIsOnline(false)
           scheduleNext(pullRes.missing ? 60000 : 12000)
           return
         }
 
+        setIsOnline(true)
         const serverTime = pullRes.server_time ?? startedAt
 
         // Avoid clobbering local, un-acked edits. Until we have a real conflict UX,
@@ -1956,6 +1966,7 @@ export default function BuildFlow() {
       } catch (err) {
         const msg = String(err?.message ?? 'Sync v2 failed')
         setSyncV2Status((prev) => ({ ...prev, phase: 'error', error: msg }))
+        if (looksLikeNetworkError(err)) setIsOnline(false)
         scheduleNext(12000)
       } finally {
         inFlight = false
@@ -1968,7 +1979,7 @@ export default function BuildFlow() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase, isOnline])
+  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase])
 
   const pendingSyncOps = app.sync?.pending ?? []
   const pendingSyncCount = pendingSyncOps.length
