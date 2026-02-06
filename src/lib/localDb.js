@@ -205,6 +205,60 @@ export const outboxList = async () => {
   return Array.isArray(value) ? value : []
 }
 
+export const outboxListV2Due = async ({ nowIso = null, limit = 10 } = {}) => {
+  const now = nowIso ?? new Date().toISOString()
+  const all = await outboxList()
+  const due = all
+    .filter((op) => op && op.v2 === true)
+    .filter((op) => {
+      if (!op.next_retry_at) return true
+      return String(op.next_retry_at) <= String(now)
+    })
+    .sort((a, b) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')))
+  return due.slice(0, Math.max(1, Number(limit ?? 10) || 10))
+}
+
+export const outboxMarkFailed = async (id, { error, delayMs = 5000 } = {}) => {
+  if (!id) return
+  const now = Date.now()
+  const nextRetryAt = new Date(now + Math.max(250, Number(delayMs) || 0)).toISOString()
+  const errorAt = new Date(now).toISOString()
+  await outboxUpdate(id, {
+    attempts: (Number.isFinite(Number(error?.attempts)) ? Number(error.attempts) : undefined),
+    last_error: String(error?.message ?? error ?? ''),
+    last_error_at: errorAt,
+    next_retry_at: nextRetryAt,
+  })
+}
+
+export const outboxMarkAttempt = async (id, { attempts, lastError } = {}) => {
+  if (!id) return
+  const errorAt = new Date().toISOString()
+  await outboxUpdate(id, {
+    attempts: Number.isFinite(Number(attempts)) ? Number(attempts) : undefined,
+    last_error: lastError ? String(lastError) : '',
+    last_error_at: lastError ? errorAt : null,
+  })
+}
+
+export const outboxAck = async (ids) => {
+  const list = Array.isArray(ids) ? ids : ids ? [ids] : []
+  await Promise.allSettled(list.map((id) => outboxDelete(id)))
+}
+
+const SYNC_V2_CURSOR_META_KEY = 'sync:v2:cursor'
+
+export const getSyncV2Cursor = async () => {
+  const value = await metaGet(SYNC_V2_CURSOR_META_KEY)
+  const iso = typeof value === 'string' ? value : value?.cursor
+  return iso ? String(iso) : null
+}
+
+export const setSyncV2Cursor = async (cursorIso) => {
+  if (!cursorIso) return
+  await metaSet(SYNC_V2_CURSOR_META_KEY, String(cursorIso))
+}
+
 export const outboxUpdate = async (id, patch) => {
   if (!id) return
   const db = await openLocalDb()

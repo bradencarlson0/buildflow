@@ -87,7 +87,9 @@ import {
   startLotFromTemplate,
 } from './lib/scheduleEngine.js'
 import { deleteBlob, getBlob, putBlob } from './lib/idb.js'
-import { ensureImportedFromSnapshotV1, outboxEnqueue } from './lib/localDb.js'
+import { ensureImportedFromSnapshotV1, outboxAck, outboxEnqueue, outboxList, outboxListV2Due, outboxUpdate, getSyncV2Cursor, setSyncV2Cursor } from './lib/localDb.js'
+import { isSyncV2Enabled, writeFlag } from './lib/flags.js'
+import { syncV2Pull, syncV2Push } from './lib/syncV2.js'
 import { uuid } from './lib/uuid.js'
 import { supabase } from './lib/supabaseClient.js'
 
@@ -466,6 +468,37 @@ const lotCode = (lot) => {
   return block ? `${block}-${lotNumber}` : `Lot ${lotNumber}`
 }
 
+const parseLotNumberKey = (value) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) return { hasNum: false, num: null, suffix: '', raw: '' }
+  const m = raw.match(/(\d+)/)
+  if (!m) return { hasNum: false, num: null, suffix: '', raw: raw.toLowerCase() }
+  const num = Number.parseInt(m[1], 10)
+  const suffix = raw.replace(m[1], '').trim().toLowerCase()
+  return { hasNum: Number.isFinite(num), num: Number.isFinite(num) ? num : null, suffix, raw: raw.toLowerCase() }
+}
+
+const compareLotNumbers = (a, b) => {
+  const ka = parseLotNumberKey(a)
+  const kb = parseLotNumberKey(b)
+  if (ka.hasNum && kb.hasNum) {
+    if (ka.num !== kb.num) return ka.num - kb.num
+    const suffixCmp = ka.suffix.localeCompare(kb.suffix)
+    if (suffixCmp) return suffixCmp
+    return ka.raw.localeCompare(kb.raw)
+  }
+  if (ka.hasNum !== kb.hasNum) return ka.hasNum ? -1 : 1
+  return ka.raw.localeCompare(kb.raw)
+}
+
+const compareCommunityLots = (a, b) => {
+  const blockCmp = String(a?.block ?? '').localeCompare(String(b?.block ?? ''), undefined, { numeric: true, sensitivity: 'base' })
+  if (blockCmp) return blockCmp
+  const numCmp = compareLotNumbers(a?.lot_number, b?.lot_number)
+  if (numCmp) return numCmp
+  return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
+}
+
 const tintHex = (hex, alpha = '22') => (/^#[0-9a-fA-F]{6}$/.test(hex) ? `${hex}${alpha}` : hex)
 
 const csvEscape = (value) => {
@@ -623,7 +656,7 @@ const mapTaskFromSupabase = (taskRow) => {
   return {
     ...rest,
     duration: Math.max(1, Number(taskRow?.duration ?? 1) || 1),
-    sort_order: Number.isFinite(Number(taskRow?.sort_order)) ? Number(taskRow.sort_order) : 0,
+    sort_order: Number.isFinite(Number(taskRow?.sort_order)) ? Math.trunc(Number(taskRow.sort_order)) : 0,
   }
 }
 
@@ -787,7 +820,7 @@ const mapTaskToSupabase = (row, lotId, orgId) => ({
   track: row?.track ?? 'foundation',
   phase: row?.phase ?? 'foundation',
   duration: Math.max(1, Number(row?.duration ?? 1) || 1),
-  sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : 0,
+  sort_order: Number.isFinite(Number(row?.sort_order)) ? Math.trunc(Number(row.sort_order)) : 0,
   status: row?.status ?? 'not_started',
   scheduled_start: row?.scheduled_start ?? null,
   scheduled_end: row?.scheduled_end ?? null,
@@ -1047,6 +1080,14 @@ export default function BuildFlow() {
   const [writeSyncState, setWriteSyncState] = useState({
     phase: 'idle',
     lastSyncedAt: null,
+    error: '',
+  })
+  const [syncV2Enabled, setSyncV2Enabled] = useState(() => isSyncV2Enabled())
+  const [syncV2Status, setSyncV2Status] = useState({
+    phase: 'idle',
+    last_pulled_at: null,
+    last_pushed_at: null,
+    warning: '',
     error: '',
   })
   const [cloudRetryTick, setCloudRetryTick] = useState(0)
@@ -1708,6 +1749,7 @@ export default function BuildFlow() {
   }
 
   useEffect(() => {
+    if (syncV2Enabled) return
     if (!supabaseUser?.id || !supabaseStatus.orgId || supabaseStatus.phase === 'loading') return
 
     const built = buildCloudPayload()
@@ -1739,7 +1781,194 @@ export default function BuildFlow() {
       setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
       setCloudRetryTick((prev) => prev + 1)
     }
-  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase])
+  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase, syncV2Enabled])
+
+  useEffect(() => {
+    if (!syncV2Enabled) return
+    if (!supabaseUser?.id || supabaseStatus.phase !== 'ready' || !isOnline) return
+
+    let cancelled = false
+    let timer = null
+    let inFlight = false
+
+    const scheduleNext = (ms) => {
+      if (cancelled) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => tick(), Math.max(350, Number(ms) || 0))
+    }
+
+    const tick = async () => {
+      if (cancelled) return
+      if (inFlight) return
+      inFlight = true
+
+      const startedAt = new Date().toISOString()
+      setSyncV2Status((prev) => ({ ...prev, phase: 'syncing', error: '', warning: prev.warning }))
+
+      try {
+        // Push due ops (durable outbox)
+        const due = await outboxListV2Due({ limit: 5 })
+        if (cancelled) return
+
+        if (due.length > 0) {
+          // Mark attempt + exponential backoff on errors.
+          for (const op of due) {
+            const attempts = (Number(op?.attempts ?? 0) || 0) + 1
+            await outboxUpdate(op.id, { attempts, last_error: '', last_error_at: null })
+          }
+
+          const pushRes = await syncV2Push({ supabase, ops: due })
+          if (cancelled) return
+
+          if (!pushRes.ok) {
+            const msg = String(pushRes.error?.message ?? 'sync_push failed')
+            const missing = Boolean(pushRes.missing)
+            setSyncV2Status((prev) => ({
+              ...prev,
+              phase: 'error',
+              warning: missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
+              error: msg,
+            }))
+
+            // Retry later (unless missing RPCs; then back off longer).
+            const delayMs = missing ? 60000 : 8000
+            for (const op of due) {
+              const attempts = Number(op?.attempts ?? 0) || 0
+              const backoff = Math.min(300000, delayMs * Math.pow(2, Math.max(0, attempts - 1)))
+              const nextRetryAt = new Date(Date.now() + backoff).toISOString()
+              await outboxUpdate(op.id, { last_error: msg, last_error_at: new Date().toISOString(), next_retry_at: nextRetryAt })
+            }
+
+            scheduleNext(missing ? 60000 : 10000)
+            return
+          }
+
+          await outboxAck(due.map((op) => op.id))
+          setSyncV2Status((prev) => ({ ...prev, last_pushed_at: pushRes.server_time ?? new Date().toISOString() }))
+        }
+
+        // Pull incremental changes
+        const cursor = await getSyncV2Cursor()
+        const pullRes = await syncV2Pull({ supabase, since: cursor })
+        if (cancelled) return
+
+        if (!pullRes.ok) {
+          const msg = String(pullRes.error?.message ?? 'sync_pull failed')
+          setSyncV2Status((prev) => ({
+            ...prev,
+            phase: 'error',
+            warning: pullRes.missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
+            error: msg,
+          }))
+          scheduleNext(pullRes.missing ? 60000 : 12000)
+          return
+        }
+
+        const serverTime = pullRes.server_time ?? startedAt
+
+        // Avoid clobbering local, un-acked edits. Until we have a real conflict UX,
+        // we skip applying server rows for entities that are referenced by pending v2 ops.
+        const blockedTaskIds = new Set()
+        const blockedLotIds = new Set()
+        try {
+          const allOps = await outboxList()
+          for (const op of allOps) {
+            if (!op || op.v2 !== true) continue
+            if (op?.lot_id) blockedLotIds.add(op.lot_id)
+            for (const id of Array.isArray(op.entity_ids) ? op.entity_ids : []) {
+              if (id) blockedTaskIds.add(id)
+            }
+            const payloadTasks = Array.isArray(op?.payload?.tasks) ? op.payload.tasks : []
+            for (const t of payloadTasks) {
+              const id = t?.id
+              if (id) blockedTaskIds.add(id)
+            }
+          }
+        } catch {
+          // ignore; best-effort only
+        }
+
+        // Merge rows into app state (best-effort; v2 conflict UX is future work).
+        setApp((prev) => {
+          const lots = Array.isArray(prev.lots) ? prev.lots : []
+          const tasksByLotId = new Map()
+          for (const taskRow of pullRes.tasks ?? []) {
+            const lotId = taskRow?.lot_id
+            if (!lotId) continue
+            const mappedTask = mapTaskFromSupabase(taskRow)
+            if (mappedTask?.id && blockedTaskIds.has(mappedTask.id)) continue
+            const list = tasksByLotId.get(lotId) ?? []
+            list.push(mappedTask)
+            tasksByLotId.set(lotId, list)
+          }
+
+          const nextLots = lots.map((lot) => {
+            const lotRow = blockedLotIds.has(lot.id) ? null : (pullRes.lots ?? []).find((r) => r?.id === lot.id) ?? null
+            const incomingTasks = tasksByLotId.get(lot.id) ?? null
+            if (!lotRow && !incomingTasks) return lot
+
+            const nextLotBase = lotRow ? mapLotFromSupabase(lotRow, lot.tasks ?? []) : lot
+            if (!incomingTasks) return { ...nextLotBase, tasks: lot.tasks ?? [] }
+
+            const currentTasks = Array.isArray(nextLotBase.tasks) ? nextLotBase.tasks : []
+            const currentById = new Map(currentTasks.map((t) => [t.id, t]))
+            for (const t of incomingTasks) {
+              if (!t?.id) continue
+              if (t.deleted_at) {
+                currentById.delete(t.id)
+              } else {
+                currentById.set(t.id, t)
+              }
+            }
+
+            const mergedTasks = Array.from(currentById.values()).slice().sort((a, b) => (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0))
+            return { ...nextLotBase, tasks: mergedTasks }
+          })
+
+          const knownLotIds = new Set(nextLots.map((l) => l.id))
+          for (const lotRow of pullRes.lots ?? []) {
+            if (!lotRow?.id || knownLotIds.has(lotRow.id)) continue
+            if (blockedLotIds.has(lotRow.id)) continue
+            const incomingTasks = tasksByLotId.get(lotRow.id) ?? []
+            const base = mapLotFromSupabase(lotRow, incomingTasks)
+            const mergedTasks = (base.tasks ?? []).filter((t) => !t?.deleted_at).slice().sort((a, b) => (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0))
+            nextLots.push({ ...base, tasks: mergedTasks })
+          }
+
+          const nextAssignments = pullRes.lot_assignments ?? null
+          const nextSync = {
+            ...(prev.sync ?? {}),
+            v2_last_pulled_at: serverTime,
+          }
+
+          return {
+            ...prev,
+            lots: nextLots,
+            lot_assignments: Array.isArray(nextAssignments) ? nextAssignments : prev.lot_assignments,
+            sync: nextSync,
+          }
+        })
+
+        await setSyncV2Cursor(serverTime)
+        setSyncV2Status((prev) => ({ ...prev, phase: 'ready', last_pulled_at: serverTime, error: '', warning: prev.warning }))
+
+        scheduleNext(4500)
+      } catch (err) {
+        const msg = String(err?.message ?? 'Sync v2 failed')
+        setSyncV2Status((prev) => ({ ...prev, phase: 'error', error: msg }))
+        scheduleNext(12000)
+      } finally {
+        inFlight = false
+      }
+    }
+
+    tick()
+
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase, isOnline])
 
   const pendingSyncOps = app.sync?.pending ?? []
   const pendingSyncCount = pendingSyncOps.length
@@ -1799,6 +2028,7 @@ export default function BuildFlow() {
   }, [cloudQueue, cloudRetryTick])
 
   useEffect(() => {
+    if (syncV2Enabled) return
     if (!supabaseUser?.id || supabaseStatus.phase !== 'ready' || !isOnline) return
     if (cloudQueue.length === 0) return
     if (supabaseWriteInFlightRef.current) return
@@ -1886,7 +2116,7 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [cloudQueue, supabaseUser?.id, supabaseStatus.phase, isOnline, cloudRetryTick])
+  }, [cloudQueue, supabaseUser?.id, supabaseStatus.phase, isOnline, cloudRetryTick, syncV2Enabled])
 
   useEffect(() => {
     const onOnline = () => {
@@ -2097,6 +2327,130 @@ export default function BuildFlow() {
     }))
 
     return op.id
+  }
+
+  const buildV2TaskSchedulePatch = (prevTask, nextTask) => {
+    if (!prevTask || !nextTask) return null
+    const patch = {}
+    if ((Number(prevTask.duration ?? 0) || 0) !== (Number(nextTask.duration ?? 0) || 0)) patch.duration = Math.max(1, Number(nextTask.duration ?? 1) || 1)
+    if ((Number(prevTask.sort_order ?? 0) || 0) !== (Number(nextTask.sort_order ?? 0) || 0)) patch.sort_order = Number.isFinite(Number(nextTask.sort_order)) ? Math.trunc(Number(nextTask.sort_order)) : 0
+    if (String(prevTask.scheduled_start ?? '') !== String(nextTask.scheduled_start ?? '')) patch.scheduled_start = nextTask.scheduled_start ?? null
+    if (String(prevTask.scheduled_end ?? '') !== String(nextTask.scheduled_end ?? '')) patch.scheduled_end = nextTask.scheduled_end ?? null
+    if (String(prevTask.delay_reason ?? '') !== String(nextTask.delay_reason ?? '')) patch.delay_reason = nextTask.delay_reason ?? null
+    if ((Number(prevTask.delay_days ?? 0) || 0) !== (Number(nextTask.delay_days ?? 0) || 0)) patch.delay_days = Number.isFinite(Number(nextTask.delay_days)) ? Number(nextTask.delay_days) : 0
+    return Object.keys(patch).length > 0 ? patch : null
+  }
+
+  // Sync v2 lot updates are intentionally scoped to "start lot" and other schedule-impacting
+  // fields. We avoid sending full lot rows (which contain large arrays like photos/docs) to
+  // prevent accidental clobbering while v2 is still being rolled out.
+  const buildV2LotPatch = (prevLot, nextLot) => {
+    if (!prevLot || !nextLot) return null
+    const patch = {}
+
+    const same = (a, b) => String(a ?? '') === String(b ?? '')
+    const sameNum = (a, b) => (Number(a ?? 0) || 0) === (Number(b ?? 0) || 0)
+
+    if (!same(prevLot.status, nextLot.status)) patch.status = nextLot.status ?? 'not_started'
+    if (!same(prevLot.start_date, nextLot.start_date)) patch.start_date = nextLot.start_date ?? null
+    if (!same(prevLot.plan_id, nextLot.plan_id)) patch.plan_id = nextLot.plan_id ?? null
+    if (!same(prevLot.job_number, nextLot.job_number)) patch.job_number = nextLot.job_number ?? ''
+    if (!same(prevLot.address, nextLot.address)) patch.address = nextLot.address ?? ''
+    if (!same(prevLot.permit_number, nextLot.permit_number)) patch.permit_number = nextLot.permit_number ?? null
+    if (!same(prevLot.hard_deadline, nextLot.hard_deadline)) patch.hard_deadline = nextLot.hard_deadline ?? null
+    if (!same(prevLot.model_type, nextLot.model_type)) patch.model_type = nextLot.model_type ?? ''
+    if (!sameNum(prevLot.build_days, nextLot.build_days)) patch.build_days = Math.max(1, Number(nextLot.build_days ?? 1) || 1)
+    if (!same(prevLot.target_completion_date, nextLot.target_completion_date)) patch.target_completion_date = nextLot.target_completion_date ?? null
+    if (!same(prevLot.actual_completion_date, nextLot.actual_completion_date)) patch.actual_completion_date = nextLot.actual_completion_date ?? null
+
+    // Treat custom_fields as an atomic JSON blob for now (patch only if reference/shape changed).
+    const prevCustom = prevLot.custom_fields ?? {}
+    const nextCustom = nextLot.custom_fields ?? {}
+    if (JSON.stringify(prevCustom) !== JSON.stringify(nextCustom)) patch.custom_fields = nextCustom
+
+    return Object.keys(patch).length > 0 ? patch : null
+  }
+
+  const buildV2TasksBatchOp = ({ lotId, prevLot, nextLot, includeLotRow = false }) => {
+    if (!syncV2Enabled) return null
+    const userId = supabaseUser?.id ?? app?.sync?.supabase_user_id ?? null
+    const orgId = supabaseStatus?.orgId ?? app?.sync?.supabase_org_id ?? null
+    if (!userId || !orgId) return null
+    if (!prevLot || !nextLot) return null
+
+    const prevTasks = Array.isArray(prevLot.tasks) ? prevLot.tasks : []
+    const nextTasks = Array.isArray(nextLot.tasks) ? nextLot.tasks : []
+    const prevById = new Map(prevTasks.map((t) => [t.id, t]))
+    const nextById = new Map(nextTasks.map((t) => [t.id, t]))
+
+    const tasksPayload = []
+
+    for (const nextTask of nextTasks) {
+      if (!nextTask?.id) continue
+      const prevTask = prevById.get(nextTask.id) ?? null
+      if (!prevTask) {
+        // Insert: send full row for required fields.
+        tasksPayload.push({
+          action: 'upsert',
+          id: nextTask.id,
+          base_version: null,
+          row: mapTaskToSupabase(nextTask, lotId, orgId),
+        })
+        continue
+      }
+
+      const patch = buildV2TaskSchedulePatch(prevTask, nextTask)
+      if (!patch) continue
+      tasksPayload.push({
+        action: 'upsert',
+        id: nextTask.id,
+        base_version: Number.isFinite(Number(prevTask.version)) ? Number(prevTask.version) : null,
+        row: patch,
+      })
+    }
+
+    // Deletes: task existed before, missing now.
+    for (const prevTask of prevTasks) {
+      if (!prevTask?.id) continue
+      if (nextById.has(prevTask.id)) continue
+      tasksPayload.push({
+        action: 'delete',
+        id: prevTask.id,
+        base_version: Number.isFinite(Number(prevTask.version)) ? Number(prevTask.version) : null,
+        row: null,
+      })
+    }
+
+    const lotBaseVersion = Number.isFinite(Number(prevLot.version)) ? Number(prevLot.version) : null
+    const lotRow = includeLotRow ? buildV2LotPatch(prevLot, nextLot) : null
+
+    if (tasksPayload.length === 0 && !lotRow) return null
+
+    const opId = uuid()
+    const now = new Date().toISOString()
+
+    const payload = {
+      id: opId,
+      kind: 'tasks_batch',
+      lot_id: lotId,
+      lot_base_version: includeLotRow ? lotBaseVersion : null,
+      lot: lotRow,
+      tasks: tasksPayload,
+    }
+
+    return {
+      id: opId,
+      v2: true,
+      kind: 'tasks_batch',
+      lot_id: lotId,
+      entity_ids: tasksPayload.map((t) => t.id).filter(Boolean),
+      created_at: now,
+      attempts: 0,
+      next_retry_at: null,
+      last_error: '',
+      last_error_at: null,
+      payload,
+    }
   }
 
   const syncNow = () => {
@@ -2564,14 +2918,48 @@ export default function BuildFlow() {
 
   const updateTaskDuration = (lotId, taskId, nextDuration) => {
     void runScheduleEditWithLock(lotId, async () => {
-      updateLot(lotId, (lot) => applyDurationChange(lot, taskId, nextDuration, org))
+      let op = null
+      setApp((prev) => {
+        const nextLots = (prev.lots ?? []).map((lot) => {
+          if (lot.id !== lotId) return lot
+          const nextLot = applyDurationChange(lot, taskId, nextDuration, prev.org)
+          op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot })
+          return nextLot
+        })
+        return { ...prev, lots: nextLots }
+      })
+
+      if (op) {
+        try {
+          await outboxEnqueue(op)
+        } catch {
+          // ignore
+        }
+      }
     })
   }
 
   const updateTaskStartDate = (lotId, taskId, nextStartIso) => {
     if (!nextStartIso) return
     void runScheduleEditWithLock(lotId, async () => {
-      updateLot(lotId, (lot) => applyManualStartDate(lot, taskId, nextStartIso, org))
+      let op = null
+      setApp((prev) => {
+        const nextLots = (prev.lots ?? []).map((lot) => {
+          if (lot.id !== lotId) return lot
+          const nextLot = applyManualStartDate(lot, taskId, nextStartIso, prev.org)
+          op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot })
+          return nextLot
+        })
+        return { ...prev, lots: nextLots }
+      })
+
+      if (op) {
+        try {
+          await outboxEnqueue(op)
+        } catch {
+          // ignore
+        }
+      }
     })
   }
 
@@ -2620,42 +3008,56 @@ export default function BuildFlow() {
   }
 
   const deleteLotTask = (lotId, taskId, taskName = '') => {
-    setApp((prev) => {
-      const now = new Date().toISOString()
-      const nextLots = (prev.lots ?? []).map((lot) => {
-        if (lot.id !== lotId) return lot
-        const target = (lot.tasks ?? []).find((t) => t.id === taskId) ?? null
-        const baseLot = { ...lot, tasks: (lot.tasks ?? []).map((t) => ({ ...t })) }
-        const nextLot = target && isBufferTask(target) ? removeBufferTask(baseLot, taskId, prev.org) : baseLot
-        const nextTasks = refreshReadyStatuses((nextLot.tasks ?? []).filter((t) => t.id !== taskId))
-        return { ...lot, tasks: nextTasks, updated_at: now }
+    void runScheduleEditWithLock(lotId, async () => {
+      let op = null
+
+      setApp((prev) => {
+        const now = new Date().toISOString()
+        const nextLots = (prev.lots ?? []).map((lot) => {
+          if (lot.id !== lotId) return lot
+          const target = (lot.tasks ?? []).find((t) => t.id === taskId) ?? null
+          const baseLot = { ...lot, tasks: (lot.tasks ?? []).map((t) => ({ ...t })) }
+          const intermediate = target && isBufferTask(target) ? removeBufferTask(baseLot, taskId, prev.org) : baseLot
+          const nextTasks = refreshReadyStatuses((intermediate.tasks ?? []).filter((t) => t.id !== taskId))
+          const nextLot = { ...intermediate, tasks: nextTasks, updated_at: now }
+          op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot })
+          return nextLot
+        })
+
+        const prevSync = prev.sync ?? {}
+        const deleted = new Set(coerceArray(prevSync.deleted_task_ids))
+        deleted.add(taskId)
+
+        return {
+          ...prev,
+          lots: nextLots,
+          sync: {
+            ...prevSync,
+            deleted_task_ids: Array.from(deleted),
+          },
+        }
       })
 
-      const prevSync = prev.sync ?? {}
-      const deleted = new Set(coerceArray(prevSync.deleted_task_ids))
-      deleted.add(taskId)
+      setSelectedScheduleTaskIds((prev) => prev.filter((id) => id !== taskId))
 
-      return {
-        ...prev,
-        lots: nextLots,
-        sync: {
-          ...prevSync,
-          deleted_task_ids: Array.from(deleted),
-        },
+      if (op) {
+        try {
+          await outboxEnqueue(op)
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!syncV2Enabled && !isOnline) {
+        enqueueSyncOp({
+          type: 'task_delete',
+          lot_id: lotId,
+          entity_type: 'task',
+          entity_id: taskId,
+          summary: `Task deleted${taskName ? ` (${taskName})` : ''}`,
+        })
       }
     })
-
-    setSelectedScheduleTaskIds((prev) => prev.filter((id) => id !== taskId))
-
-    if (!isOnline) {
-      enqueueSyncOp({
-        type: 'task_delete',
-        lot_id: lotId,
-        entity_type: 'task',
-        entity_id: taskId,
-        summary: `Task deleted${taskName ? ` (${taskName})` : ''}`,
-      })
-    }
   }
 
   const buildParallelCascadePlan = (lot, taskIds) => {
@@ -2753,9 +3155,6 @@ export default function BuildFlow() {
 
   const applyParallelizeSelection = async ({ lot, taskIds }) => {
     if (!lot || taskIds.length === 0) return
-    const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
-    if (!canEdit) return
-
     const reason = 'Parallelized tasks'
     const community = communitiesById.get(lot.community_id) ?? null
     const plan = buildParallelCascadePlan(lot, taskIds)
@@ -2765,23 +3164,51 @@ export default function BuildFlow() {
     }
 
     const impacted = plan.impacted ?? []
-    updateLot(lot.id, (current) => {
-      const now = new Date().toISOString()
-      const changes = impacted.map((a) => ({
-        id: uuid(),
-        task_id: a.task_id,
-        old_start: a.old_start,
-        new_start: a.new_start,
-        reason,
-        notified: true,
-        changed_at: now,
-      }))
-      return {
-        ...current,
-        tasks: plan.tasks,
-        schedule_changes: [...(current.schedule_changes ?? []), ...changes],
+    const ok = await runScheduleEditWithLock(lot.id, async () => {
+      let op = null
+      setApp((prev) => {
+        const nextLots = (prev.lots ?? []).map((current) => {
+          if (current.id !== lot.id) return current
+          const now = new Date().toISOString()
+          const changes = impacted.map((a) => ({
+            id: uuid(),
+            task_id: a.task_id,
+            old_start: a.old_start,
+            new_start: a.new_start,
+            reason,
+            notified: true,
+            changed_at: now,
+          }))
+          const nextLot = {
+            ...current,
+            tasks: plan.tasks,
+            schedule_changes: [...(current.schedule_changes ?? []), ...changes],
+          }
+          op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: current, nextLot })
+          return nextLot
+        })
+        return { ...prev, lots: nextLots }
+      })
+
+      if (op) {
+        try {
+          await outboxEnqueue(op)
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!syncV2Enabled && !isOnline) {
+        enqueueSyncOp({
+          type: 'task_dates',
+          lot_id: lot.id,
+          entity_type: 'task',
+          entity_id: taskIds[0] ?? '',
+          summary: `Parallelized ${taskIds.length} task(s) (${lotCode(lot)})`,
+        })
       }
     })
+    if (!ok) return
 
     if (impacted.length > 0) {
       pushNotification({
@@ -2800,16 +3227,6 @@ export default function BuildFlow() {
         changeReason: reason,
       })
       addMessages(messages)
-    }
-
-    if (!isOnline) {
-      enqueueSyncOp({
-        type: 'task_dates',
-        lot_id: lot.id,
-        entity_type: 'task',
-        entity_id: taskIds[0] ?? '',
-        summary: `Parallelized ${taskIds.length} task(s) (${lotCode(lot)})`,
-      })
     }
 
     clearScheduleSelection()
@@ -3024,7 +3441,24 @@ export default function BuildFlow() {
     const dropId = listDropTaskId
     if (dropId && dropId !== task.id && selectedLot) {
       await runScheduleEditWithLock(selectedLot.id, async () => {
-        updateLot(selectedLot.id, (current) => applyListReorder(current, task.id, dropId, org))
+        let op = null
+        setApp((prev) => {
+          const nextLots = (prev.lots ?? []).map((lot) => {
+            if (lot.id !== selectedLot.id) return lot
+            const nextLot = applyListReorder(lot, task.id, dropId, prev.org)
+            op = buildV2TasksBatchOp({ lotId: selectedLot.id, prevLot: lot, nextLot })
+            return nextLot
+          })
+          return { ...prev, lots: nextLots }
+        })
+
+        if (op) {
+          try {
+            await outboxEnqueue(op)
+          } catch {
+            // ignore
+          }
+        }
       })
     }
     if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(6)
@@ -4561,31 +4995,45 @@ export default function BuildFlow() {
     const community = communitiesById.get(lot.community_id) ?? null
     const impacted = (computed.affected ?? []).filter((a) => a.old_start !== a.new_start)
 
-    updateLot(lot.id, (current) => {
-      const now = new Date().toISOString()
-      const nextTasks = refreshReadyStatuses((current.tasks ?? []).map((t) => {
-        const hit = affectedById.get(t.id)
-        if (!hit) return t
-        return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
-      }))
-      const currentTask = (current.tasks ?? []).find((t) => t.id === task.id) ?? task
-      return {
-        ...current,
-        tasks: nextTasks,
-        schedule_changes: [
-          ...(current.schedule_changes ?? []),
-          {
-            id: uuid(),
-            task_id: task.id,
-            old_start: currentTask.scheduled_start,
-            new_start: normalizedDate,
-            reason: reason?.trim() || null,
-            notified: Boolean(notifySubs),
-            changed_at: now,
-          },
-        ],
-      }
+    let op = null
+    setApp((prev) => {
+      const nextLots = (prev.lots ?? []).map((l) => {
+        if (l.id !== lot.id) return l
+        const now = new Date().toISOString()
+        const nextTasks = refreshReadyStatuses((l.tasks ?? []).map((t) => {
+          const hit = affectedById.get(t.id)
+          if (!hit) return t
+          return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
+        }))
+        const currentTask = (l.tasks ?? []).find((t) => t.id === task.id) ?? task
+        const nextLot = {
+          ...l,
+          tasks: nextTasks,
+          schedule_changes: [
+            ...(l.schedule_changes ?? []),
+            {
+              id: uuid(),
+              task_id: task.id,
+              old_start: currentTask.scheduled_start,
+              new_start: normalizedDate,
+              reason: reason?.trim() || null,
+              notified: Boolean(notifySubs),
+              changed_at: now,
+            },
+          ],
+        }
+
+        op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: l, nextLot })
+        return nextLot
+      })
+      return { ...prev, lots: nextLots }
     })
+
+    if (op) {
+      void Promise.resolve()
+        .then(() => outboxEnqueue(op))
+        .catch(() => {})
+    }
 
     pushNotification({
       type: 'schedule_change',
@@ -5208,6 +5656,77 @@ export default function BuildFlow() {
       return { lot_id: lot.id }
     })
     setShowStartLot(true)
+  }
+
+  const unstartLot = async (lotId) => {
+    const lot = lotId ? lotsById.get(lotId) : null
+    if (!lot) return
+    if (!isOnline) {
+      alert('Unstart requires a connection right now.')
+      return
+    }
+
+    if (syncV2Enabled) {
+      const missingVersions = (lot.tasks ?? []).some((t) => !Number.isFinite(Number(t?.version)))
+      if (missingVersions) {
+        alert('Sync v2: this lot has tasks without server versions yet. Let sync finish, then retry unstart.')
+        return
+      }
+    }
+
+    const okConfirm =
+      typeof window === 'undefined'
+        ? false
+        : window.confirm(
+            `Reset ${lotCode(lot)} back to Not Started?\n\nThis will remove the schedule tasks and inspections for this lot.`,
+          )
+    if (!okConfirm) return
+
+    await runScheduleEditWithLock(lotId, async () => {
+      let op = null
+      setApp((prev) => {
+        const now = new Date().toISOString()
+        const prevSync = prev.sync ?? {}
+        const deleted = new Set(coerceArray(prevSync.deleted_task_ids))
+
+        const nextLots = (prev.lots ?? []).map((l) => {
+          if (l.id !== lotId) return l
+          for (const t of l.tasks ?? []) {
+            if (t?.id) deleted.add(t.id)
+          }
+          const nextLot = {
+            ...l,
+            status: 'not_started',
+            start_date: null,
+            target_completion_date: null,
+            actual_completion_date: null,
+            tasks: [],
+            inspections: [],
+            schedule_changes: [],
+            updated_at: now,
+          }
+          op = buildV2TasksBatchOp({ lotId, prevLot: l, nextLot, includeLotRow: true })
+          return nextLot
+        })
+
+        return {
+          ...prev,
+          lots: nextLots,
+          sync: {
+            ...prevSync,
+            deleted_task_ids: Array.from(deleted),
+          },
+        }
+      })
+
+      if (op) {
+        try {
+          await outboxEnqueue(op)
+        } catch {
+          // ignore
+        }
+      }
+    })
   }
 
   const closeStartLot = () => {
@@ -6271,7 +6790,10 @@ export default function BuildFlow() {
                   ) : null}
                   {(selectedCommunity.blocks ?? []).length > 0 ? (
                     (selectedCommunity.blocks ?? []).map((b) => {
-                      const lots = app.lots.filter((l) => l.community_id === selectedCommunity.id && l.block === b.label)
+                      const lots = app.lots
+                        .filter((l) => l.community_id === selectedCommunity.id && l.block === b.label)
+                        .slice()
+                        .sort(compareCommunityLots)
                       return (
                         <div key={b.id}>
                           <p className="text-sm font-semibold text-gray-700 mb-2">Block {b.label}</p>
@@ -6316,6 +6838,8 @@ export default function BuildFlow() {
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
                       {app.lots
                         .filter((l) => l.community_id === selectedCommunity.id)
+                        .slice()
+                        .sort(compareCommunityLots)
                         .map((lot) => {
                           const status =
                             lot.status === 'complete'
@@ -6358,7 +6882,7 @@ export default function BuildFlow() {
                   {app.lots
                     .filter((l) => l.community_id === selectedCommunity.id)
                     .slice()
-                    .sort((a, b) => (a.block || '').localeCompare(b.block || '') || Number(a.lot_number) - Number(b.lot_number))
+                    .sort(compareCommunityLots)
                     .map((lot) => {
                       const pct = lot.status === 'not_started' ? 0 : calculateLotProgress(lot)
                       const statusLabel =
@@ -6404,7 +6928,10 @@ export default function BuildFlow() {
                     { key: 'in_progress', title: 'In Progress' },
                     { key: 'complete', title: 'Complete' },
                   ].map((col) => {
-                    const lots = app.lots.filter((l) => l.community_id === selectedCommunity.id && l.status === col.key)
+                    const lots = app.lots
+                      .filter((l) => l.community_id === selectedCommunity.id && l.status === col.key)
+                      .slice()
+                      .sort(compareCommunityLots)
                     return (
                       <div key={col.key} className="bg-gray-50 rounded-xl border border-gray-200 p-3">
                         <p className="font-semibold text-gray-800 mb-2">
@@ -6713,7 +7240,22 @@ export default function BuildFlow() {
                   >
                     Start Lot
                   </button>
-                ) : null}
+                ) : (
+                  <button
+                    onClick={() => unstartLot(selectedLot.id)}
+                    className="bg-white border border-red-200 text-red-700 px-3 py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
+                    disabled={!isOnline || !canEditLot(selectedLot.id)}
+                    title={
+                      !isOnline
+                        ? 'Requires connection'
+                        : !canEditLot(selectedLot.id)
+                          ? 'Claim this lot to edit schedules'
+                          : 'Reset lot back to Not Started'
+                    }
+                  >
+                    Unstart
+                  </button>
+                )}
               </div>
 
               {selectedLot.status !== 'not_started' ? (
@@ -8229,6 +8771,12 @@ export default function BuildFlow() {
           cloudLastError={cloudLastError}
           cloudLastErrorAt={cloudLastErrorAt}
           cloudNextRetryAt={cloudNextRetryAt}
+          syncV2Enabled={syncV2Enabled}
+          syncV2Status={syncV2Status}
+          onToggleSyncV2={(next) => {
+            setSyncV2Enabled(Boolean(next))
+            writeFlag('bf:sync_v2', Boolean(next))
+          }}
           onClose={() => setShowOfflineStatus(false)}
           onSyncNow={() => {
             syncNow()
@@ -9153,82 +9701,96 @@ export default function BuildFlow() {
           prefill={startLotPrefill}
           onClose={closeStartLot}
           onStart={async ({ lotId, form, draftTasks }) => {
-            const canEdit = await runScheduleEditWithLock(lotId, async () => {})
-            if (!canEdit) return
+            let startedLot = null
 
-            setApp((prev) => {
-              let startedLot = null
-              const nextLots = prev.lots.map((l) => {
-                if (l.id !== lotId) return l
-                const productType = (prev.product_types ?? []).find((pt) => pt.id === l.product_type_id) ?? null
-                const resolvedTemplate =
-                  productType?.template_id ? (prev.templates ?? []).find((t) => t.id === productType.template_id) ?? null : null
-                const plan = (prev.plans ?? []).find((p) => p.id === form.plan_id) ?? null
-                const next = startLotFromTemplate({
-                  lot: l,
-                  start_date: form.start_date,
-                  model_type: plan?.name ?? l.model_type ?? '',
-                  plan_id: form.plan_id,
-                  job_number: form.job_number,
-                  custom_fields: form.custom_fields,
-                  address: form.address,
-                  permit_number: form.permit_number,
-                  hard_deadline: form.hard_deadline,
-                  template: resolvedTemplate ?? prev.template,
-                  orgSettings: prev.org,
-                  subcontractors: prev.subcontractors,
-                  draftTasks: Array.isArray(draftTasks) ? draftTasks : [],
+            const ok = await runScheduleEditWithLock(lotId, async () => {
+              let op = null
+
+              setApp((prev) => {
+                const nextLots = prev.lots.map((l) => {
+                  if (l.id !== lotId) return l
+                  const productType = (prev.product_types ?? []).find((pt) => pt.id === l.product_type_id) ?? null
+                  const resolvedTemplate =
+                    productType?.template_id ? (prev.templates ?? []).find((t) => t.id === productType.template_id) ?? null : null
+                  const plan = (prev.plans ?? []).find((p) => p.id === form.plan_id) ?? null
+                  const next = startLotFromTemplate({
+                    lot: l,
+                    start_date: form.start_date,
+                    model_type: plan?.name ?? l.model_type ?? '',
+                    plan_id: form.plan_id,
+                    job_number: form.job_number,
+                    custom_fields: form.custom_fields,
+                    address: form.address,
+                    permit_number: form.permit_number,
+                    hard_deadline: form.hard_deadline,
+                    template: resolvedTemplate ?? prev.template,
+                    orgSettings: prev.org,
+                    subcontractors: prev.subcontractors,
+                    draftTasks: Array.isArray(draftTasks) ? draftTasks : [],
+                  })
+                  startedLot = next
+                  op = buildV2TasksBatchOp({ lotId, prevLot: l, nextLot: next, includeLotRow: true })
+                  return next
                 })
-                startedLot = next
-                return next
+
+                const community = startedLot ? (prev.communities ?? []).find((c) => c.id === startedLot.community_id) ?? null : null
+                const tasks = startedLot?.tasks ?? []
+                const bySub = new Map()
+                for (const t of tasks) {
+                  if (!t?.sub_id || !t?.scheduled_start) continue
+                  const prevEntry = bySub.get(t.sub_id)
+                  if (!prevEntry) {
+                    bySub.set(t.sub_id, t)
+                    continue
+                  }
+                  if (String(t.scheduled_start) < String(prevEntry.scheduled_start)) bySub.set(t.sub_id, t)
+                }
+
+                const now = new Date().toISOString()
+                const scheduleMessages = Array.from(bySub.entries()).map(([subId, firstTask]) => {
+                  const sub = (prev.subcontractors ?? []).find((s) => s.id === subId) ?? null
+                  const body = fillTemplate(MESSAGE_TEMPLATES.schedule_notification, {
+                    community: community?.name ?? '',
+                    block: startedLot?.block ?? '',
+                    lot: startedLot?.lot_number ?? '',
+                    sub_name: sub?.company_name ?? '',
+                    task_name: firstTask?.name ?? '',
+                    start_date: formatShortDate(firstTask?.scheduled_start),
+                    end_date: formatShortDate(firstTask?.scheduled_end),
+                    lot_address: startedLot?.address ?? '',
+                    builder_name: prev.org?.builder_name ?? prev.org?.name ?? 'BuildFlow',
+                    super_phone: prev.org?.super_phone ?? '',
+                  })
+
+                  return {
+                    id: uuid(),
+                    lot_id: startedLot?.id ?? null,
+                    task_id: firstTask?.id ?? null,
+                    sub_id: subId,
+                    body,
+                    channels: { sms: true, email: true, app: true },
+                    created_at: now,
+                    status: 'sent',
+                    sent_at: now,
+                    template_id: 'schedule_notification',
+                  }
+                })
+
+                return { ...prev, lots: nextLots, messages: [...(prev.messages ?? []), ...scheduleMessages] }
               })
 
-              const community = startedLot ? (prev.communities ?? []).find((c) => c.id === startedLot.community_id) ?? null : null
-              const tasks = startedLot?.tasks ?? []
-              const bySub = new Map()
-              for (const t of tasks) {
-                if (!t?.sub_id || !t?.scheduled_start) continue
-                const prevEntry = bySub.get(t.sub_id)
-                if (!prevEntry) {
-                  bySub.set(t.sub_id, t)
-                  continue
+              if (op) {
+                try {
+                  await outboxEnqueue(op)
+                } catch {
+                  // ignore
                 }
-                if (String(t.scheduled_start) < String(prevEntry.scheduled_start)) bySub.set(t.sub_id, t)
               }
-
-              const now = new Date().toISOString()
-              const scheduleMessages = Array.from(bySub.entries()).map(([subId, firstTask]) => {
-                const sub = (prev.subcontractors ?? []).find((s) => s.id === subId) ?? null
-                const body = fillTemplate(MESSAGE_TEMPLATES.schedule_notification, {
-                  community: community?.name ?? '',
-                  block: startedLot?.block ?? '',
-                  lot: startedLot?.lot_number ?? '',
-                  sub_name: sub?.company_name ?? '',
-                  task_name: firstTask?.name ?? '',
-                  start_date: formatShortDate(firstTask?.scheduled_start),
-                  end_date: formatShortDate(firstTask?.scheduled_end),
-                  lot_address: startedLot?.address ?? '',
-                  builder_name: prev.org?.builder_name ?? prev.org?.name ?? 'BuildFlow',
-                  super_phone: prev.org?.super_phone ?? '',
-                })
-
-                return {
-                  id: uuid(),
-                  lot_id: startedLot?.id ?? null,
-                  task_id: firstTask?.id ?? null,
-                  sub_id: subId,
-                  body,
-                  channels: { sms: true, email: true, app: true },
-                  created_at: now,
-                  status: 'sent',
-                  sent_at: now,
-                  template_id: 'schedule_notification',
-                }
-              })
-
-              return { ...prev, lots: nextLots, messages: [...(prev.messages ?? []), ...scheduleMessages] }
             })
-            setSelectedCommunityId(lotsById.get(lotId)?.community_id ?? null)
+
+            if (!ok) return
+
+            setSelectedCommunityId(startedLot?.community_id ?? lotsById.get(lotId)?.community_id ?? null)
             setSelectedLotId(lotId)
             setLotDetailTab('schedule')
             setTab('communities')
@@ -9410,9 +9972,22 @@ export default function BuildFlow() {
             onSave={async (task) => {
               const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
               if (!canEdit) return
-              updateLot(lot.id, (current) =>
-                normalizeTrackSortOrderBySchedule({ ...current, tasks: [...(current.tasks ?? []), task] }, task.track),
-              )
+              let op = null
+              setApp((prev) => {
+                const nextLots = (prev.lots ?? []).map((l) => {
+                  if (l.id !== lot.id) return l
+                  const nextLot = normalizeTrackSortOrderBySchedule({ ...l, tasks: [...(l.tasks ?? []), task] }, task.track)
+                  op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: l, nextLot })
+                  return nextLot
+                })
+                return { ...prev, lots: nextLots }
+              })
+
+              if (op) {
+                void Promise.resolve()
+                  .then(() => outboxEnqueue(op))
+                  .catch(() => {})
+              }
               setAddTaskModal(null)
             }}
           />
@@ -9436,7 +10011,22 @@ export default function BuildFlow() {
               const preview = previewDelayImpact(lot, task.id, days, org)
               const affected = (preview.affected ?? []).filter((a) => a.old_start !== a.new_start)
 
-              updateLot(lot.id, (current) => applyDelayCascade(current, task.id, days, reason, notes, org))
+              let op = null
+              setApp((prev) => {
+                const nextLots = (prev.lots ?? []).map((l) => {
+                  if (l.id !== lot.id) return l
+                  const nextLot = applyDelayCascade(l, task.id, days, reason, notes, prev.org)
+                  op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: l, nextLot })
+                  return nextLot
+                })
+                return { ...prev, lots: nextLots }
+              })
+
+              if (op) {
+                void Promise.resolve()
+                  .then(() => outboxEnqueue(op))
+                  .catch(() => {})
+              }
               pushNotification({
                 type: 'delay_logged',
                 title: `Delay Logged - ${communitiesById.get(lot.community_id)?.name ?? ''} ${lotCode(lot)}`,
@@ -9514,59 +10104,97 @@ export default function BuildFlow() {
         const task = lot?.tasks?.find((t) => t.id === bufferModal.task_id) ?? null
         if (!lot || !task) return null
         return (
-          <BufferModal
-            lot={lot}
-            task={task}
-            org={org}
-            onClose={() => setBufferModal(null)}
-            onApply={async ({ days, bufferTaskId }) => {
-              const value = Math.max(1, Number(days) || 1)
-              if (value <= 0) return
-              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
-              if (!canEdit) return
-              updateLot(lot.id, (current) => insertBufferTaskAfter(current, task.id, value, org, { buffer_task_id: bufferTaskId }))
-              if (!isOnline) {
-                enqueueSyncOp({
-                  type: 'task_dates',
-                  lot_id: lot.id,
-                  entity_type: 'task',
-                  entity_id: task.id,
-                  summary: `Buffer inserted (${lotCode(lot)} - ${task.name})`,
+            <BufferModal
+              lot={lot}
+              task={task}
+              org={org}
+              onClose={() => setBufferModal(null)}
+              onApply={async ({ days, bufferTaskId }) => {
+                const value = Math.max(1, Number(days) || 1)
+                if (value <= 0) return
+                const ok = await runScheduleEditWithLock(lot.id, async () => {
+                  let op = null
+                  setApp((prev) => {
+                    const nextLots = (prev.lots ?? []).map((l) => {
+                      if (l.id !== lot.id) return l
+                      const nextLot = insertBufferTaskAfter(l, task.id, value, prev.org, { buffer_task_id: bufferTaskId }) ?? l
+                      op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: l, nextLot })
+                      return nextLot
+                    })
+                    return { ...prev, lots: nextLots }
+                  })
+
+                  if (op) {
+                    try {
+                      await outboxEnqueue(op)
+                    } catch {
+                      // ignore
+                    }
+                  }
+
+                  if (!syncV2Enabled && !isOnline) {
+                    enqueueSyncOp({
+                      type: 'task_dates',
+                      lot_id: lot.id,
+                      entity_type: 'task',
+                      entity_id: task.id,
+                      summary: `Buffer inserted (${lotCode(lot)} - ${task.name})`,
+                    })
+                  }
                 })
-              }
-              setBufferModal(null)
-            }}
-          />
-        )
+                if (!ok) return
+                setBufferModal(null)
+              }}
+            />
+          )
       })()}
 
       {createBufferModal && (() => {
         const lot = lotsById.get(createBufferModal.lot_id) ?? null
         if (!lot) return null
         return (
-          <CreateBufferModal
-            lot={lot}
-            org={org}
-            onClose={() => setCreateBufferModal(null)}
-            onCreate={async ({ anchorTaskId, days, bufferTaskId }) => {
-              const value = Math.max(1, Number(days) || 1)
-              if (!anchorTaskId || value <= 0) return
-              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
-              if (!canEdit) return
-              updateLot(lot.id, (current) => insertBufferTaskAfter(current, anchorTaskId, value, org, { buffer_task_id: bufferTaskId }))
-              if (!isOnline) {
-                enqueueSyncOp({
-                  type: 'task_dates',
-                  lot_id: lot.id,
-                  entity_type: 'task',
-                  entity_id: anchorTaskId,
-                  summary: `Buffer created (${lotCode(lot)})`,
+            <CreateBufferModal
+              lot={lot}
+              org={org}
+              onClose={() => setCreateBufferModal(null)}
+              onCreate={async ({ anchorTaskId, days, bufferTaskId }) => {
+                const value = Math.max(1, Number(days) || 1)
+                if (!anchorTaskId || value <= 0) return
+                const ok = await runScheduleEditWithLock(lot.id, async () => {
+                  let op = null
+                  setApp((prev) => {
+                    const nextLots = (prev.lots ?? []).map((l) => {
+                      if (l.id !== lot.id) return l
+                      const nextLot = insertBufferTaskAfter(l, anchorTaskId, value, prev.org, { buffer_task_id: bufferTaskId }) ?? l
+                      op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: l, nextLot })
+                      return nextLot
+                    })
+                    return { ...prev, lots: nextLots }
+                  })
+
+                  if (op) {
+                    try {
+                      await outboxEnqueue(op)
+                    } catch {
+                      // ignore
+                    }
+                  }
+
+                  if (!syncV2Enabled && !isOnline) {
+                    enqueueSyncOp({
+                      type: 'task_dates',
+                      lot_id: lot.id,
+                      entity_type: 'task',
+                      entity_id: anchorTaskId,
+                      summary: `Buffer created (${lotCode(lot)})`,
+                    })
+                  }
                 })
-              }
-              setCreateBufferModal(null)
-            }}
-          />
-        )
+                if (!ok) return
+                setCreateBufferModal(null)
+              }}
+            />
+          )
       })()}
 
       {scheduleInspectionModal && (() => {
@@ -10476,6 +11104,9 @@ function OfflineStatusModal({
   cloudLastError,
   cloudLastErrorAt,
   cloudNextRetryAt,
+  syncV2Enabled,
+  syncV2Status,
+  onToggleSyncV2,
   onClose,
   onSyncNow,
 }) {
@@ -10498,6 +11129,17 @@ function OfflineStatusModal({
     if (writeSyncState?.phase === 'syncing') return 'Syncing changes...'
     if (writeSyncState?.phase === 'pending') return 'Pending sync'
     if (writeSyncState?.phase === 'synced') return 'Synced'
+    return 'Idle'
+  })()
+
+  const syncV2PhaseLabel = (() => {
+    if (!syncV2Enabled) return 'Disabled'
+    if (!supabaseUser?.id) return 'Disabled (sign in required)'
+    if (!isOnline) return 'Offline (will sync when connected)'
+    const phase = syncV2Status?.phase ?? 'idle'
+    if (phase === 'syncing') return 'Syncing...'
+    if (phase === 'ready') return 'Ready'
+    if (phase === 'error') return `Error: ${syncV2Status?.error || 'sync failed'}`
     return 'Idle'
   })()
 
@@ -10551,6 +11193,32 @@ function OfflineStatusModal({
           ) : null}
           {supabaseStatus?.warning ? <p className="text-xs text-amber-700 mt-1">{supabaseStatus.warning}</p> : null}
         </Card>
+
+        <Card className="bg-gray-50">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold">Sync v2 (Beta)</p>
+              <p className="text-sm text-gray-700 mt-1">{syncV2PhaseLabel}</p>
+              {syncV2Status?.warning ? <p className="text-xs text-amber-700 mt-1">{syncV2Status.warning}</p> : null}
+              {syncV2Enabled && syncV2Status?.last_pulled_at ? (
+                <p className="text-xs text-gray-600 mt-1">Last pull: {formatSyncTimestamp(syncV2Status.last_pulled_at)}</p>
+              ) : null}
+              {syncV2Enabled && syncV2Status?.last_pushed_at ? (
+                <p className="text-xs text-gray-600 mt-1">Last push: {formatSyncTimestamp(syncV2Status.last_pushed_at)}</p>
+              ) : null}
+            </div>
+            <label className="text-sm font-semibold flex items-center gap-2">
+              <input type="checkbox" checked={Boolean(syncV2Enabled)} onChange={(e) => onToggleSyncV2?.(e.target.checked)} />
+              Enabled
+            </label>
+          </div>
+          {syncV2Enabled ? (
+            <p className="text-[11px] text-gray-500 mt-2">
+              Requires Supabase RPCs `sync_push` and `sync_pull` (see `supabase/sql/009_sync_v2_rpc.sql`).
+            </p>
+          ) : null}
+        </Card>
+
         <Card className="bg-blue-50 border-blue-200">
           <p className="text-sm font-semibold text-blue-900">Conflict Policy</p>
           <p className="text-xs text-blue-800 mt-1">
