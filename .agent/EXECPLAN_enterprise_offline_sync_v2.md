@@ -124,13 +124,13 @@ Still to decide:
 - [x] (2026-02-05 23:55Z) Applied `supabase/sql/008_sync_v2_foundations.sql` to Supabase and verified new columns/tables/policies/functions exist.
 - [x] (2026-02-06) Wired `organizations.timezone` + `organizations.is_demo` into client org state; normalized holidays between local `{ date, name }` objects and Supabase `text[]` date strings; added client-side schedule edit lock acquisition + gating for schedule-impacting actions (start lot, delay, reschedule, reorder, duration/start changes, buffer ops, parallelize).
 - [ ] Verify behavior with a non-admin â€œsuperâ€ user in a non-demo org (should be read-only until self-assign/assignment).
-- [ ] Add server RPC functions for `sync_pull` and `sync_push` once the client outbox format is defined (Milestone 3).
+- [x] (2026-02-06) Added server RPC script `supabase/sql/009_sync_v2_rpc.sql` (cursor pull + transactional push with optimistic concurrency; initial support: `tasks_batch` with optional lot patch).
 - [x] (2026-02-06 00:10Z) Added `src/lib/localDb.js` (IndexedDB entity stores + durable outbox + meta helpers; not wired into UI yet).
 - [x] (2026-02-06) Implemented a one-time import from the localStorage snapshot into `localDb` (normalized entity stores + outbox mirror) and mirrored newly enqueued sync ops into the IndexedDB outbox (best-effort; does not change UI behavior yet).
 - [x] (2026-02-06) Added IndexedDB snapshot mirroring + boot-time restore fallback (for iOS/localStorage eviction resilience); hydrated `lot_assignments`, added “Claim Lot” UX for non-demo supers, and gated schedule edits + transitional snapshot sync to assigned lots only for non-demo `super` users.
 - [ ] Wire the app to read/write through `localDb` behind a feature flag (keep localStorage snapshot as fallback during migration).
-- [ ] Implement sync engine v2 (push outbox + pull cursor) behind a feature flag; keep current snapshot sync as fallback during migration.
-- [ ] Convert core user flows (start lot, edit tasks, reschedule, add notes/photos/docs) to write through the new local store + outbox.
+- [x] (2026-02-06) Implemented sync engine v2 (push durable outbox + pull cursor) behind a feature flag (`VITE_SYNC_V2=1` or local flag `bf:sync_v2`). Old snapshot sync is disabled when v2 is enabled to avoid double writes.
+- [x] (2026-02-06) Converted core schedule flows to enqueue v2 lot-batch ops (`tasks_batch`): start lot, reschedule, delay cascade, drag reorder, duration/start date edits, add task, buffer insert/create, delete task, parallelize, and unstart/reset lot.
 - [ ] Implement attachment pipeline: offline capture -> local blob -> background upload -> server acknowledged metadata; add caching strategy (thumbs always, full-size LRU).
 - [ ] Remove unsafe production fallbacks (unfiltered reads, env org fallback) and retire snapshot sync after parity.
 - [ ] Optional: Capacitor spike to validate camera + filesystem durability on iOS simulator/device while keeping sync protocol unchanged.
