@@ -949,6 +949,50 @@ export const removeBufferTask = (lot, bufferTaskId, orgSettings) => {
   return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
 }
 
+export const normalizeTrackSortOrderBySchedule = (lot, track) => {
+  if (!lot) return lot
+  const resolvedTrack = track ?? 'misc'
+  const tasks = (lot.tasks ?? []).map((t) => ({ ...t }))
+  const groupIds = new Set()
+
+  const getStartMs = (t) => (t?.scheduled_start ? parseISODate(t.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY)
+  const getEndMs = (t) => (t?.scheduled_end ? parseISODate(t.scheduled_end)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY)
+
+  const group = tasks
+    .filter((t) => (t.track ?? 'misc') === resolvedTrack)
+    .slice()
+    .sort((a, b) => {
+      const aStart = getStartMs(a)
+      const bStart = getStartMs(b)
+      if (aStart !== bStart) return aStart - bStart
+
+      const aEnd = getEndMs(a)
+      const bEnd = getEndMs(b)
+      if (aEnd !== bEnd) return aEnd - bEnd
+
+      // Preserve existing ordering when dates tie (important for parallelized tasks).
+      const so = bySortOrder(a, b)
+      if (so !== 0) return so
+
+      const nameCmp = String(a?.name ?? '').localeCompare(String(b?.name ?? ''))
+      if (nameCmp !== 0) return nameCmp
+      return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
+    })
+
+  for (let idx = 0; idx < group.length; idx++) {
+    group[idx].sort_order = idx + 1
+    groupIds.add(group[idx].id)
+  }
+
+  const normalizedById = new Map(group.map((t) => [t.id, t]))
+  const nextTasks = tasks.map((t) => {
+    if (!groupIds.has(t.id)) return t
+    return normalizedById.get(t.id) ?? t
+  })
+
+  return { ...lot, tasks: refreshReadyStatuses(nextTasks) }
+}
+
 export const rebuildTrackSchedule = (lot, track, orgSettings, options = {}) => {
   if (!lot) return lot
   const helpers = makeWorkdayHelpers(orgSettings)

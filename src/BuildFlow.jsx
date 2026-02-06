@@ -79,6 +79,7 @@ import {
   getCurrentMilestone,
   getPredictedCompletionDate,
   previewDelayImpact,
+  normalizeTrackSortOrderBySchedule,
   rebuildTrackSchedule,
   insertBufferTaskAfter,
   removeBufferTask,
@@ -196,6 +197,127 @@ const IconButton = ({ children, className = '', type = 'button', ...props }) => 
     {children}
   </button>
 )
+
+function SubcontractorCard({ sub, onEdit, onMessage, tradeLabel }) {
+  const primary = sub?.primary_contact ?? {}
+  const additional = Array.isArray(sub?.additional_contacts) ? sub.additional_contacts : []
+
+  const contacts = useMemo(() => {
+    return [
+      {
+        id: primary.id ?? 'primary',
+        name: primary.name ?? '',
+        phone: primary.phone ?? '',
+        email: primary.email ?? '',
+        role: 'Primary Contact',
+      },
+      ...additional.map((c, idx) => ({
+        id: c.id ?? `${sub?.id ?? 'sub'}-extra-${idx}`,
+        name: c.name ?? '',
+        phone: c.phone ?? '',
+        email: c.email ?? '',
+        role: 'Additional Contact',
+      })),
+    ].filter((c) => (c.name || c.phone || c.email))
+  }, [additional, primary.email, primary.id, primary.name, primary.phone, sub?.id])
+
+  const [contactIndex, setContactIndex] = useState(0)
+
+  useEffect(() => {
+    const max = Math.max(0, contacts.length - 1)
+    setContactIndex((prev) => Math.max(0, Math.min(prev, max)))
+  }, [contacts.length])
+
+  const contactCount = contacts.length
+  const activeContact = contactCount > 0 ? contacts[Math.min(contactIndex, contactCount - 1)] : null
+  const contactPhone = (activeContact?.phone ?? '').trim()
+  const contactEmail = (activeContact?.email ?? '').trim()
+
+  const step = (delta) => {
+    if (!contactCount) return
+    setContactIndex((prev) => (prev + delta + contactCount) % contactCount)
+  }
+
+  return (
+    <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="font-semibold">{sub?.company_name ?? 'Subcontractor'}</p>
+          <p className="text-xs text-gray-600 mt-1">Trade: {tradeLabel ?? sub?.trade ?? 'other'}</p>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-2">
+          <div className="bg-white border border-gray-200 rounded-xl p-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500">{activeContact?.role ?? 'Contact'}</p>
+              <p className="text-xs text-gray-500">
+                {contactCount > 0 ? `${Math.min(contactIndex, contactCount - 1) + 1}/${contactCount}` : '0/0'}
+              </p>
+            </div>
+            {activeContact ? (
+              <>
+                <p className="text-sm font-semibold mt-1">{activeContact.name || 'Unnamed Contact'}</p>
+                <div className="flex flex-wrap items-center gap-2 text-xs mt-2">
+                  {contactPhone ? (
+                    <a
+                      href={`tel:${contactPhone}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
+                    >
+                      <Phone className="w-3.5 h-3.5 text-blue-600" />
+                      <span className="tracking-tight">{contactPhone}</span>
+                    </a>
+                  ) : null}
+                  {contactEmail ? (
+                    <a
+                      href={`mailto:${contactEmail}`}
+                      title={contactEmail}
+                      className="inline-flex min-w-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
+                    >
+                      <Mail className="w-3.5 h-3.5 text-blue-600" />
+                      <span className="max-w-[220px] truncate sm:max-w-none">{contactEmail}</span>
+                    </a>
+                  ) : null}
+                </div>
+                {contactCount > 1 ? (
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => step(-1)}
+                      className="h-8 w-8 rounded-full border border-gray-200 bg-white flex items-center justify-center text-gray-500"
+                      aria-label="Previous contact"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => step(1)}
+                      className="h-8 w-8 rounded-full border border-gray-200 bg-white flex items-center justify-center text-gray-500"
+                      aria-label="Next contact"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <p className="text-xs text-gray-500">Swipe to flip</p>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <p className="text-xs text-gray-500 mt-1">No contacts yet.</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={onEdit} className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white">
+            Edit
+          </button>
+          <button onClick={onMessage} className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white">
+            Message
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 let modalScrollLockCount = 0
 let modalScrollTop = 0
@@ -875,6 +997,7 @@ export default function BuildFlow() {
   const [showStartLot, setShowStartLot] = useState(false)
   const [startLotPrefill, setStartLotPrefill] = useState(null)
   const [taskModal, setTaskModal] = useState(null)
+  const [onSiteLotModal, setOnSiteLotModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
   const [bufferModal, setBufferModal] = useState(null)
@@ -903,7 +1026,6 @@ export default function BuildFlow() {
   const [editingSubId, setEditingSubId] = useState(null)
   const [subFilterCategory, setSubFilterCategory] = useState('all')
   const [subFilterTrade, setSubFilterTrade] = useState('all')
-  const [subContactIndexById, setSubContactIndexById] = useState({})
   const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
@@ -3377,11 +3499,15 @@ export default function BuildFlow() {
     return `CO-${year}-${String(nextSeq).padStart(3, '0')}`
   }
 
-  const openLot = (lotId) => {
+  const openLotTab = (lotId, nextTab = 'overview') => {
+    const lot = lotsById.get(lotId) ?? null
+    if (lot?.community_id) setSelectedCommunityId(lot.community_id)
     setSelectedLotId(lotId)
-    setLotDetailTab('overview')
+    setLotDetailTab(nextTab)
     setTab('communities')
   }
+
+  const openLot = (lotId) => openLotTab(lotId, 'overview')
 
   const lotHasDelay = (lot) => (lot?.tasks ?? []).some((t) => t.status === 'delayed')
 
@@ -4337,15 +4463,6 @@ export default function BuildFlow() {
     })
   }, [app.subcontractors, subFilterCategory, subFilterTrade, tradeToCategory])
 
-  const stepSubContactIndex = (subId, delta, count) => {
-    if (!count) return
-    setSubContactIndexById((prev) => {
-      const current = Number(prev[subId] ?? 0) || 0
-      const next = (current + delta + count) % count
-      return { ...prev, [subId]: next }
-    })
-  }
-
   const adminSections = [
     { id: 'product_types', label: 'Product Types', description: 'Define categories, build days, and templates.', count: productTypes.length },
     { id: 'plans', label: 'Plans', description: 'Attach floor plans to product types.', count: plans.length },
@@ -5193,15 +5310,14 @@ export default function BuildFlow() {
                   {todaysAssignments.slice(0, 6).map(({ lot, task, status, sub }) => (
                     <button
                       key={`${lot.id}-${task.id}`}
-                      onClick={() => openLot(lot.id)}
+                      onClick={() => setOnSiteLotModal({ lot_id: lot.id, task_id: task.id })}
                       className="w-full bg-gray-50 rounded-xl p-3 text-left"
                     >
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="font-semibold text-gray-900">{sub?.company_name ?? 'Unassigned'}</p>
-                          <p className="text-xs text-gray-600">
-                            {lotCode(lot)} • {task.name}
-                          </p>
+                          <p className="text-[11px] text-gray-500 mt-1">{communitiesById.get(lot.community_id)?.name ?? 'Community'} | {lotCode(lot)}</p>
+                          <p className="text-xs text-gray-600">{task.name}</p>
                         </div>
                         <TaskStatusBadge status={status} />
                       </div>
@@ -5503,15 +5619,14 @@ export default function BuildFlow() {
                         {assignments.map(({ lot, task, sub, status }) => (
                           <button
                             key={`${lot.id}-${task.id}`}
-                            onClick={() => setTaskModal({ lot_id: lot.id, task_id: task.id })}
+                            onClick={() => setOnSiteLotModal({ lot_id: lot.id, task_id: task.id })}
                             className="w-full bg-gray-50 rounded-xl p-3 text-left"
                           >
                             <div className="flex items-center justify-between">
                               <div>
                                 <p className="font-semibold">{sub?.company_name ?? 'Unassigned'}</p>
-                                <p className="text-xs text-gray-600">
-                                  {lotCode(lot)} • {task.name}
-                                </p>
+                                <p className="text-[11px] text-gray-500 mt-1">{communitiesById.get(lot.community_id)?.name ?? 'Community'} | {lotCode(lot)}</p>
+                                <p className="text-xs text-gray-600">{task.name}</p>
                                 {sub?.primary_contact?.phone ? (
                                   <a
                                     href={`tel:${sub.primary_contact.phone}`}
@@ -5744,10 +5859,10 @@ export default function BuildFlow() {
                           <p className="text-sm text-gray-500">No scheduled work.</p>
                         ) : (
                           <div className="space-y-2">
-                            {assignments.map(({ lot, community, task, sub, status }) => (
+                            {assignments.map(({ lot, task, sub, status }) => (
                               <button
                                 key={`${lot.id}-${task.id}`}
-                                onClick={() => setTaskModal({ lot_id: lot.id, task_id: task.id })}
+                                onClick={() => setOnSiteLotModal({ lot_id: lot.id, task_id: task.id })}
                                 draggable
                                 onDragStart={(e) => {
                                   e.dataTransfer.setData('text/plain', `${lot.id}:${task.id}`)
@@ -5764,14 +5879,14 @@ export default function BuildFlow() {
                                 <div className="flex items-center justify-between">
                                   <div>
                                     <p className="font-semibold">{sub?.company_name ?? 'Unassigned'}</p>
-                                    <p className="text-xs text-gray-600">
-                                      {community?.name ?? ''} {lotCode(lot)} • {task.name}
-                                    </p>
+                                    <p className="text-[11px] text-gray-500 mt-1">{communitiesById.get(lot.community_id)?.name ?? 'Community'} | {lotCode(lot)}</p>
+                                    <p className="text-xs text-gray-600">{task.name}</p>
                                   </div>
                                   <TaskStatusBadge status={status} />
                                 </div>
                               </button>
-                            ))}                          </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     )
@@ -6900,115 +7015,15 @@ export default function BuildFlow() {
               </div>
               <div className="space-y-2">
                 {filteredSubs.map((sub) => {
-                  const primary = sub.primary_contact ?? {}
-                  const additional = Array.isArray(sub.additional_contacts) ? sub.additional_contacts : []
-                  const contacts = [
-                    {
-                      id: primary.id ?? 'primary',
-                      name: primary.name ?? '',
-                      phone: primary.phone ?? '',
-                      email: primary.email ?? '',
-                      role: 'Primary Contact',
-                    },
-                    ...additional.map((c, idx) => ({
-                      id: c.id ?? `${sub.id}-extra-${idx}`,
-                      name: c.name ?? '',
-                      phone: c.phone ?? '',
-                      email: c.email ?? '',
-                      role: `Additional Contact`,
-                    })),
-                  ].filter((c) => (c.name || c.phone || c.email))
-
-                  const contactCount = contacts.length
-                  const index = Math.min(subContactIndexById[sub.id] ?? 0, Math.max(0, contactCount - 1))
-                  const activeContact = contactCount > 0 ? contacts[index] : null
-                  const contactPhone = (activeContact?.phone ?? '').trim()
-                  const contactEmail = (activeContact?.email ?? '').trim()
-
+                  const tradeLabel = tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade
                   return (
-                    <div key={sub.id} className="bg-gray-50 rounded-xl border border-gray-200 p-4">
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <p className="font-semibold">{sub.company_name}</p>
-                          <p className="text-xs text-gray-600 mt-1">
-                            Trade: {tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="space-y-2">
-                          <div className="bg-white border border-gray-200 rounded-xl p-3">
-                            <div className="flex items-center justify-between">
-                              <p className="text-xs text-gray-500">{activeContact?.role ?? 'Contact'}</p>
-                              <p className="text-xs text-gray-500">{contactCount > 0 ? `${index + 1}/${contactCount}` : '0/0'}</p>
-                            </div>
-                            {activeContact ? (
-                              <>
-                                <p className="text-sm font-semibold mt-1">{activeContact.name || 'Unnamed Contact'}</p>
-                                <div className="flex flex-wrap items-center gap-2 text-xs mt-2">
-                                  {contactPhone ? (
-                                    <a
-                                      href={`tel:${contactPhone}`}
-                                      className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
-                                    >
-                                      <Phone className="w-3.5 h-3.5 text-blue-600" />
-                                      <span className="tracking-tight">{contactPhone}</span>
-                                    </a>
-                                  ) : null}
-                                  {contactEmail ? (
-                                    <a
-                                      href={`mailto:${contactEmail}`}
-                                      title={contactEmail}
-                                      className="inline-flex min-w-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition hover:border-blue-200 hover:text-blue-700"
-                                    >
-                                      <Mail className="w-3.5 h-3.5 text-blue-600" />
-                                      <span className="max-w-[220px] truncate sm:max-w-none">{contactEmail}</span>
-                                    </a>
-                                  ) : null}
-                                </div>
-                                {contactCount > 1 ? (
-                                  <div className="mt-2 flex items-center gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => stepSubContactIndex(sub.id, -1, contactCount)}
-                                      className="h-8 w-8 rounded-full border border-gray-200 bg-white flex items-center justify-center text-gray-500"
-                                      aria-label="Previous contact"
-                                    >
-                                      <ChevronLeft className="w-4 h-4" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => stepSubContactIndex(sub.id, 1, contactCount)}
-                                      className="h-8 w-8 rounded-full border border-gray-200 bg-white flex items-center justify-center text-gray-500"
-                                      aria-label="Next contact"
-                                    >
-                                      <ChevronRight className="w-4 h-4" />
-                                    </button>
-                                    <p className="text-xs text-gray-500">Swipe to flip</p>
-                                  </div>
-                                ) : null}
-                              </>
-                            ) : (
-                              <p className="text-xs text-gray-500 mt-1">No contacts yet.</p>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setEditingSubId(sub.id)}
-                            className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setSubContactModalId(sub.id)}
-                            className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
-                          >
-                            Message
-                          </button>
-                        </div>
-                      </div>
-                    </div>
+                    <SubcontractorCard
+                      key={sub.id}
+                      sub={sub}
+                      tradeLabel={tradeLabel}
+                      onEdit={() => setEditingSubId(sub.id)}
+                      onMessage={() => setSubContactModalId(sub.id)}
+                    />
                   )
                 })}
               </div>
@@ -8976,6 +8991,109 @@ export default function BuildFlow() {
         />
       )}
 
+      {onSiteLotModal && (() => {
+        const lot = lotsById.get(onSiteLotModal.lot_id) ?? null
+        const task = lot?.tasks?.find((t) => t.id === onSiteLotModal.task_id) ?? null
+        if (!lot || !task) return null
+        const community = communitiesById.get(lot.community_id) ?? null
+        const status = deriveTaskStatus(task, lot.tasks, lot.inspections)
+        const sub = app.subcontractors.find((s) => s.id === task.sub_id) ?? null
+        const phone = String(sub?.primary_contact?.phone ?? '').trim()
+
+        return (
+          <Modal
+            title="On Site"
+            onClose={() => setOnSiteLotModal(null)}
+            footer={(
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOnSiteLotModal(null)}
+                  className="h-12 px-4 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOnSiteLotModal(null)
+                    openLotTab(lot.id, 'overview')
+                  }}
+                  className="h-12 px-4 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                >
+                  Overview
+                </button>
+                <PrimaryButton
+                  onClick={() => {
+                    setOnSiteLotModal(null)
+                    openLotTab(lot.id, 'schedule')
+                  }}
+                >
+                  Schedule
+                </PrimaryButton>
+              </div>
+            )}
+          >
+            <div className="space-y-3">
+              <Card className="bg-gray-50">
+                <p className="text-xs text-gray-500">Community</p>
+                <p className="font-semibold">{community?.name ?? 'Community'} | {lotCode(lot)}</p>
+              </Card>
+
+              <Card className="bg-gray-50">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs text-gray-500">Task</p>
+                    <p className="font-semibold truncate">{task.name ?? ''}</p>
+                    <p className="text-xs text-gray-600 mt-1">
+                      {formatShortDateWithWeekday(task.scheduled_start)} - {formatShortDateWithWeekday(task.scheduled_end)}
+                    </p>
+                  </div>
+                  <TaskStatusBadge status={status} />
+                </div>
+              </Card>
+
+              <Card className="bg-gray-50">
+                <p className="text-xs text-gray-500">Sub</p>
+                <p className="font-semibold">{sub?.company_name ?? 'Unassigned'}</p>
+                {phone ? (
+                  <a
+                    href={`tel:${phone}`}
+                    className="text-sm font-semibold text-blue-600 inline-flex items-center gap-2 mt-2"
+                  >
+                    <Phone className="w-4 h-4" />
+                    {phone}
+                  </a>
+                ) : null}
+
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOnSiteLotModal(null)
+                      setTaskModal({ lot_id: lot.id, task_id: task.id })
+                    }}
+                    className="h-12 px-4 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                  >
+                    Open Task
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOnSiteLotModal(null)
+                      setMessageModal({ lot_id: lot.id, task_id: task.id, sub_id: sub?.id ?? null })
+                    }}
+                    className="h-12 px-4 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                  >
+                    Message
+                  </button>
+                </div>
+              </Card>
+            </div>
+          </Modal>
+        )
+      })()}
+
       {taskModal && (() => {
         const lot = lotsById.get(taskModal.lot_id) ?? null
         const task = lot?.tasks?.find((t) => t.id === taskModal.task_id) ?? null
@@ -9046,10 +9164,9 @@ export default function BuildFlow() {
             onSave={async (task) => {
               const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
               if (!canEdit) return
-              updateLot(lot.id, (current) => ({
-                ...current,
-                tasks: refreshReadyStatuses([...(current.tasks ?? []), task]),
-              }))
+              updateLot(lot.id, (current) =>
+                normalizeTrackSortOrderBySchedule({ ...current, tasks: [...(current.tasks ?? []), task] }, task.track),
+              )
               setAddTaskModal(null)
             }}
           />
@@ -11067,8 +11184,8 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
             setPreviewTouched(true)
             setDraftTasks((prev) => {
               const nextTasks = [...prev, newTask]
-              const nextLot = rebuildTrackSchedule({ ...resolvedLot, tasks: nextTasks }, newTask.track, org)
-              return nextLot?.tasks ?? nextTasks
+              const normalized = normalizeTrackSortOrderBySchedule({ ...resolvedLot, tasks: nextTasks }, newTask.track)
+              return normalized?.tasks ?? nextTasks
             })
           }}
         />
