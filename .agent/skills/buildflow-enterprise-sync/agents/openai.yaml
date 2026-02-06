@@ -1,0 +1,4 @@
+interface:
+  display_name: "BuildFlow Enterprise Sync"
+  short_description: "BuildFlow offline sync v2 + RLS workflows"
+  default_prompt: "Use $buildflow-enterprise-sync to implement offline-first sync and multi-super scheduling safely."
