@@ -2340,15 +2340,30 @@ export default function BuildFlow() {
     return op.id
   }
 
-  const buildV2TaskSchedulePatch = (prevTask, nextTask) => {
+  const buildV2TaskPatch = (prevTask, nextTask, { mode = 'schedule' } = {}) => {
     if (!prevTask || !nextTask) return null
     const patch = {}
-    if ((Number(prevTask.duration ?? 0) || 0) !== (Number(nextTask.duration ?? 0) || 0)) patch.duration = Math.max(1, Number(nextTask.duration ?? 1) || 1)
-    if ((Number(prevTask.sort_order ?? 0) || 0) !== (Number(nextTask.sort_order ?? 0) || 0)) patch.sort_order = Number.isFinite(Number(nextTask.sort_order)) ? Math.trunc(Number(nextTask.sort_order)) : 0
-    if (String(prevTask.scheduled_start ?? '') !== String(nextTask.scheduled_start ?? '')) patch.scheduled_start = nextTask.scheduled_start ?? null
-    if (String(prevTask.scheduled_end ?? '') !== String(nextTask.scheduled_end ?? '')) patch.scheduled_end = nextTask.scheduled_end ?? null
-    if (String(prevTask.delay_reason ?? '') !== String(nextTask.delay_reason ?? '')) patch.delay_reason = nextTask.delay_reason ?? null
-    if ((Number(prevTask.delay_days ?? 0) || 0) !== (Number(nextTask.delay_days ?? 0) || 0)) patch.delay_days = Number.isFinite(Number(nextTask.delay_days)) ? Number(nextTask.delay_days) : 0
+
+    const includeSchedule = mode === 'schedule' || mode === 'any'
+    const includeTaskMeta = mode === 'task' || mode === 'any'
+
+    if (includeSchedule) {
+      if ((Number(prevTask.duration ?? 0) || 0) !== (Number(nextTask.duration ?? 0) || 0)) patch.duration = Math.max(1, Number(nextTask.duration ?? 1) || 1)
+      if ((Number(prevTask.sort_order ?? 0) || 0) !== (Number(nextTask.sort_order ?? 0) || 0)) patch.sort_order = Number.isFinite(Number(nextTask.sort_order)) ? Math.trunc(Number(nextTask.sort_order)) : 0
+      if (String(prevTask.scheduled_start ?? '') !== String(nextTask.scheduled_start ?? '')) patch.scheduled_start = nextTask.scheduled_start ?? null
+      if (String(prevTask.scheduled_end ?? '') !== String(nextTask.scheduled_end ?? '')) patch.scheduled_end = nextTask.scheduled_end ?? null
+      if (String(prevTask.delay_reason ?? '') !== String(nextTask.delay_reason ?? '')) patch.delay_reason = nextTask.delay_reason ?? null
+      if ((Number(prevTask.delay_days ?? 0) || 0) !== (Number(nextTask.delay_days ?? 0) || 0)) patch.delay_days = Number.isFinite(Number(nextTask.delay_days)) ? Number(nextTask.delay_days) : 0
+    }
+
+    if (includeTaskMeta) {
+      if (String(prevTask.status ?? '') !== String(nextTask.status ?? '')) patch.status = nextTask.status ?? 'not_started'
+      if (String(prevTask.actual_start ?? '') !== String(nextTask.actual_start ?? '')) patch.actual_start = nextTask.actual_start ?? null
+      if (String(prevTask.actual_end ?? '') !== String(nextTask.actual_end ?? '')) patch.actual_end = nextTask.actual_end ?? null
+      if (String(prevTask.sub_id ?? '') !== String(nextTask.sub_id ?? '')) patch.sub_id = nextTask.sub_id ?? null
+      if (String(prevTask.notes ?? '') !== String(nextTask.notes ?? '')) patch.notes = nextTask.notes ?? null
+    }
+
     return Object.keys(patch).length > 0 ? patch : null
   }
 
@@ -2382,7 +2397,7 @@ export default function BuildFlow() {
     return Object.keys(patch).length > 0 ? patch : null
   }
 
-  const buildV2TasksBatchOp = ({ lotId, prevLot, nextLot, includeLotRow = false }) => {
+  const buildV2TasksBatchOp = ({ lotId, prevLot, nextLot, includeLotRow = false, mode = 'schedule' }) => {
     if (!syncV2Enabled) return null
     const userId = supabaseUser?.id ?? app?.sync?.supabase_user_id ?? null
     const orgId = supabaseStatus?.orgId ?? app?.sync?.supabase_org_id ?? null
@@ -2410,7 +2425,7 @@ export default function BuildFlow() {
         continue
       }
 
-      const patch = buildV2TaskSchedulePatch(prevTask, nextTask)
+      const patch = buildV2TaskPatch(prevTask, nextTask, { mode })
       if (!patch) continue
       tasksPayload.push({
         action: 'upsert',
@@ -2433,7 +2448,8 @@ export default function BuildFlow() {
     }
 
     const lotBaseVersion = Number.isFinite(Number(prevLot.version)) ? Number(prevLot.version) : null
-    const lotRow = includeLotRow ? buildV2LotPatch(prevLot, nextLot) : null
+    const canIncludeLotPatch = Boolean(includeLotRow) && Number.isFinite(Number(lotBaseVersion))
+    const lotRow = canIncludeLotPatch ? buildV2LotPatch(prevLot, nextLot) : null
 
     if (tasksPayload.length === 0 && !lotRow) return null
 
@@ -2444,7 +2460,7 @@ export default function BuildFlow() {
       id: opId,
       kind: 'tasks_batch',
       lot_id: lotId,
-      lot_base_version: includeLotRow ? lotBaseVersion : null,
+      lot_base_version: canIncludeLotPatch ? lotBaseVersion : null,
       lot: lotRow,
       tasks: tasksPayload,
     }
@@ -2975,39 +2991,76 @@ export default function BuildFlow() {
   }
 
   const updateTaskSub = (lotId, taskId, subId) => {
-    updateLot(lotId, (lot) => {
+    if (!canEditLot(lotId)) {
+      alert('Read-only: you are not assigned to this lot. Claim it in Overview to edit.')
+      return
+    }
+
+    let op = null
+    setApp((prev) => {
       const now = new Date().toISOString()
-      const tasks = (lot.tasks ?? []).map((t) =>
-        t.id !== taskId ? t : { ...t, sub_id: subId || null, updated_at: now },
-      )
-      return { ...lot, tasks }
+      const nextLots = (prev.lots ?? []).map((lot) => {
+        if (lot.id !== lotId) return lot
+        const nextTasks = (lot.tasks ?? []).map((t) => (t.id !== taskId ? t : { ...t, sub_id: subId || null, updated_at: now }))
+        const nextLot = { ...lot, tasks: nextTasks }
+        op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot, mode: 'task' })
+        return nextLot
+      })
+      return { ...prev, lots: nextLots }
     })
+
+    if (op) {
+      void Promise.resolve()
+        .then(() => outboxEnqueue(op))
+        .catch(() => {})
+    }
   }
 
   const markTaskIncomplete = (lotId, taskId) => {
-    updateLot(lotId, (lot) => {
+    if (!canEditLot(lotId)) {
+      alert('Read-only: you are not assigned to this lot. Claim it in Overview to edit.')
+      return
+    }
+
+    let op = null
+    setApp((prev) => {
       const now = new Date().toISOString()
-      const tasks = (lot.tasks ?? []).map((t) => {
-        if (t.id !== taskId) return t
-        return {
-          ...t,
-          status: 'pending',
-          actual_start: null,
-          actual_end: null,
-          updated_at: now,
+      const nextLots = (prev.lots ?? []).map((lot) => {
+        if (lot.id !== lotId) return lot
+        const tasks = (lot.tasks ?? []).map((t) => {
+          if (t.id !== taskId) return t
+          return {
+            ...t,
+            status: 'pending',
+            actual_start: null,
+            actual_end: null,
+            updated_at: now,
+          }
+        })
+
+        const nextStatus = lot.status === 'complete' ? 'in_progress' : lot.status
+        const nextLot = {
+          ...lot,
+          status: nextStatus,
+          actual_completion_date: nextStatus === 'complete' ? lot.actual_completion_date ?? null : null,
+          tasks: refreshReadyStatuses(tasks),
         }
+
+        op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot, includeLotRow: true, mode: 'task' })
+        return nextLot
       })
 
-      const nextStatus = lot.status === 'complete' ? 'in_progress' : lot.status
-      return {
-        ...lot,
-        status: nextStatus,
-        actual_completion_date: nextStatus === 'complete' ? lot.actual_completion_date ?? null : null,
-        tasks: refreshReadyStatuses(tasks),
-      }
+      const prevSync = prev.sync ?? {}
+      return { ...prev, lots: nextLots, sync: prevSync }
     })
 
-    if (!isOnline) {
+    if (op) {
+      void Promise.resolve()
+        .then(() => outboxEnqueue(op))
+        .catch(() => {})
+    }
+
+    if (!syncV2Enabled && !isOnline) {
       enqueueSyncOp({
         type: 'task_status',
         lot_id: lotId,
@@ -3658,22 +3711,34 @@ export default function BuildFlow() {
   }
 
   const startTask = (lotId, taskId) => {
-    updateLot(lotId, (lot) => {
+    if (!canEditLot(lotId)) {
+      alert('Read-only: you are not assigned to this lot. Claim it in Overview to edit.')
+      return
+    }
+
+    let op = null
+    setApp((prev) => {
       const now = new Date().toISOString()
-      return {
-        ...lot,
-        tasks: (lot.tasks ?? []).map((t) => {
+      const nextLots = (prev.lots ?? []).map((lot) => {
+        if (lot.id !== lotId) return lot
+        const nextTasks = (lot.tasks ?? []).map((t) => {
           if (t.id !== taskId) return t
-          return {
-            ...t,
-            status: 'in_progress',
-            actual_start: t.actual_start ?? todayIso,
-            updated_at: now,
-          }
-        }),
-      }
+          return { ...t, status: 'in_progress', actual_start: t.actual_start ?? todayIso, updated_at: now }
+        })
+        const nextLot = { ...lot, tasks: nextTasks }
+        op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot, mode: 'task' })
+        return nextLot
+      })
+      return { ...prev, lots: nextLots }
     })
-    if (!isOnline) {
+
+    if (op) {
+      void Promise.resolve()
+        .then(() => outboxEnqueue(op))
+        .catch(() => {})
+    }
+
+    if (!syncV2Enabled && !isOnline) {
       enqueueSyncOp({
         type: 'task_status',
         lot_id: lotId,
@@ -3769,32 +3834,45 @@ export default function BuildFlow() {
       }
     }
 
-    updateLot(lotId, (lot) => {
+    if (!canEditLot(lotId)) {
+      alert('Read-only: you are not assigned to this lot. Claim it in Overview to edit.')
+      return
+    }
+
+    let op = null
+    setApp((prev) => {
       const now = new Date().toISOString()
-      const updatedTasks = (lot.tasks ?? []).map((t) => {
-        if (t.id !== taskId) return t
-        return {
-          ...t,
-          status: 'complete',
-          actual_start: t.actual_start ?? todayIso,
-          actual_end: todayIso,
-          updated_at: now,
+      const nextLots = (prev.lots ?? []).map((lot) => {
+        if (lot.id !== lotId) return lot
+        const updatedTasks = (lot.tasks ?? []).map((t) => {
+          if (t.id !== taskId) return t
+          return { ...t, status: 'complete', actual_start: t.actual_start ?? todayIso, actual_end: todayIso, updated_at: now }
+        })
+        const maybeCompleted = updatedTasks.find((t) => t.id === taskId)
+        const nextPunch = !lot.punch_list && maybeCompleted?.name === 'Final Clean' ? createPunchListFromTemplate(now) : lot.punch_list
+        const lotStatus = maybeCompleted?.name === 'Punch Complete' ? 'complete' : lot.status
+        const nextLot = {
+          ...lot,
+          status: lotStatus,
+          actual_completion_date: lotStatus === 'complete' ? todayIso : lot.actual_completion_date ?? null,
+          tasks: updatedTasks,
+          punch_list: nextPunch,
         }
+
+        // Include lot patch because status/completion date can change.
+        op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot, includeLotRow: true, mode: 'task' })
+        return nextLot
       })
-
-      const maybeCompleted = updatedTasks.find((t) => t.id === taskId)
-      const nextPunch = !lot.punch_list && maybeCompleted?.name === 'Final Clean' ? createPunchListFromTemplate(now) : lot.punch_list
-      const lotStatus = maybeCompleted?.name === 'Punch Complete' ? 'complete' : lot.status
-
-      return {
-        ...lot,
-        status: lotStatus,
-        actual_completion_date: lotStatus === 'complete' ? todayIso : lot.actual_completion_date ?? null,
-        tasks: updatedTasks,
-        punch_list: nextPunch,
-      }
+      return { ...prev, lots: nextLots }
     })
-    if (!isOnline) {
+
+    if (op) {
+      void Promise.resolve()
+        .then(() => outboxEnqueue(op))
+        .catch(() => {})
+    }
+
+    if (!syncV2Enabled && !isOnline) {
       enqueueSyncOp({
         type: 'task_status',
         lot_id: lotId,
@@ -10843,30 +10921,55 @@ export default function BuildFlow() {
               }
             }}
             onApplyScheduleImpact={({ taskId, daysAdded, reason }) => {
-              updateLot(lot.id, (current) => {
-                if (!taskId || !daysAdded) return current
-                const preview = previewDelayImpact(current, taskId, Math.max(1, Number(daysAdded) || 1), org)
-                const now = new Date().toISOString()
-                const nextTasks = (current.tasks ?? []).map((t) => {
-                  const hit = (preview.affected ?? []).find((a) => a.task_id === t.id)
-                  if (!hit) return t
-                  return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
+              if (!taskId || !daysAdded) return
+              void runScheduleEditWithLock(lot.id, async () => {
+                let op = null
+                setApp((prev) => {
+                  const nextLots = (prev.lots ?? []).map((current) => {
+                    if (current.id !== lot.id) return current
+                    const preview = previewDelayImpact(current, taskId, Math.max(1, Number(daysAdded) || 1), prev.org)
+                    const now = new Date().toISOString()
+                    const nextTasks = (current.tasks ?? []).map((t) => {
+                      const hit = (preview.affected ?? []).find((a) => a.task_id === t.id)
+                      if (!hit) return t
+                      return { ...t, scheduled_start: hit.new_start, scheduled_end: hit.new_end, updated_at: now }
+                    })
+                    const nextLot = {
+                      ...current,
+                      tasks: nextTasks,
+                      schedule_changes: [
+                        ...(current.schedule_changes ?? []),
+                        {
+                          id: uuid(),
+                          task_id: taskId,
+                          old_start: (current.tasks ?? []).find((t) => t.id === taskId)?.scheduled_start ?? null,
+                          new_start: (preview.affected ?? []).find((a) => a.task_id === taskId)?.new_start ?? null,
+                          reason: reason ?? 'Change order schedule impact',
+                          notified: false,
+                          changed_at: now,
+                        },
+                      ],
+                    }
+                    op = buildV2TasksBatchOp({ lotId: lot.id, prevLot: current, nextLot, mode: 'schedule' })
+                    return nextLot
+                  })
+                  return { ...prev, lots: nextLots }
                 })
-                return {
-                  ...current,
-                  tasks: nextTasks,
-                  schedule_changes: [
-                    ...(current.schedule_changes ?? []),
-                    {
-                      id: uuid(),
-                      task_id: taskId,
-                      old_start: (current.tasks ?? []).find((t) => t.id === taskId)?.scheduled_start ?? null,
-                      new_start: (preview.affected ?? []).find((a) => a.task_id === taskId)?.new_start ?? null,
-                      reason: reason ?? 'Change order schedule impact',
-                      notified: false,
-                      changed_at: now,
-                    },
-                  ],
+
+                if (op) {
+                  void Promise.resolve()
+                    .then(() => outboxEnqueue(op))
+                    .catch(() => {})
+                }
+
+                if (!syncV2Enabled && !isOnline) {
+                  enqueueSyncOp({
+                    type: 'task_dates',
+                    lot_id: lot.id,
+                    entity_type: 'task',
+                    entity_id: taskId,
+                    summary: `Schedule impacted by change order (${lotCode(lot)})`,
+                  })
                 }
               })
             }}
