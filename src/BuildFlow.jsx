@@ -57,6 +57,7 @@ import {
   addCalendarDays,
   daysBetweenCalendar,
   formatISODate,
+  formatISODateInTimeZone,
   formatLongDate,
   formatShortDate,
   formatShortDateWithWeekday,
@@ -440,6 +441,40 @@ const getSubEmail = (sub) => sub?.email || sub?.primary_contact?.email || ''
 
 const coerceArray = (value) => (Array.isArray(value) ? value : [])
 
+const normalizeHolidayObjects = (nextLike, prevLike) => {
+  const prev = Array.isArray(prevLike) ? prevLike : []
+  const prevNameByDate = new Map(
+    prev
+      .map((h) => (h && typeof h === 'object' ? { date: String(h.date ?? '').trim(), name: String(h.name ?? '').trim() } : null))
+      .filter((h) => h?.date),
+  )
+
+  const next = Array.isArray(nextLike) ? nextLike : []
+  const out = []
+  for (const raw of next) {
+    const date = typeof raw === 'string' ? raw.trim() : raw && typeof raw === 'object' ? String(raw.date ?? '').trim() : ''
+    if (!date || !parseISODate(date)) continue
+    const existingName = prevNameByDate.get(date)?.name ?? ''
+    const name =
+      raw && typeof raw === 'object' && 'name' in raw && String(raw.name ?? '').trim()
+        ? String(raw.name ?? '').trim()
+        : existingName
+    out.push({ date, name })
+  }
+  return out
+}
+
+const toSupabaseHolidayDates = (holidaysLike) => {
+  const list = Array.isArray(holidaysLike) ? holidaysLike : []
+  const out = []
+  for (const raw of list) {
+    const date = typeof raw === 'string' ? raw.trim() : raw && typeof raw === 'object' ? String(raw.date ?? '').trim() : ''
+    if (!date || !parseISODate(date)) continue
+    out.push(date)
+  }
+  return out
+}
+
 const isBufferTask = (task) => {
   if (!task) return false
   if (task.is_buffer) return true
@@ -576,7 +611,6 @@ const mapSubcontractorToSupabase = (row, orgId) => ({
   license_number: row?.license_number ?? null,
   w9_on_file: Boolean(row?.w9_on_file),
   crew_size: Number.isFinite(Number(row?.crew_size)) ? Number(row.crew_size) : null,
-  max_concurrent_lots: Math.max(1, Number(row?.max_concurrent_lots ?? 1) || 1),
   is_preferred: row?.is_preferred !== false,
   is_backup: Boolean(row?.is_backup),
   rating: Number.isFinite(Number(row?.rating)) ? Number(row.rating) : null,
@@ -1177,15 +1211,25 @@ export default function BuildFlow() {
       const hasRemoteCoreData = mappedCommunities.length > 0 || mappedLots.length > 0 || mappedSubs.length > 0
 
       setApp((prev) => {
+        const nextTimezoneRaw = String(orgRow?.timezone ?? prev.org?.timezone ?? '').trim()
+        const nextTimezone = nextTimezoneRaw || 'America/Chicago'
+        const nextHolidays = Array.isArray(orgRow?.holidays)
+          ? normalizeHolidayObjects(orgRow.holidays, prev.org?.holidays)
+          : Array.isArray(prev.org?.holidays)
+            ? prev.org.holidays
+            : []
+
         const nextOrg = {
           ...prev.org,
           name: orgRow?.name ?? orgRow?.builder_name ?? prev.org.name,
           builder_name: orgRow?.builder_name ?? orgRow?.name ?? prev.org.builder_name,
+          timezone: nextTimezone,
+          is_demo: Boolean(orgRow?.is_demo ?? prev.org?.is_demo ?? false),
           default_build_days: Number.isFinite(Number(orgRow?.default_build_days))
             ? Number(orgRow.default_build_days)
             : prev.org.default_build_days,
           work_days: Array.isArray(orgRow?.work_days) ? orgRow.work_days : prev.org.work_days,
-          holidays: Array.isArray(orgRow?.holidays) ? orgRow.holidays : prev.org.holidays,
+          holidays: nextHolidays,
         }
 
         if (!hasRemoteCoreData) {
@@ -1274,16 +1318,30 @@ export default function BuildFlow() {
       throw new Error(`Profile upsert failed: ${profileUpsert.error.message}`)
     }
 
-    const orgUpdate = await supabase
-      .from('organizations')
-      .update({
-        name: orgRow.name,
-        builder_name: orgRow.builder_name,
-        default_build_days: orgRow.default_build_days,
-        work_days: orgRow.work_days,
-        holidays: orgRow.holidays,
-      })
-      .eq('id', orgId)
+    const orgUpdatePayload = {
+      name: orgRow.name,
+      builder_name: orgRow.builder_name,
+      timezone: orgRow.timezone,
+      default_build_days: orgRow.default_build_days,
+      work_days: orgRow.work_days,
+      holidays: orgRow.holidays,
+    }
+
+    let orgUpdate = await supabase.from('organizations').update(orgUpdatePayload).eq('id', orgId)
+    if (orgUpdate.error) {
+      const code = String(orgUpdate.error?.code ?? '')
+      const message = String(orgUpdate.error?.message ?? '').toLowerCase()
+      const timezoneColumnMissing =
+        code === '42703' || (message.includes('timezone') && message.includes('column') && message.includes('does not exist'))
+
+      if (timezoneColumnMissing) {
+        // Backward-compat with older bootstrap schemas that don't yet have organizations.timezone.
+        // (The server-side default still keeps date math stable.)
+        const { timezone: _timezone, ...withoutTimezone } = orgUpdatePayload
+        orgUpdate = await supabase.from('organizations').update(withoutTimezone).eq('id', orgId)
+      }
+    }
+
     if (orgUpdate.error) {
       throw new Error(`Organization update failed: ${orgUpdate.error.message}`)
     }
@@ -1350,15 +1408,17 @@ export default function BuildFlow() {
 
     const orgId = supabaseStatus.orgId
     const orgConfig = app.org ?? {}
+    const timezoneRaw = String(orgConfig?.timezone ?? '').trim()
     const orgRow = {
       id: orgId,
       name: orgConfig?.name ?? orgConfig?.builder_name ?? 'BuildFlow',
       builder_name: orgConfig?.builder_name ?? orgConfig?.name ?? 'BuildFlow',
+      timezone: timezoneRaw || 'America/Chicago',
       default_build_days: Math.max(1, Number(orgConfig?.default_build_days ?? 1) || 1),
       work_days: coerceArray(orgConfig?.work_days)
         .map((day) => Number(day))
         .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6),
-      holidays: coerceArray(orgConfig?.holidays).map((holiday) => String(holiday)),
+      holidays: toSupabaseHolidayDates(orgConfig?.holidays),
     }
 
     const productTypes = (app.product_types ?? [])
@@ -1670,7 +1730,7 @@ export default function BuildFlow() {
   const contactLibraryBuilders = contactLibrary.builders ?? []
   const contactLibraryRealtors = contactLibrary.realtors ?? []
   const { businessDaysBetweenInclusive, getNextWorkDay } = makeWorkdayHelpers(org)
-  const todayIso = formatISODate(new Date())
+  const todayIso = formatISODateInTimeZone(new Date(), org?.timezone) || formatISODate(new Date())
 
   const communitiesById = useMemo(() => new Map(app.communities.map((c) => [c.id, c])), [app.communities])
   const lotsById = useMemo(() => new Map(app.lots.map((l) => [l.id, l])), [app.lots])
@@ -1960,6 +2020,192 @@ export default function BuildFlow() {
     setLotDetailTab('overview')
   }
 
+  const [scheduleEditLock, setScheduleEditLock] = useState({
+    lotId: null,
+    token: null,
+    expiresAt: null,
+    lockedBy: null,
+    warning: '',
+    warningUntil: null,
+    error: '',
+  })
+  const scheduleEditLockRef = useRef(scheduleEditLock)
+  const scheduleEditLockAcquireRef = useRef(null)
+  const scheduleEditLockLastDenyAtRef = useRef(0)
+
+  useEffect(() => {
+    scheduleEditLockRef.current = scheduleEditLock
+  }, [scheduleEditLock])
+
+  const releaseScheduleEditLock = async (token) => {
+    const toRelease = token ?? scheduleEditLockRef.current?.token ?? null
+    if (!toRelease) return
+    if (!isOnline) return
+    if (!supabaseUser?.id) return
+    try {
+      await supabase.rpc('release_lot_lock', { p_token: toRelease })
+    } catch (_err) {
+      void _err
+      // Best-effort only.
+    }
+  }
+
+  useEffect(() => {
+    // Be polite: when leaving a lot, release the lock early instead of waiting for TTL expiry.
+    const current = scheduleEditLockRef.current
+    if (!current?.token || !current?.lotId) return
+    if (!selectedLotId || current.lotId !== selectedLotId) {
+      void releaseScheduleEditLock(current.token)
+      setScheduleEditLock((prev) =>
+        prev.token
+          ? {
+              ...prev,
+              lotId: null,
+              token: null,
+              expiresAt: null,
+              lockedBy: null,
+              warning: '',
+              warningUntil: null,
+              error: '',
+            }
+          : prev,
+      )
+    }
+  }, [selectedLotId])
+
+  useEffect(() => {
+    return () => {
+      const current = scheduleEditLockRef.current
+      if (current?.token) void releaseScheduleEditLock(current.token)
+    }
+  }, [])
+
+  const isScheduleLockValidFor = (lock, lotId) => {
+    if (!lock?.token || !lock?.expiresAt) return false
+    if (lock.lotId !== lotId) return false
+    const ms = new Date(lock.expiresAt).getTime()
+    if (!Number.isFinite(ms)) return false
+    // If we're actively editing, renew proactively rather than racing the expiry window.
+    return ms - Date.now() > 60000
+  }
+
+  const ensureScheduleEditLock = async (lotId, { ttlSeconds = 300, quiet = false } = {}) => {
+    const resolvedLotId = String(lotId ?? '').trim()
+    if (!resolvedLotId) return { ok: true, mode: 'noop' }
+
+    // Offline-first: locks are advisory and can't be required offline.
+    if (!isOnline || !supabaseUser?.id || supabaseStatus.phase !== 'ready') {
+      return { ok: true, mode: 'offline' }
+    }
+
+    const current = scheduleEditLockRef.current
+    if (isScheduleLockValidFor(current, resolvedLotId)) return { ok: true, mode: 'cached', lock: current }
+
+    if (current?.lotId === resolvedLotId && current.warning && current.warningUntil) {
+      const untilMs = new Date(current.warningUntil).getTime()
+      if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+        return { ok: true, mode: 'warning_cached', warning: current.warning }
+      }
+    }
+
+    if (scheduleEditLockAcquireRef.current?.lotId === resolvedLotId) {
+      return scheduleEditLockAcquireRef.current.promise
+    }
+
+    const orgIsDemo = Boolean(app.org?.is_demo)
+    const isDemoLike = orgIsDemo || Boolean(isGuestSession)
+
+    const promise = (async () => {
+      setScheduleEditLock((prev) => ({ ...prev, warning: '', warningUntil: null, error: '' }))
+
+      // If we're switching lots, release the previous lock to avoid blocking others unnecessarily.
+      if (current?.token && current.lotId && current.lotId !== resolvedLotId) {
+        void releaseScheduleEditLock(current.token)
+      }
+
+      const { data, error } = await supabase.rpc('acquire_lot_lock', {
+        p_lot_id: resolvedLotId,
+        p_ttl_seconds: ttlSeconds,
+      })
+
+      if (error) {
+        const message = String(error?.message ?? 'Unable to acquire lock')
+        const code = String(error?.code ?? '')
+        const msgLower = message.toLowerCase()
+        const looksLikeLockConflict = msgLower.includes('locked by another user') || msgLower.includes('locked')
+        const looksLikeMissingRpc =
+          code === '42883' || (msgLower.includes('acquire_lot_lock') && msgLower.includes('does not exist'))
+
+        if (looksLikeLockConflict && !isDemoLike) {
+          setScheduleEditLock((prev) => ({
+            ...prev,
+            lotId: resolvedLotId,
+            token: null,
+            expiresAt: null,
+            lockedBy: null,
+            error: message,
+          }))
+
+          const now = Date.now()
+          if (!quiet && now - scheduleEditLockLastDenyAtRef.current > 1200) {
+            scheduleEditLockLastDenyAtRef.current = now
+            alert('This lot schedule is currently being edited by another user. Try again in a few minutes.')
+          }
+
+          return { ok: false, mode: 'blocked', error: message }
+        }
+
+        // Demo orgs keep moving; and in prod we still allow edits if locks aren't configured yet.
+        const warning = looksLikeMissingRpc
+          ? 'Schedule locking is not configured on this server yet. Edits may conflict across devices.'
+          : message
+
+        setScheduleEditLock((prev) => ({
+          ...prev,
+          lotId: resolvedLotId,
+          token: null,
+          expiresAt: null,
+          lockedBy: null,
+          warning,
+          warningUntil: new Date(Date.now() + (looksLikeMissingRpc ? 10 * 60 * 1000 : 60 * 1000)).toISOString(),
+          error: '',
+        }))
+
+        return { ok: true, mode: 'warning', warning }
+      }
+
+      const row = Array.isArray(data) ? data[0] : data
+      const next = {
+        lotId: resolvedLotId,
+        token: row?.token ?? null,
+        expiresAt: row?.expires_at ?? null,
+        lockedBy: row?.locked_by ?? null,
+        warning: '',
+        warningUntil: null,
+        error: '',
+      }
+      setScheduleEditLock(next)
+      return { ok: true, mode: 'acquired', lock: next }
+    })()
+
+    scheduleEditLockAcquireRef.current = { lotId: resolvedLotId, promise }
+
+    try {
+      return await promise
+    } finally {
+      if (scheduleEditLockAcquireRef.current?.promise === promise) {
+        scheduleEditLockAcquireRef.current = null
+      }
+    }
+  }
+
+  const runScheduleEditWithLock = async (lotId, action) => {
+    const lockResult = await ensureScheduleEditLock(lotId)
+    if (!lockResult.ok) return false
+    await action()
+    return true
+  }
+
   const updateLot = (lotId, updater) => {
     setApp((prev) => {
       const nextLots = prev.lots.map((l) => (l.id === lotId ? updater(l, prev) : l))
@@ -1982,12 +2228,16 @@ export default function BuildFlow() {
   }
 
   const updateTaskDuration = (lotId, taskId, nextDuration) => {
-    updateLot(lotId, (lot) => applyDurationChange(lot, taskId, nextDuration, org))
+    void runScheduleEditWithLock(lotId, async () => {
+      updateLot(lotId, (lot) => applyDurationChange(lot, taskId, nextDuration, org))
+    })
   }
 
   const updateTaskStartDate = (lotId, taskId, nextStartIso) => {
     if (!nextStartIso) return
-    updateLot(lotId, (lot) => applyManualStartDate(lot, taskId, nextStartIso, org))
+    void runScheduleEditWithLock(lotId, async () => {
+      updateLot(lotId, (lot) => applyManualStartDate(lot, taskId, nextStartIso, org))
+    })
   }
 
   const updateTaskSub = (lotId, taskId, subId) => {
@@ -2166,8 +2416,11 @@ export default function BuildFlow() {
     return { tasks, impacted }
   }
 
-  const applyParallelizeSelection = ({ lot, taskIds }) => {
+  const applyParallelizeSelection = async ({ lot, taskIds }) => {
     if (!lot || taskIds.length === 0) return
+    const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+    if (!canEdit) return
+
     const reason = 'Parallelized tasks'
     const community = communitiesById.get(lot.community_id) ?? null
     const plan = buildParallelCascadePlan(lot, taskIds)
@@ -2425,7 +2678,7 @@ export default function BuildFlow() {
     maybeStartListAutoScroll()
   }
 
-  const handleListDragPointerUp = (task, e) => {
+  const handleListDragPointerUp = async (task, e) => {
     const state = listDragRef.current
     if (state.timer) clearTimeout(state.timer)
     state.timer = null
@@ -2435,7 +2688,9 @@ export default function BuildFlow() {
 
     const dropId = listDropTaskId
     if (dropId && dropId !== task.id && selectedLot) {
-      updateLot(selectedLot.id, (current) => applyListReorder(current, task.id, dropId, org))
+      await runScheduleEditWithLock(selectedLot.id, async () => {
+        updateLot(selectedLot.id, (current) => applyListReorder(current, task.id, dropId, org))
+      })
     }
     if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(6)
     if (dropId && dropId !== task.id) {
@@ -3385,7 +3640,7 @@ export default function BuildFlow() {
 
     if (reportType === 'sub_performance') {
       const rows = [
-        ['Subcontractor', 'Trade', 'Rating', 'On-Time %', 'Delay Count', 'Total Jobs', 'Capacity', 'Insurance Expiration', 'Status'],
+        ['Subcontractor', 'Trade', 'Rating', 'On-Time %', 'Delay Count', 'Total Jobs', 'Insurance Expiration', 'Status'],
         ...app.subcontractors.map((s) => [
           s.company_name,
           TRADES.find((t) => t.id === s.trade)?.label ?? s.trade,
@@ -3393,7 +3648,6 @@ export default function BuildFlow() {
           s.on_time_pct ?? '',
           s.delay_count ?? '',
           s.total_jobs ?? '',
-          s.max_concurrent_lots ?? '',
           s.insurance_expiration ?? '',
           s.status ?? '',
         ]),
@@ -3862,52 +4116,6 @@ export default function BuildFlow() {
     return { monthStartIso, gridStartIso, cells }
   }, [calendarDate, todayIso])
 
-  const subConflicts = useMemo(() => {
-    const out = []
-    const subsById = new Map((app.subcontractors ?? []).map((s) => [s.id, s]))
-    const start = todayIso
-    if (!start) return out
-
-    const byKey = new Map()
-    const dates = []
-    for (let i = 0; i < 14; i++) {
-      const d = addCalendarDays(start, i)
-      if (!d) continue
-      dates.push(formatISODate(d))
-    }
-
-    for (const dateIso of dates) {
-      for (const lot of activeLots) {
-        const community = communitiesById.get(lot.community_id) ?? null
-        for (const task of lot.tasks ?? []) {
-          if (!task.sub_id) continue
-          if (task.status === 'complete') continue
-          if (!taskInRange(task, dateIso)) continue
-          const key = `${task.sub_id}::${dateIso}`
-          const entry = byKey.get(key) ?? { sub_id: task.sub_id, date: dateIso, lots: new Map() }
-          entry.lots.set(lot.id, { lot, community, task })
-          byKey.set(key, entry)
-        }
-      }
-    }
-
-    for (const entry of byKey.values()) {
-      const sub = subsById.get(entry.sub_id) ?? null
-      const capacity = Math.max(1, Number(sub?.max_concurrent_lots ?? 1) || 1)
-      const booked = entry.lots.size
-      if (booked <= capacity) continue
-      out.push({
-        sub,
-        date: entry.date,
-        booked,
-        capacity,
-        jobs: Array.from(entry.lots.values()).slice(0, 6),
-      })
-    }
-
-    return out.slice().sort((a, b) => String(a.date).localeCompare(String(b.date)) || (b.booked - b.capacity) - (a.booked - a.capacity))
-  }, [app.subcontractors, activeLots, communitiesById, todayIso, taskInRange])
-
   const matchesCalendarFilters = (lot, task, status) => {
     if (calendarFilters.communityId !== 'all' && lot.community_id !== calendarFilters.communityId) return false
     if (calendarFilters.trade !== 'all' && task.trade !== calendarFilters.trade) return false
@@ -3995,31 +4203,10 @@ export default function BuildFlow() {
     }
   }
 
-  const getSubConflictPreview = ({ subId, dateIso, movingLotId }) => {
-    if (!subId || !dateIso) return { conflict: false, booked: 0, capacity: 0 }
-    const sub = (app.subcontractors ?? []).find((s) => s.id === subId) ?? null
-    const capacity = Math.max(1, Number(sub?.max_concurrent_lots ?? 1) || 1)
-    const lotIds = new Set()
-
-    for (const lot of activeLots) {
-      for (const t of lot.tasks ?? []) {
-        if (t.status === 'complete') continue
-        if (t.sub_id !== subId) continue
-        if (!taskInRange(t, dateIso)) continue
-        lotIds.add(lot.id)
-      }
-    }
-
-    const bookedAfter = lotIds.size + (lotIds.has(movingLotId) ? 0 : 1)
-    return { conflict: bookedAfter > capacity, booked: bookedAfter, capacity }
-  }
-
   const getCalendarDropStatus = ({ lot, task, targetDateIso }) => {
-    if (!lot || !task || !targetDateIso) return { status: 'invalid', normalized: '', earliest: null, conflict: null }
+    if (!lot || !task || !targetDateIso) return { status: 'invalid', normalized: '', earliest: null }
     const normalized = formatISODate(getNextWorkDay(targetDateIso) ?? parseISODate(targetDateIso)) || targetDateIso
-    const conflict = task.sub_id ? getSubConflictPreview({ subId: task.sub_id, dateIso: normalized, movingLotId: lot.id }) : null
-    if (conflict?.conflict) return { status: 'conflict', normalized, earliest: null, conflict }
-    return { status: 'valid', normalized, earliest: null, conflict }
+    return { status: 'valid', normalized, earliest: null }
   }
 
   const applyReschedule = ({ lot, task, targetDateIso, reason, notifySubs, preview }) => {
@@ -4997,45 +5184,6 @@ export default function BuildFlow() {
               </button>
             </div>
 
-            {subConflicts.length > 0 ? (
-              <Card>
-                <h3 className="font-semibold mb-3">⚠️ Sub Conflicts Detected</h3>
-                <div className="space-y-2">
-                  {subConflicts.slice(0, 2).map((c) => (
-                    <div key={`${c.sub?.id ?? ''}-${c.date}`} className="bg-gray-50 rounded-xl border border-gray-200 p-3">
-                      <p className="font-semibold text-gray-900">{c.sub?.company_name ?? 'Sub'}</p>
-                      <p className="text-xs text-gray-600 mt-1">
-                        {formatShortDate(c.date)} • Max capacity: {c.capacity} | Booked: {c.booked}
-                      </p>
-                      <div className="mt-2 space-y-1 text-xs text-gray-700">
-                        {c.jobs.map((j) => (
-                          <p key={j.lot.id}>
-                            • {j.community?.name ?? ''} {lotCode(j.lot)} ({j.task.name})
-                          </p>
-                        ))}
-                      </div>
-                      <div className="mt-2 flex gap-2">
-                        <button
-                          onClick={() => {
-                            const first = c.jobs[0]
-                            if (!first) return
-                            setTab('calendar')
-                            setCalendarView('day')
-                            setCalendarDate(c.date)
-                            setRescheduleModal({ lot_id: first.lot.id, task_id: first.task.id, initial_date: c.date })
-                          }}
-                          className="flex-1 h-10 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
-                        >
-                          Resolve
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {subConflicts.length > 2 ? <p className="text-xs text-gray-500">+ {subConflicts.length - 2} more conflicts</p> : null}
-                </div>
-              </Card>
-            ) : null}
-
             <Card>
               <h3 className="font-semibold mb-3">On Site Today</h3>
               {todaysAssignments.length === 0 ? (
@@ -5423,11 +5571,9 @@ export default function BuildFlow() {
                         const dropCls =
                           drop?.status === 'invalid'
                             ? 'bg-red-100/60'
-                            : drop?.status === 'conflict'
-                              ? 'bg-yellow-100/70'
-                              : drop?.status === 'valid'
-                                ? 'bg-green-100/70'
-                                : ''
+                            : drop?.status === 'valid'
+                              ? 'bg-green-100/70'
+                              : ''
                         return (
                           <div key={row.lot.id} className="flex border-b">
                             <div className="w-44 shrink-0 p-2 border-r">
@@ -5557,11 +5703,9 @@ export default function BuildFlow() {
                     const dropCls =
                       drop?.status === 'invalid'
                         ? 'bg-red-50 border-red-200'
-                        : drop?.status === 'conflict'
-                          ? 'bg-yellow-50 border-yellow-200'
-                          : drop?.status === 'valid'
-                            ? 'bg-green-50 border-green-200'
-                            : 'bg-transparent border-transparent'
+                        : drop?.status === 'valid'
+                          ? 'bg-green-50 border-green-200'
+                          : 'bg-transparent border-transparent'
                     return (
                       <div
                         key={iso}
@@ -6421,6 +6565,17 @@ export default function BuildFlow() {
                       </button>
                     </div>
 
+                    {scheduleEditLock.lotId === selectedLot.id && (scheduleEditLock.warning || scheduleEditLock.error) ? (
+                      <Card className={`border ${scheduleEditLock.error ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
+                        <p className={`text-xs font-semibold ${scheduleEditLock.error ? 'text-red-800' : 'text-amber-900'}`}>
+                          {scheduleEditLock.error ? 'Schedule locked' : 'Schedule lock notice'}
+                        </p>
+                        <p className={`text-xs mt-1 ${scheduleEditLock.error ? 'text-red-700' : 'text-amber-800'}`}>
+                          {scheduleEditLock.error || scheduleEditLock.warning}
+                        </p>
+                      </Card>
+                    ) : null}
+
                     {scheduleView === 'timeline' ? (
                       <div className="space-y-3">
                         <div className="flex gap-2">
@@ -6443,8 +6598,10 @@ export default function BuildFlow() {
                           org={org}
                           scale={scheduleTimelineScale}
                           onSelectTask={(taskId) => setTaskModal({ lot_id: selectedLot.id, task_id: taskId })}
-                          onRescheduleTask={({ task, targetDateIso, preview }) => {
+                          onRescheduleTask={async ({ task, targetDateIso, preview }) => {
                             if (!selectedLot || !task) return
+                            const canEdit = await runScheduleEditWithLock(selectedLot.id, async () => {})
+                            if (!canEdit) return
                             const outcome = applyReschedule({ lot: selectedLot, task, targetDateIso, preview })
                             if (outcome.status === 'invalid') alert('Could not reschedule task.')
                           }}
@@ -6774,7 +6931,7 @@ export default function BuildFlow() {
                         <div>
                           <p className="font-semibold">{sub.company_name}</p>
                           <p className="text-xs text-gray-600 mt-1">
-                            Trade: {tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade} • Capacity: {sub.max_concurrent_lots}
+                            Trade: {tradeOptions.find((t) => t.id === sub.trade)?.label ?? sub.trade}
                           </p>
                         </div>
                       </div>
@@ -8734,9 +8891,11 @@ export default function BuildFlow() {
           isOnline={isOnline}
           prefill={startLotPrefill}
           onClose={closeStartLot}
-          onStart={({ lotId, form, draftTasks }) => {
+          onStart={async ({ lotId, form, draftTasks }) => {
+            const canEdit = await runScheduleEditWithLock(lotId, async () => {})
+            if (!canEdit) return
+
             setApp((prev) => {
-              const existingLots = prev.lots
               let startedLot = null
               const nextLots = prev.lots.map((l) => {
                 if (l.id !== lotId) return l
@@ -8757,7 +8916,6 @@ export default function BuildFlow() {
                   template: resolvedTemplate ?? prev.template,
                   orgSettings: prev.org,
                   subcontractors: prev.subcontractors,
-                  existingLots,
                   draftTasks: Array.isArray(draftTasks) ? draftTasks : [],
                 })
                 startedLot = next
@@ -8860,9 +9018,11 @@ export default function BuildFlow() {
             onAddPhoto={() => setPhotoSourceModal({ lot_id: lot.id, task_id: task.id })}
             onMessage={() => setMessageModal({ lot_id: lot.id, task_id: task.id, sub_id: sub?.id ?? null })}
             onMarkIncomplete={() => markTaskIncomplete(lot.id, task.id)}
-            onDeleteTask={() => {
+            onDeleteTask={async () => {
               const ok = window.confirm(`Delete this task?\n\n${task.name}\n\nThis cannot be undone.`)
               if (!ok) return
+              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+              if (!canEdit) return
               deleteLotTask(lot.id, task.id, task.name)
               setTaskModal(null)
             }}
@@ -8883,7 +9043,9 @@ export default function BuildFlow() {
             org={org}
             subcontractors={app.subcontractors ?? []}
             onClose={() => setAddTaskModal(null)}
-            onSave={(task) => {
+            onSave={async (task) => {
+              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+              if (!canEdit) return
               updateLot(lot.id, (current) => ({
                 ...current,
                 tasks: refreshReadyStatuses([...(current.tasks ?? []), task]),
@@ -8905,6 +9067,9 @@ export default function BuildFlow() {
             org={org}
             onClose={() => setDelayModal(null)}
             onApply={async ({ days, reason, notes, photoFile, notifySubs }) => {
+              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+              if (!canEdit) return
+
               const preview = previewDelayImpact(lot, task.id, days, org)
               const affected = (preview.affected ?? []).filter((a) => a.old_start !== a.new_start)
 
@@ -8971,7 +9136,9 @@ export default function BuildFlow() {
             isOnline={isOnline}
             initialDate={rescheduleModal.initial_date ?? null}
             onClose={() => setRescheduleModal(null)}
-            onApply={({ newStartDate, reason, notifySubs, preview }) => {
+            onApply={async ({ newStartDate, reason, notifySubs, preview }) => {
+              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+              if (!canEdit) return
               applyReschedule({ lot, task, targetDateIso: newStartDate, reason, notifySubs, preview })
               setRescheduleModal(null)
             }}
@@ -8989,9 +9156,11 @@ export default function BuildFlow() {
             task={task}
             org={org}
             onClose={() => setBufferModal(null)}
-            onApply={({ days, bufferTaskId }) => {
+            onApply={async ({ days, bufferTaskId }) => {
               const value = Math.max(1, Number(days) || 1)
               if (value <= 0) return
+              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+              if (!canEdit) return
               updateLot(lot.id, (current) => insertBufferTaskAfter(current, task.id, value, org, { buffer_task_id: bufferTaskId }))
               if (!isOnline) {
                 enqueueSyncOp({
@@ -9016,9 +9185,11 @@ export default function BuildFlow() {
             lot={lot}
             org={org}
             onClose={() => setCreateBufferModal(null)}
-            onCreate={({ anchorTaskId, days, bufferTaskId }) => {
+            onCreate={async ({ anchorTaskId, days, bufferTaskId }) => {
               const value = Math.max(1, Number(days) || 1)
               if (!anchorTaskId || value <= 0) return
+              const canEdit = await runScheduleEditWithLock(lot.id, async () => {})
+              if (!canEdit) return
               updateLot(lot.id, (current) => insertBufferTaskAfter(current, anchorTaskId, value, org, { buffer_task_id: bufferTaskId }))
               if (!isOnline) {
                 enqueueSyncOp({
@@ -9821,7 +9992,6 @@ export default function BuildFlow() {
                 license_number: null,
                 w9_on_file: false,
                 crew_size: null,
-                max_concurrent_lots: 1,
                 is_preferred: false,
                 is_backup: false,
                 rating: 0,
@@ -10162,7 +10332,6 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       template,
       orgSettings: org,
       subcontractors: app.subcontractors,
-      existingLots: lots,
     })
 
     const nextTasks = nextLot?.tasks ?? []
@@ -10449,7 +10618,6 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       template,
       orgSettings: org,
       subcontractors: app.subcontractors,
-      existingLots: lots,
     })
     const nextTasks = nextLot?.tasks ?? []
     setDraftTasks(nextTasks)

@@ -6,6 +6,26 @@ export const formatISODate = (dateLike) => {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 }
 
+export const formatISODateInTimeZone = (dateLike, timeZone) => {
+  const d = dateLike instanceof Date ? dateLike : new Date(dateLike)
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return ''
+  const tz = String(timeZone || '').trim() || 'America/Chicago'
+
+  // Use formatToParts so we are not dependent on locale output formatting.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d)
+
+  const year = parts.find((p) => p.type === 'year')?.value ?? ''
+  const month = parts.find((p) => p.type === 'month')?.value ?? ''
+  const day = parts.find((p) => p.type === 'day')?.value ?? ''
+  if (!year || !month || !day) return ''
+  return `${year}-${month}-${day}`
+}
+
 export const parseISODate = (iso) => {
   if (iso instanceof Date) return new Date(iso.getFullYear(), iso.getMonth(), iso.getDate())
   if (typeof iso !== 'string') return null

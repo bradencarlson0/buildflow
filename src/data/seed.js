@@ -5,6 +5,8 @@ export const DEFAULT_ORG_SETTINGS = {
   name: 'ABC Homes',
   builder_name: 'ABC Homes',
   super_phone: '555-555-0000',
+  timezone: 'America/Chicago',
+  is_demo: false,
   default_build_days: 60,
   work_days: [1, 2, 3, 4, 5],
   custom_fields: [

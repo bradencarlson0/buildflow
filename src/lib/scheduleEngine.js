@@ -251,41 +251,8 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
   return created
 }
 
-export const assignSubsToTasks = (tasks, subs, existingLots) => {
+export const assignSubsToTasks = (tasks, subs) => {
   const activeSubs = (subs ?? []).filter((s) => s.status === 'active')
-  const jobsBySubByDate = new Map()
-
-  const indexJob = (subId, dateIso) => {
-    if (!subId || !dateIso) return
-    if (!jobsBySubByDate.has(subId)) jobsBySubByDate.set(subId, new Map())
-    const byDate = jobsBySubByDate.get(subId)
-    byDate.set(dateIso, (byDate.get(dateIso) ?? 0) + 1)
-  }
-
-  const seededTasks = []
-  for (const lot of existingLots ?? []) {
-    for (const t of lot?.tasks ?? []) {
-      if (!t?.sub_id || !t?.scheduled_start || !t?.scheduled_end) continue
-      seededTasks.push(t)
-    }
-  }
-
-  const rangeDates = (startIso, endIso) => {
-    const start = parseISODate(startIso)
-    const end = parseISODate(endIso)
-    if (!start || !end || end < start) return []
-    const dates = []
-    const d = new Date(start)
-    while (d <= end) {
-      dates.push(formatISODate(d))
-      d.setDate(d.getDate() + 1)
-    }
-    return dates
-  }
-
-  for (const t of seededTasks) {
-    for (const dateIso of rangeDates(t.scheduled_start, t.scheduled_end)) indexJob(t.sub_id, dateIso)
-  }
 
   const isBlackout = (sub, dateIso) => {
     const d = parseISODate(dateIso)
@@ -298,13 +265,9 @@ export const assignSubsToTasks = (tasks, subs, existingLots) => {
     })
   }
 
-  const jobsOnDate = (subId, dateIso) => jobsBySubByDate.get(subId)?.get(dateIso) ?? 0
-
   const isAvailable = (sub, dateIso) => {
     if (isBlackout(sub, dateIso)) return false
-    const cap = Number(sub.max_concurrent_lots ?? 0) || 0
-    if (cap <= 0) return true
-    return jobsOnDate(sub.id, dateIso) < cap
+    return true
   }
 
   const pickSubForTrade = (tradeId, dateIso) => {
@@ -333,9 +296,6 @@ export const assignSubsToTasks = (tasks, subs, existingLots) => {
     if (!task.scheduled_start) continue
     const chosen = pickSubForTrade(task.trade, task.scheduled_start)
     task.sub_id = chosen?.id ?? null
-    if (task.sub_id) {
-      for (const dateIso of rangeDates(task.scheduled_start, task.scheduled_end)) indexJob(task.sub_id, dateIso)
-    }
   }
 
   return next
@@ -1179,7 +1139,6 @@ export const startLotFromTemplate = ({
   template,
   orgSettings,
   subcontractors,
-  existingLots,
   draftTasks,
   draft_tasks,
 }) => {
@@ -1189,7 +1148,7 @@ export const startLotFromTemplate = ({
 
   const providedTasks = (draftTasks ?? draft_tasks ?? []).map((t) => ({ ...t }))
   const baseTasks = providedTasks.length > 0 ? providedTasks : buildLotTasksFromTemplate(lot.id, normalizedStart, template, orgSettings)
-  const tasksWithSubs = assignSubsToTasks(baseTasks, subcontractors, existingLots)
+  const tasksWithSubs = assignSubsToTasks(baseTasks, subcontractors)
   const nextTasks = refreshReadyStatuses(tasksWithSubs)
 
   const effectiveBuildDays = template?.build_days ?? lot.build_days
