@@ -126,7 +126,7 @@ Still to decide:
 - [ ] Verify behavior with a non-admin â€œsuperâ€ user in a non-demo org (should be read-only until self-assign/assignment).
 - [ ] Add server RPC functions for `sync_pull` and `sync_push` once the client outbox format is defined (Milestone 3).
 - [x] (2026-02-06 00:10Z) Added `src/lib/localDb.js` (IndexedDB entity stores + durable outbox + meta helpers; not wired into UI yet).
-- [ ] Implement local schema migrations and a one-time import from localStorage snapshot into `localDb`.
+- [x] (2026-02-06) Implemented a one-time import from the localStorage snapshot into `localDb` (normalized entity stores + outbox mirror) and mirrored newly enqueued sync ops into the IndexedDB outbox (best-effort; does not change UI behavior yet).
 - [ ] Wire the app to read/write through `localDb` behind a feature flag (keep localStorage snapshot as fallback during migration).
 - [ ] Implement sync engine v2 (push outbox + pull cursor) behind a feature flag; keep current snapshot sync as fallback during migration.
 - [ ] Convert core user flows (start lot, edit tasks, reschedule, add notes/photos/docs) to write through the new local store + outbox.

@@ -87,6 +87,7 @@ import {
   startLotFromTemplate,
 } from './lib/scheduleEngine.js'
 import { deleteBlob, getBlob, putBlob } from './lib/idb.js'
+import { ensureImportedFromSnapshotV1, outboxEnqueue } from './lib/localDb.js'
 import { uuid } from './lib/uuid.js'
 import { supabase } from './lib/supabaseClient.js'
 
@@ -1081,10 +1082,29 @@ export default function BuildFlow() {
   const listDropPulseTimerRef = useRef(null)
   const listSuppressClickRef = useRef(false)
   const supabaseWriteInFlightRef = useRef(false)
+  const localDbReadyRef = useRef(false)
+  const initialAppSnapshotRef = useRef(app)
 
   useEffect(() => {
     saveAppState(app)
   }, [app])
+
+  useEffect(() => {
+    if (localDbReadyRef.current) return
+    localDbReadyRef.current = true
+
+    // Async + best-effort: create an IndexedDB-backed normalized copy of the local snapshot.
+    // This is the foundation for the durable outbox + sync v2, but does not change UI behavior yet.
+    const run = async () => {
+      try {
+        const snapshot = initialAppSnapshotRef.current
+        await ensureImportedFromSnapshotV1(snapshot, { org_id: snapshot?.org?.id ?? null })
+      } catch {
+        // Non-fatal: continue using localStorage snapshot only.
+      }
+    }
+    run()
+  }, [])
 
   useEffect(() => {
     setApp((prev) => {
@@ -1920,6 +1940,14 @@ export default function BuildFlow() {
       entity_id: entity_id ?? null,
       summary: summary ?? '',
       created_at: now,
+    }
+
+    // Best-effort: mirror into IndexedDB outbox so v2 sync can pick it up later.
+    // (Do not await; UI must stay responsive and localStorage snapshot remains the primary durability today.)
+    try {
+      Promise.resolve().then(() => outboxEnqueue({ ...op, next_retry_at: null }))
+    } catch {
+      // ignore
     }
 
     setApp((prev) => ({

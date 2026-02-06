@@ -176,6 +176,18 @@ export const outboxEnqueue = async (op) => {
   return op.id
 }
 
+export const outboxEnqueueMany = async (ops) => {
+  if (!Array.isArray(ops) || ops.length === 0) return
+  const db = await openLocalDb()
+  const tx = db.transaction(STORES.OUTBOX, 'readwrite')
+  const store = tx.objectStore(STORES.OUTBOX)
+  for (const op of ops) {
+    if (!op?.id) continue
+    store.put(op)
+  }
+  await txDone(tx)
+}
+
 export const outboxList = async () => {
   const db = await openLocalDb()
   const tx = db.transaction(STORES.OUTBOX, 'readonly')
@@ -216,3 +228,84 @@ export const clearLocalDb = async () => {
   await txDone(tx)
 }
 
+const IMPORT_META_KEY = 'import:snapshot_v1'
+
+const withOrgId = (row, orgId) => {
+  if (!row || typeof row !== 'object') return row
+  if (!orgId) return row
+  return row.org_id ? row : { ...row, org_id: orgId }
+}
+
+export const getImportStatus = async () => {
+  const value = await metaGet(IMPORT_META_KEY)
+  return value && typeof value === 'object' ? value : null
+}
+
+// One-time import: convert the existing localStorage "app graph" snapshot into normalized entity stores.
+// This does not change the app behavior yet; it just creates a durable foundation for sync v2.
+export const importSnapshotV1 = async (state, options = {}) => {
+  const orgId =
+    options.org_id ?? options.orgId ?? state?.org?.id ?? null
+
+  const now = new Date().toISOString()
+
+  const communities = Array.isArray(state?.communities) ? state.communities : []
+  const lots = Array.isArray(state?.lots) ? state.lots : []
+  const subcontractors = Array.isArray(state?.subcontractors) ? state.subcontractors : []
+  const productTypes = Array.isArray(state?.product_types) ? state.product_types : []
+  const plans = Array.isArray(state?.plans) ? state.plans : []
+  const agencies = Array.isArray(state?.agencies) ? state.agencies : []
+
+  const tasks = []
+  const lotsWithoutTasks = []
+  for (const lot of lots) {
+    const lotTasks = Array.isArray(lot?.tasks) ? lot.tasks : []
+    for (const t of lotTasks) {
+      if (!t?.id) continue
+      tasks.push(withOrgId({ ...t, lot_id: lot.id }, orgId))
+    }
+    const { tasks: _tasks, ...rest } = lot ?? {}
+    lotsWithoutTasks.push(withOrgId(rest, orgId))
+  }
+
+  const pending = Array.isArray(state?.sync?.pending) ? state.sync.pending : []
+  const outboxOps = pending
+    .filter((op) => op?.id)
+    .map((op) => withOrgId({ ...op, next_retry_at: op.next_retry_at ?? null }, orgId))
+
+  await Promise.all([
+    upsertMany(STORES.COMMUNITIES, communities.map((c) => withOrgId(c, orgId))),
+    upsertMany(STORES.LOTS, lotsWithoutTasks),
+    upsertMany(STORES.TASKS, tasks),
+    upsertMany(STORES.SUBCONTRACTORS, subcontractors.map((s) => withOrgId(s, orgId))),
+    upsertMany(STORES.PRODUCT_TYPES, productTypes.map((pt) => withOrgId(pt, orgId))),
+    upsertMany(STORES.PLANS, plans.map((p) => withOrgId(p, orgId))),
+    upsertMany(STORES.AGENCIES, agencies.map((a) => withOrgId(a, orgId))),
+    outboxEnqueueMany(outboxOps),
+  ])
+
+  const summary = {
+    imported_at: now,
+    org_id: orgId,
+    counts: {
+      communities: communities.length,
+      lots: lotsWithoutTasks.length,
+      tasks: tasks.length,
+      subcontractors: subcontractors.length,
+      product_types: productTypes.length,
+      plans: plans.length,
+      agencies: agencies.length,
+      outbox: outboxOps.length,
+    },
+  }
+
+  await metaSet(IMPORT_META_KEY, summary)
+  return summary
+}
+
+export const ensureImportedFromSnapshotV1 = async (state, options = {}) => {
+  const existing = await getImportStatus()
+  if (existing) return { status: 'skipped', ...existing }
+  const imported = await importSnapshotV1(state, options)
+  return { status: 'imported', ...imported }
+}
