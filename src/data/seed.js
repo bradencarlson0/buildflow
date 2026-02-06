@@ -1148,6 +1148,7 @@ export const createSeedState = () => {
     communities,
     contact_library,
     lots,
+    lot_assignments: [],
     messages: [],
     notifications: [],
     sync: {

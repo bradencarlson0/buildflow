@@ -5,7 +5,7 @@
 // reads/writes to this store behind feature flags.
 
 const DB_NAME = 'buildflow_local'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export const STORES = {
   META: 'meta',
@@ -13,6 +13,7 @@ export const STORES = {
   COMMUNITIES: 'communities',
   LOTS: 'lots',
   TASKS: 'tasks',
+  LOT_ASSIGNMENTS: 'lot_assignments',
   SUBCONTRACTORS: 'subcontractors',
   PRODUCT_TYPES: 'product_types',
   PLANS: 'plans',
@@ -67,6 +68,13 @@ export const openLocalDb = () => {
       ensureEntityStore(STORES.TASKS, [
         { name: 'org_id', keyPath: 'org_id' },
         { name: 'lot_id', keyPath: 'lot_id' },
+        { name: 'updated_at', keyPath: 'updated_at' },
+      ])
+
+      ensureEntityStore(STORES.LOT_ASSIGNMENTS, [
+        { name: 'org_id', keyPath: 'org_id' },
+        { name: 'lot_id', keyPath: 'lot_id' },
+        { name: 'profile_id', keyPath: 'profile_id' },
         { name: 'updated_at', keyPath: 'updated_at' },
       ])
 
@@ -228,7 +236,7 @@ export const clearLocalDb = async () => {
   await txDone(tx)
 }
 
-const IMPORT_META_KEY = 'import:snapshot_v1'
+const importMetaKey = (orgId) => `import:snapshot_v1:${orgId || 'unknown'}`
 
 const withOrgId = (row, orgId) => {
   if (!row || typeof row !== 'object') return row
@@ -237,7 +245,10 @@ const withOrgId = (row, orgId) => {
 }
 
 export const getImportStatus = async () => {
-  const value = await metaGet(IMPORT_META_KEY)
+  // Backward compat: check legacy single-key status first, then per-org.
+  const legacy = await metaGet('import:snapshot_v1')
+  if (legacy && typeof legacy === 'object') return legacy
+  const value = await metaGet(importMetaKey('unknown'))
   return value && typeof value === 'object' ? value : null
 }
 
@@ -255,6 +266,7 @@ export const importSnapshotV1 = async (state, options = {}) => {
   const productTypes = Array.isArray(state?.product_types) ? state.product_types : []
   const plans = Array.isArray(state?.plans) ? state.plans : []
   const agencies = Array.isArray(state?.agencies) ? state.agencies : []
+  const lotAssignments = Array.isArray(state?.lot_assignments) ? state.lot_assignments : []
 
   const tasks = []
   const lotsWithoutTasks = []
@@ -277,6 +289,7 @@ export const importSnapshotV1 = async (state, options = {}) => {
     upsertMany(STORES.COMMUNITIES, communities.map((c) => withOrgId(c, orgId))),
     upsertMany(STORES.LOTS, lotsWithoutTasks),
     upsertMany(STORES.TASKS, tasks),
+    upsertMany(STORES.LOT_ASSIGNMENTS, lotAssignments.map((a) => withOrgId(a, orgId))),
     upsertMany(STORES.SUBCONTRACTORS, subcontractors.map((s) => withOrgId(s, orgId))),
     upsertMany(STORES.PRODUCT_TYPES, productTypes.map((pt) => withOrgId(pt, orgId))),
     upsertMany(STORES.PLANS, plans.map((p) => withOrgId(p, orgId))),
@@ -291,6 +304,7 @@ export const importSnapshotV1 = async (state, options = {}) => {
       communities: communities.length,
       lots: lotsWithoutTasks.length,
       tasks: tasks.length,
+      lot_assignments: lotAssignments.length,
       subcontractors: subcontractors.length,
       product_types: productTypes.length,
       plans: plans.length,
@@ -299,13 +313,14 @@ export const importSnapshotV1 = async (state, options = {}) => {
     },
   }
 
-  await metaSet(IMPORT_META_KEY, summary)
+  await metaSet(importMetaKey(orgId), summary)
   return summary
 }
 
 export const ensureImportedFromSnapshotV1 = async (state, options = {}) => {
-  const existing = await getImportStatus()
-  if (existing) return { status: 'skipped', ...existing }
+  const orgId = options.org_id ?? options.orgId ?? state?.org?.id ?? null
+  const existing = await metaGet(importMetaKey(orgId))
+  if (existing && typeof existing === 'object') return { status: 'skipped', ...existing }
   const imported = await importSnapshotV1(state, options)
   return { status: 'imported', ...imported }
 }

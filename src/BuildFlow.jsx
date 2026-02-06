@@ -65,7 +65,7 @@ import {
   parseISODate,
 } from './lib/date.js'
 import { fillTemplate } from './lib/templating.js'
-import { clearAppState, loadAppState, saveAppState } from './lib/storage.js'
+import { clearAppState, loadAppState, loadAppStateFromIdb, loadStoredAppStateRaw, saveAppState } from './lib/storage.js'
 import { normalizeRange, toRangeString, validateAssignments } from './lib/utils.js'
 import {
   applyDelayCascade,
@@ -964,7 +964,8 @@ const BottomNav = ({ value, onChange }) => {
 }
 
 export default function BuildFlow() {
-  const [app, setApp] = useState(() => loadAppState(createSeedState()))
+  const seedState = useMemo(() => createSeedState(), [])
+  const [app, setApp] = useState(() => loadAppState(seedState))
   const [tab, setTab] = useState('dashboard')
   const [selectedCommunityId, setSelectedCommunityId] = useState(null)
   const [selectedLotId, setSelectedLotId] = useState(null)
@@ -1030,6 +1031,7 @@ export default function BuildFlow() {
   const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
+  const [claimLotBusyId, setClaimLotBusyId] = useState(null)
   const [supabaseSession, setSupabaseSession] = useState(null)
   const [supabaseUser, setSupabaseUser] = useState(null)
   const [supabaseBootstrapVersion, setSupabaseBootstrapVersion] = useState(0)
@@ -1082,29 +1084,69 @@ export default function BuildFlow() {
   const listDropPulseTimerRef = useRef(null)
   const listSuppressClickRef = useRef(false)
   const supabaseWriteInFlightRef = useRef(false)
-  const localDbReadyRef = useRef(false)
-  const initialAppSnapshotRef = useRef(app)
+  const persistenceBootstrappedRef = useRef(false)
+  const latestAppRef = useRef(app)
+  const localDbImportedOrgIdRef = useRef(null)
 
   useEffect(() => {
+    latestAppRef.current = app
+    if (!persistenceBootstrappedRef.current) return
     saveAppState(app)
   }, [app])
 
   useEffect(() => {
-    if (localDbReadyRef.current) return
-    localDbReadyRef.current = true
+    let cancelled = false
+
+    // Boot sequence (best-effort):
+    // 1) If localStorage is empty/corrupt, try to restore from IndexedDB snapshot mirror.
+    // 2) Only then start persisting changes (avoid clobbering a recoverable state with seed data).
+    const boot = async () => {
+      try {
+        const raw = loadStoredAppStateRaw()
+        if (!raw) {
+          const restored = await loadAppStateFromIdb(seedState)
+          if (!cancelled && restored) {
+            setApp(restored)
+            latestAppRef.current = restored
+          }
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) {
+          persistenceBootstrappedRef.current = true
+          try {
+            // Ensure we have at least one persisted snapshot for future restores.
+            saveAppState(latestAppRef.current)
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    boot()
+
+    return () => {
+      cancelled = true
+    }
+  }, [seedState])
+
+  useEffect(() => {
+    const orgId = supabaseStatus?.orgId ?? app?.org?.id ?? null
+    if (!orgId) return
+    if (localDbImportedOrgIdRef.current === orgId) return
+    localDbImportedOrgIdRef.current = orgId
 
     // Async + best-effort: create an IndexedDB-backed normalized copy of the local snapshot.
     // This is the foundation for the durable outbox + sync v2, but does not change UI behavior yet.
-    const run = async () => {
-      try {
-        const snapshot = initialAppSnapshotRef.current
-        await ensureImportedFromSnapshotV1(snapshot, { org_id: snapshot?.org?.id ?? null })
-      } catch {
+    const snapshot = latestAppRef.current
+    void Promise.resolve()
+      .then(() => ensureImportedFromSnapshotV1(snapshot, { org_id: orgId }))
+      .catch(() => {
         // Non-fatal: continue using localStorage snapshot only.
-      }
-    }
-    run()
-  }, [])
+      })
+  }, [app?.org?.id, supabaseStatus?.orgId])
 
   useEffect(() => {
     setApp((prev) => {
@@ -1194,7 +1236,7 @@ export default function BuildFlow() {
   useEffect(() => {
     let cancelled = false
 
-    const readOrgScopedRows = async (tableName, orgId, filterFallbackTables) => {
+    const readOrgScopedRows = async (tableName, orgId, filterFallbackTables, allowUnfilteredFallback = false) => {
       const withFilter = await supabase.from(tableName).select('*').eq('org_id', orgId)
       if (!withFilter.error) {
         return { rows: withFilter.data ?? [], missing: false, error: null }
@@ -1208,6 +1250,14 @@ export default function BuildFlow() {
       const orgColumnMissing = code === '42703' || (message.includes('org_id') && message.includes('column'))
       if (!orgColumnMissing) {
         return { rows: [], missing: false, error: withFilter.error }
+      }
+
+      if (!allowUnfilteredFallback) {
+        return {
+          rows: [],
+          missing: false,
+          error: new Error(`Refusing unfiltered read: ${tableName} is missing org_id column`),
+        }
       }
 
       const withoutFilter = await supabase.from(tableName).select('*')
@@ -1300,16 +1350,18 @@ export default function BuildFlow() {
       const orgRow = (orgResult.data ?? [])[0] ?? null
       const filterFallbackTables = []
       const missingTables = []
+      const allowUnfilteredFallback = Boolean(supabaseUser?.is_anonymous) || Boolean(orgRow?.is_demo)
 
-      const communitiesRead = await readOrgScopedRows('communities', orgId, filterFallbackTables)
-      const lotsRead = await readOrgScopedRows('lots', orgId, filterFallbackTables)
-      const tasksRead = await readOrgScopedRows('tasks', orgId, filterFallbackTables)
-      const subsRead = await readOrgScopedRows('subcontractors', orgId, filterFallbackTables)
-      const productTypesRead = await readOrgScopedRows('product_types', orgId, filterFallbackTables)
-      const plansRead = await readOrgScopedRows('plans', orgId, filterFallbackTables)
-      const agenciesRead = await readOrgScopedRows('agencies', orgId, filterFallbackTables)
+      const communitiesRead = await readOrgScopedRows('communities', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const lotsRead = await readOrgScopedRows('lots', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const tasksRead = await readOrgScopedRows('tasks', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const subsRead = await readOrgScopedRows('subcontractors', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const productTypesRead = await readOrgScopedRows('product_types', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const plansRead = await readOrgScopedRows('plans', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const agenciesRead = await readOrgScopedRows('agencies', orgId, filterFallbackTables, allowUnfilteredFallback)
+      const assignmentsRead = await readOrgScopedRows('lot_assignments', orgId, filterFallbackTables, allowUnfilteredFallback)
 
-      const reads = [communitiesRead, lotsRead, tasksRead, subsRead, productTypesRead, plansRead, agenciesRead]
+      const reads = [communitiesRead, lotsRead, tasksRead, subsRead, productTypesRead, plansRead, agenciesRead, assignmentsRead]
       const fatalReadError = reads.find((r) => r.error)?.error ?? null
       if (fatalReadError) {
         setSupabaseStatus((prev) => ({
@@ -1330,6 +1382,7 @@ export default function BuildFlow() {
       if (productTypesRead.missing) missingTables.push('product_types')
       if (plansRead.missing) missingTables.push('plans')
       if (agenciesRead.missing) missingTables.push('agencies')
+      if (assignmentsRead.missing) missingTables.push('lot_assignments')
 
       const tasksByLotId = new Map()
       for (const taskRow of tasksRead.rows ?? []) {
@@ -1349,6 +1402,8 @@ export default function BuildFlow() {
       const mappedProductTypes = coerceArray(productTypesRead.rows)
       const mappedPlans = coerceArray(plansRead.rows)
       const mappedAgencies = coerceArray(agenciesRead.rows)
+      const mappedAssignments = coerceArray(assignmentsRead.rows)
+      const shouldSetAssignments = !assignmentsRead.missing
 
       const hasRemoteCoreData = mappedCommunities.length > 0 || mappedLots.length > 0 || mappedSubs.length > 0
 
@@ -1374,19 +1429,36 @@ export default function BuildFlow() {
           holidays: nextHolidays,
         }
 
+        // Persist last-known auth scope into the snapshot so we can enforce "super assignment"
+        // rules even if the device restarts offline.
+        const prevSync = prev.sync ?? {}
+        const nextSync = {
+          ...prevSync,
+          supabase_user_id: supabaseUser?.id ?? prevSync.supabase_user_id ?? null,
+          supabase_org_id: orgId ?? prevSync.supabase_org_id ?? null,
+          supabase_role: profile?.role ?? guestRole ?? prevSync.supabase_role ?? null,
+        }
+
         if (!hasRemoteCoreData) {
-          return { ...prev, org: nextOrg }
+          return {
+            ...prev,
+            org: nextOrg,
+            sync: nextSync,
+            lot_assignments: shouldSetAssignments ? mappedAssignments : prev.lot_assignments,
+          }
         }
 
         return {
           ...prev,
           org: nextOrg,
+          sync: nextSync,
           communities: mappedCommunities.length > 0 ? mappedCommunities : prev.communities,
           lots: mappedLots.length > 0 ? mappedLots : prev.lots,
           subcontractors: mappedSubs.length > 0 ? mappedSubs : prev.subcontractors,
           product_types: mappedProductTypes.length > 0 ? mappedProductTypes : prev.product_types,
           plans: mappedPlans.length > 0 ? mappedPlans : prev.plans,
           agencies: mappedAgencies.length > 0 ? mappedAgencies : prev.agencies,
+          lot_assignments: shouldSetAssignments ? mappedAssignments : prev.lot_assignments,
         }
       })
 
@@ -1416,6 +1488,7 @@ export default function BuildFlow() {
           tasks: (tasksRead.rows ?? []).length,
           subcontractors: mappedSubs.length,
           product_types: mappedProductTypes.length,
+          lot_assignments: mappedAssignments.length,
         },
         warning: warningParts.join(' | '),
       })
@@ -1460,32 +1533,34 @@ export default function BuildFlow() {
       throw new Error(`Profile upsert failed: ${profileUpsert.error.message}`)
     }
 
-    const orgUpdatePayload = {
-      name: orgRow.name,
-      builder_name: orgRow.builder_name,
-      timezone: orgRow.timezone,
-      default_build_days: orgRow.default_build_days,
-      work_days: orgRow.work_days,
-      holidays: orgRow.holidays,
-    }
-
-    let orgUpdate = await supabase.from('organizations').update(orgUpdatePayload).eq('id', orgId)
-    if (orgUpdate.error) {
-      const code = String(orgUpdate.error?.code ?? '')
-      const message = String(orgUpdate.error?.message ?? '').toLowerCase()
-      const timezoneColumnMissing =
-        code === '42703' || (message.includes('timezone') && message.includes('column') && message.includes('does not exist'))
-
-      if (timezoneColumnMissing) {
-        // Backward-compat with older bootstrap schemas that don't yet have organizations.timezone.
-        // (The server-side default still keeps date math stable.)
-        const { timezone: _timezone, ...withoutTimezone } = orgUpdatePayload
-        orgUpdate = await supabase.from('organizations').update(withoutTimezone).eq('id', orgId)
+    if (orgRow) {
+      const orgUpdatePayload = {
+        name: orgRow.name,
+        builder_name: orgRow.builder_name,
+        timezone: orgRow.timezone,
+        default_build_days: orgRow.default_build_days,
+        work_days: orgRow.work_days,
+        holidays: orgRow.holidays,
       }
-    }
 
-    if (orgUpdate.error) {
-      throw new Error(`Organization update failed: ${orgUpdate.error.message}`)
+      let orgUpdate = await supabase.from('organizations').update(orgUpdatePayload).eq('id', orgId)
+      if (orgUpdate.error) {
+        const code = String(orgUpdate.error?.code ?? '')
+        const message = String(orgUpdate.error?.message ?? '').toLowerCase()
+        const timezoneColumnMissing =
+          code === '42703' || (message.includes('timezone') && message.includes('column') && message.includes('does not exist'))
+
+        if (timezoneColumnMissing) {
+          // Backward-compat with older bootstrap schemas that don't yet have organizations.timezone.
+          // (The server-side default still keeps date math stable.)
+          const { timezone: _timezone, ...withoutTimezone } = orgUpdatePayload
+          orgUpdate = await supabase.from('organizations').update(withoutTimezone).eq('id', orgId)
+        }
+      }
+
+      if (orgUpdate.error) {
+        throw new Error(`Organization update failed: ${orgUpdate.error.message}`)
+      }
     }
 
     const upsertRows = async (tableName, rows, onConflict) => {
@@ -1498,12 +1573,12 @@ export default function BuildFlow() {
       }
     }
 
-    await upsertRows('product_types', productTypes, 'id')
-    await upsertRows('plans', plansRows, 'id')
-    await upsertRows('agencies', agenciesRows, 'id')
-    await upsertRows('communities', communitiesRows, 'id')
-    await upsertRows('subcontractors', subcontractorRows, 'id')
-    await upsertRows('lots', lotRows, 'id')
+    await upsertRows('product_types', productTypes ?? [], 'id')
+    await upsertRows('plans', plansRows ?? [], 'id')
+    await upsertRows('agencies', agenciesRows ?? [], 'id')
+    await upsertRows('communities', communitiesRows ?? [], 'id')
+    await upsertRows('subcontractors', subcontractorRows ?? [], 'id')
+    await upsertRows('lots', lotRows ?? [], 'id')
 
     const deletedIds = Array.from(new Set(coerceArray(deletedTaskIds).filter(Boolean)))
     if (deletedIds.length > 0) {
@@ -1515,7 +1590,7 @@ export default function BuildFlow() {
       }
     }
 
-    await upsertRows('tasks', taskRows, 'id')
+    await upsertRows('tasks', taskRows ?? [], 'id')
 
     const syncedAt = new Date().toISOString()
     setSupabaseStatus((prev) => ({
@@ -1524,11 +1599,11 @@ export default function BuildFlow() {
       message: 'Supabase connected. Remote data is loaded.',
       loadedAt: syncedAt,
       counts: {
-        communities: communitiesRows.length,
-        lots: lotRows.length,
-        tasks: taskRows.length,
-        subcontractors: subcontractorRows.length,
-        product_types: productTypes.length,
+        communities: coerceArray(communitiesRows).length,
+        lots: coerceArray(lotRows).length,
+        tasks: coerceArray(taskRows).length,
+        subcontractors: coerceArray(subcontractorRows).length,
+        product_types: coerceArray(productTypes).length,
       },
     }))
 
@@ -1550,36 +1625,58 @@ export default function BuildFlow() {
 
     const orgId = supabaseStatus.orgId
     const orgConfig = app.org ?? {}
+    const effectiveRole = supabaseStatus.role ?? app?.sync?.supabase_role ?? null
+    if (!effectiveRole) return null
+    const isRestrictedSuper = effectiveRole === 'super' && !orgConfig?.is_demo
     const timezoneRaw = String(orgConfig?.timezone ?? '').trim()
-    const orgRow = {
-      id: orgId,
-      name: orgConfig?.name ?? orgConfig?.builder_name ?? 'BuildFlow',
-      builder_name: orgConfig?.builder_name ?? orgConfig?.name ?? 'BuildFlow',
-      timezone: timezoneRaw || 'America/Chicago',
-      default_build_days: Math.max(1, Number(orgConfig?.default_build_days ?? 1) || 1),
-      work_days: coerceArray(orgConfig?.work_days)
-        .map((day) => Number(day))
-        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6),
-      holidays: toSupabaseHolidayDates(orgConfig?.holidays),
-    }
 
-    const productTypes = (app.product_types ?? [])
-      .map((row) => mapProductTypeToSupabase(row, orgId))
-      .filter((row) => row?.id)
-    const plansRows = (app.plans ?? []).map((row) => mapPlanToSupabase(row, orgId)).filter((row) => row?.id)
-    const agenciesRows = (app.agencies ?? [])
-      .map((row) => mapAgencyToSupabase(row, orgId))
-      .filter((row) => row?.id)
-    const communitiesRows = (app.communities ?? [])
-      .map((row) => mapCommunityToSupabase(row, orgId))
-      .filter((row) => row?.id)
-    const subcontractorRows = (app.subcontractors ?? [])
-      .map((row) => mapSubcontractorToSupabase(row, orgId))
-      .filter((row) => row?.id)
-    const lotRows = (app.lots ?? []).map((row) => mapLotToSupabase(row, orgId)).filter((row) => row?.id)
+    // Non-demo supers are only allowed to write lots/tasks for lots they are assigned to.
+    // Snapshot sync is transitional; v2 sync will replace it.
+    const orgRow = isRestrictedSuper
+      ? null
+      : {
+          id: orgId,
+          name: orgConfig?.name ?? orgConfig?.builder_name ?? 'BuildFlow',
+          builder_name: orgConfig?.builder_name ?? orgConfig?.name ?? 'BuildFlow',
+          timezone: timezoneRaw || 'America/Chicago',
+          default_build_days: Math.max(1, Number(orgConfig?.default_build_days ?? 1) || 1),
+          work_days: coerceArray(orgConfig?.work_days)
+            .map((day) => Number(day))
+            .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6),
+          holidays: toSupabaseHolidayDates(orgConfig?.holidays),
+        }
+
+    const productTypes = isRestrictedSuper
+      ? []
+      : (app.product_types ?? [])
+          .map((row) => mapProductTypeToSupabase(row, orgId))
+          .filter((row) => row?.id)
+
+    const plansRows = isRestrictedSuper ? [] : (app.plans ?? []).map((row) => mapPlanToSupabase(row, orgId)).filter((row) => row?.id)
+
+    const agenciesRows = isRestrictedSuper
+      ? []
+      : (app.agencies ?? [])
+          .map((row) => mapAgencyToSupabase(row, orgId))
+          .filter((row) => row?.id)
+
+    const communitiesRows = isRestrictedSuper
+      ? []
+      : (app.communities ?? [])
+          .map((row) => mapCommunityToSupabase(row, orgId))
+          .filter((row) => row?.id)
+
+    const subcontractorRows = isRestrictedSuper
+      ? []
+      : (app.subcontractors ?? [])
+          .map((row) => mapSubcontractorToSupabase(row, orgId))
+          .filter((row) => row?.id)
+
+    const lotsToSync = isRestrictedSuper ? (app.lots ?? []).filter((l) => myAssignedLotIds.has(l.id)) : app.lots ?? []
+    const lotRows = lotsToSync.map((row) => mapLotToSupabase(row, orgId)).filter((row) => row?.id)
 
     const taskRows = []
-    for (const lot of app.lots ?? []) {
+    for (const lot of lotsToSync) {
       for (const task of lot?.tasks ?? []) {
         const mappedTask = mapTaskToSupabase(task, lot.id, orgId)
         if (!mappedTask?.id) continue
@@ -1587,12 +1684,12 @@ export default function BuildFlow() {
       }
     }
 
-    const deletedTaskIds = coerceArray(app.sync?.deleted_task_ids).filter(Boolean)
+    const deletedTaskIds = isRestrictedSuper ? [] : coerceArray(app.sync?.deleted_task_ids).filter(Boolean)
 
     const nextPayload = {
       orgId,
       userId: supabaseUser.id,
-      role: supabaseStatus.role ?? 'admin',
+      role: effectiveRole,
       orgRow,
       productTypes,
       plansRows,
@@ -1868,6 +1965,7 @@ export default function BuildFlow() {
   const productTypes = app.product_types ?? []
   const plans = app.plans ?? []
   const agencies = app.agencies ?? []
+  const lotAssignments = app.lot_assignments ?? []
   const contactLibrary = app.contact_library ?? { builders: [], realtors: [] }
   const contactLibraryBuilders = contactLibrary.builders ?? []
   const contactLibraryRealtors = contactLibrary.realtors ?? []
@@ -1876,6 +1974,46 @@ export default function BuildFlow() {
 
   const communitiesById = useMemo(() => new Map(app.communities.map((c) => [c.id, c])), [app.communities])
   const lotsById = useMemo(() => new Map(app.lots.map((l) => [l.id, l])), [app.lots])
+
+  const activeSuperAssignments = useMemo(() => {
+    if (!Array.isArray(lotAssignments) || lotAssignments.length === 0) return []
+    return lotAssignments.filter((a) => {
+      if (!a) return false
+      if (a.role && a.role !== 'super') return false
+      if (a.deleted_at) return false
+      if (a.ended_at) return false
+      return Boolean(a.lot_id) && Boolean(a.profile_id)
+    })
+  }, [lotAssignments])
+
+  const activeSuperAssignmentByLotId = useMemo(() => {
+    const map = new Map()
+    for (const a of activeSuperAssignments) {
+      if (!a?.lot_id) continue
+      if (!map.has(a.lot_id)) map.set(a.lot_id, a)
+    }
+    return map
+  }, [activeSuperAssignments])
+
+  const myAssignedLotIds = useMemo(() => {
+    const set = new Set()
+    const me = supabaseUser?.id ?? ''
+    if (!me) return set
+    for (const a of activeSuperAssignments) {
+      if (a?.profile_id === me && a?.lot_id) set.add(a.lot_id)
+    }
+    return set
+  }, [activeSuperAssignments, supabaseUser?.id])
+
+  const effectiveRoleForAccess = supabaseStatus?.role ?? app?.sync?.supabase_role ?? null
+
+  const shouldEnforceLotAssignments =
+    Boolean(supabaseUser?.id) && effectiveRoleForAccess === 'super' && !app?.org?.is_demo
+
+  const canEditLot = (lotId) => {
+    if (!shouldEnforceLotAssignments) return true
+    return myAssignedLotIds.has(lotId)
+  }
   const productTypesById = useMemo(() => new Map(productTypes.map((pt) => [pt.id, pt])), [productTypes])
   const allSubsSorted = useMemo(
     () => (app.subcontractors ?? []).slice().sort((a, b) => String(a.company_name).localeCompare(String(b.company_name))),
@@ -2020,6 +2158,49 @@ export default function BuildFlow() {
     }
     const row = Array.isArray(data) ? data[0] ?? null : data
     return row
+  }
+
+  const refreshLotAssignments = async (overrideOrgId = null) => {
+    if (!supabaseUser?.id) return null
+    const orgId = overrideOrgId ?? supabaseStatus?.orgId ?? null
+    if (!orgId) return null
+
+    const { data, error } = await supabase.from('lot_assignments').select('*').eq('org_id', orgId)
+    if (error) return null
+
+    const rows = Array.isArray(data) ? data : []
+    setApp((prev) => ({ ...prev, lot_assignments: rows }))
+    return rows
+  }
+
+  const claimLot = async (lotId) => {
+    if (!lotId) return false
+    if (!supabaseUser?.id) {
+      alert('Sign in to claim lots.')
+      return false
+    }
+    if (!isOnline) {
+      alert('Claiming a lot requires a connection.')
+      return false
+    }
+    if (claimLotBusyId) return false
+
+    setClaimLotBusyId(lotId)
+    try {
+      const { error } = await supabase.rpc('claim_lot', { p_lot_id: lotId })
+      if (error) {
+        alert(error.message || 'Unable to claim lot.')
+        return false
+      }
+
+      await refreshLotAssignments()
+      return true
+    } catch (err) {
+      alert(err?.message || 'Unable to claim lot.')
+      return false
+    } finally {
+      setClaimLotBusyId(null)
+    }
   }
 
   const signInAsGuest = async () => {
@@ -2350,6 +2531,10 @@ export default function BuildFlow() {
   }
 
   const runScheduleEditWithLock = async (lotId, action) => {
+    if (!canEditLot(lotId)) {
+      alert('Read-only: you are not assigned to this lot. Claim it in Overview to edit the schedule.')
+      return false
+    }
     const lockResult = await ensureScheduleEditLock(lotId)
     if (!lockResult.ok) return false
     await action()
@@ -6485,13 +6670,46 @@ export default function BuildFlow() {
                     {lotCode(selectedLot)} {selectedLot.model_type ? `• ${selectedLot.model_type}` : ''}
                   </h2>
                   {selectedLot.address ? <p className="text-sm text-gray-600">{selectedLot.address}</p> : null}
+                  {shouldEnforceLotAssignments ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      {(() => {
+                        const assignment = activeSuperAssignmentByLotId.get(selectedLot.id) ?? null
+                        const isMine = assignment?.profile_id && assignment.profile_id === supabaseUser?.id
+                        if (isMine) {
+                          return <span className="px-2 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">Assigned to you</span>
+                        }
+                        if (assignment) {
+                          return <span className="px-2 py-1 rounded-full bg-gray-50 text-gray-700 border border-gray-200">Assigned</span>
+                        }
+                        return <span className="px-2 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">Unassigned</span>
+                      })()}
+
+                      {!canEditLot(selectedLot.id) && !activeSuperAssignmentByLotId.get(selectedLot.id) ? (
+                        <button
+                          type="button"
+                          onClick={() => claimLot(selectedLot.id)}
+                          disabled={!isOnline || claimLotBusyId === selectedLot.id}
+                          className="px-2 py-1 rounded-full bg-blue-600 text-white font-semibold disabled:opacity-50"
+                          title={!isOnline ? 'Claim requires connection' : ''}
+                        >
+                          {claimLotBusyId === selectedLot.id ? 'Claiming...' : 'Claim Lot'}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 {selectedLot.status === 'not_started' ? (
                   <button
                     onClick={() => openStartLot(selectedLot.id)}
                     className="bg-green-600 text-white px-3 py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
-                    disabled={!isOnline}
-                    title={!isOnline ? 'Requires connection to generate schedules' : ''}
+                    disabled={!isOnline || !canEditLot(selectedLot.id)}
+                    title={
+                      !isOnline
+                        ? 'Requires connection to generate schedules'
+                        : !canEditLot(selectedLot.id)
+                          ? 'Claim this lot to start schedules'
+                          : ''
+                    }
                   >
                     Start Lot
                   </button>
