@@ -103,6 +103,7 @@ const WEATHER_FALLBACK = {
 
 const COMMUNITY_WEATHER_ANCHORS = [
   {
+    id: 'ovation',
     community_name: 'ovation',
     street_keywords: ['350 lime quarry rd', '350 lime quarry road'],
     city: 'madison',
@@ -114,6 +115,7 @@ const COMMUNITY_WEATHER_ANCHORS = [
     timezone: 'America/Chicago',
   },
   {
+    id: 'grove',
     community_name: 'the grove',
     street_keywords: ['390 saint louis street', '390 st louis street'],
     city: 'madison',
@@ -181,10 +183,24 @@ const buildCommunityWeatherLocation = (communities = [], lots = []) => {
   const avgLat = matches.reduce((acc, entry) => acc + Number(entry.anchor.latitude), 0) / matches.length
   const avgLon = matches.reduce((acc, entry) => acc + Number(entry.anchor.longitude), 0) / matches.length
   return {
+    id: 'community',
     name: 'Breland Communities - Madison, AL',
     latitude: avgLat,
     longitude: avgLon,
     timezone: 'America/Chicago',
+    source: 'community',
+  }
+}
+
+const getWeatherAnchorLocationById = (id) => {
+  const anchor = COMMUNITY_WEATHER_ANCHORS.find((entry) => entry.id === id)
+  if (!anchor) return null
+  return {
+    id: anchor.id,
+    name: anchor.name,
+    latitude: Number(anchor.latitude),
+    longitude: Number(anchor.longitude),
+    timezone: anchor.timezone || WEATHER_FALLBACK.timezone,
     source: 'community',
   }
 }
@@ -1419,6 +1435,7 @@ export default function BuildFlow() {
   })
   const [userWeatherLocation, setUserWeatherLocation] = useState(null)
   const [weatherGeoRequested, setWeatherGeoRequested] = useState(false)
+  const [weatherLocationMode, setWeatherLocationMode] = useState('auto')
   const [calendarView, setCalendarView] = useState('day')
   const [calendarDate, setCalendarDate] = useState(() => formatISODate(new Date()))
   const [draggingCalendarTask, setDraggingCalendarTask] = useState(null)
@@ -2738,6 +2755,30 @@ export default function BuildFlow() {
     }
   }, [])
 
+  const communityWeatherLocation = useMemo(
+    () => buildCommunityWeatherLocation(app.communities ?? [], app.lots ?? []),
+    [app.communities, app.lots],
+  )
+
+  const effectiveWeatherLocation = useMemo(() => {
+    if (weatherLocationMode === 'device') {
+      return userWeatherLocation ?? WEATHER_FALLBACK
+    }
+    if (weatherLocationMode === 'community') {
+      return communityWeatherLocation ?? WEATHER_FALLBACK
+    }
+    if (weatherLocationMode === 'ovation') {
+      return getWeatherAnchorLocationById('ovation') ?? WEATHER_FALLBACK
+    }
+    if (weatherLocationMode === 'grove') {
+      return getWeatherAnchorLocationById('grove') ?? WEATHER_FALLBACK
+    }
+    if (weatherLocationMode === 'madison') {
+      return WEATHER_FALLBACK
+    }
+    return userWeatherLocation ?? communityWeatherLocation ?? WEATHER_FALLBACK
+  }, [weatherLocationMode, userWeatherLocation, communityWeatherLocation])
+
   useEffect(() => {
     if (weatherGeoRequested) return
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -2749,6 +2790,7 @@ export default function BuildFlow() {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setUserWeatherLocation({
+          id: 'device',
           name: 'Your Location',
           latitude: Number(pos.coords.latitude),
           longitude: Number(pos.coords.longitude),
@@ -2764,10 +2806,31 @@ export default function BuildFlow() {
   }, [weatherGeoRequested, app?.org?.timezone])
 
   useEffect(() => {
+    if (weatherLocationMode !== 'device') return
+    if (userWeatherLocation?.latitude && userWeatherLocation?.longitude) return
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setUserWeatherLocation({
+          id: 'device',
+          name: 'Your Location',
+          latitude: Number(pos.coords.latitude),
+          longitude: Number(pos.coords.longitude),
+          timezone: app?.org?.timezone || WEATHER_FALLBACK.timezone,
+          source: 'device',
+        })
+      },
+      () => {
+        // Keep fallback behavior when device location is unavailable.
+      },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
+    )
+  }, [weatherLocationMode, userWeatherLocation, app?.org?.timezone])
+
+  useEffect(() => {
     let cancelled = false
     const controller = new AbortController()
-    const communityLocation = buildCommunityWeatherLocation(app.communities ?? [], app.lots ?? [])
-    const effectiveLocation = userWeatherLocation ?? communityLocation ?? WEATHER_FALLBACK
+    const effectiveLocation = effectiveWeatherLocation
 
     const loadWeather = async () => {
       setWeather((prev) => ({
@@ -2809,7 +2872,7 @@ export default function BuildFlow() {
       cancelled = true
       controller.abort()
     }
-  }, [isOnline, userWeatherLocation, app.communities, app.lots])
+  }, [isOnline, effectiveWeatherLocation])
 
   useEffect(() => {
     setSelectedScheduleTaskIds([])
@@ -6795,7 +6858,22 @@ export default function BuildFlow() {
                     {weather.source === 'device' ? ' (Live)' : ''}
                   </p>
                 </div>
-                <Sun className="w-12 h-12 opacity-90" />
+                <div className="flex items-start gap-2">
+                  <select
+                    value={weatherLocationMode}
+                    onChange={(e) => setWeatherLocationMode(e.target.value)}
+                    className="h-8 rounded-lg bg-white/20 border border-white/30 text-white text-xs px-2"
+                    title="Weather location"
+                  >
+                    <option value="auto" className="text-gray-900">Auto</option>
+                    <option value="device" className="text-gray-900">My Location</option>
+                    <option value="community" className="text-gray-900">Breland Communities</option>
+                    <option value="ovation" className="text-gray-900">Ovation</option>
+                    <option value="grove" className="text-gray-900">The Grove</option>
+                    <option value="madison" className="text-gray-900">Madison, AL</option>
+                  </select>
+                  <Sun className="w-12 h-12 opacity-90" />
+                </div>
               </div>
               <div className="flex justify-between">
                 {(weather.forecast ?? []).map((d) => (
@@ -6853,6 +6931,10 @@ export default function BuildFlow() {
                     ))}
                   </div>
                 </div>
+              ) : null}
+
+              {weatherLocationMode === 'device' && weather.source !== 'device' ? (
+                <p className="mt-2 text-xs opacity-90">Device location unavailable. Showing fallback weather.</p>
               ) : null}
 
               {(weather.loading || !isOnline) && (
