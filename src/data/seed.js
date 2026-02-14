@@ -999,7 +999,7 @@ export const createSeedState = () => {
     {
       id: 'comm-grove',
       name: 'The Grove',
-      address: { street: '1234 Oak Valley Road', city: 'Dallas', state: 'TX', zip: '75001' },
+      address: { street: '390 Saint Louis Street', city: 'Madison', state: 'AL', zip: '35758' },
       product_type_ids: ['pt-cottage', 'pt-rancher', 'pt-townhome'],
       lot_count: 50,
       lots_by_product_type: {
@@ -1055,7 +1055,7 @@ export const createSeedState = () => {
     {
       id: 'comm-ovation',
       name: 'Ovation',
-      address: { street: '5000 Meadow Lane', city: 'Dallas', state: 'TX', zip: '75002' },
+      address: { street: '350 Lime Quarry Rd', city: 'Madison', state: 'AL', zip: '35758' },
       product_type_ids: ['pt-cottage', 'pt-rancher'],
       lot_count: 30,
       lots_by_product_type: {

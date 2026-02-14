@@ -93,11 +93,100 @@ import { syncV2Pull, syncV2Push } from './lib/syncV2.js'
 import { uuid } from './lib/uuid.js'
 import { supabase } from './lib/supabaseClient.js'
 
-const DALLAS = {
-  name: 'Dallas, TX',
-  latitude: 32.7767,
-  longitude: -96.797,
+const WEATHER_FALLBACK = {
+  name: 'Madison, AL',
+  latitude: 34.6993,
+  longitude: -86.7483,
   timezone: 'America/Chicago',
+  source: 'fallback',
+}
+
+const COMMUNITY_WEATHER_ANCHORS = [
+  {
+    community_name: 'ovation',
+    street_keywords: ['350 lime quarry rd', '350 lime quarry road'],
+    city: 'madison',
+    state: 'al',
+    zip: '35758',
+    name: 'Ovation at Town Madison',
+    latitude: 34.6770694,
+    longitude: -86.7406771,
+    timezone: 'America/Chicago',
+  },
+  {
+    community_name: 'the grove',
+    street_keywords: ['390 saint louis street', '390 st louis street'],
+    city: 'madison',
+    state: 'al',
+    zip: '35758',
+    name: 'The Grove',
+    latitude: 34.6774023,
+    longitude: -86.7304281,
+    timezone: 'America/Chicago',
+  },
+]
+
+const normalizeWeatherText = (value) =>
+  String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replaceAll('.', '')
+    .replaceAll(',', '')
+    .replaceAll(/\s+/g, ' ')
+
+const resolveCommunityWeatherAnchor = (community) => {
+  if (!community) return null
+  const name = normalizeWeatherText(community.name)
+  const street = normalizeWeatherText(community.address?.street)
+  const city = normalizeWeatherText(community.address?.city)
+  const state = normalizeWeatherText(community.address?.state)
+  const zip = normalizeWeatherText(community.address?.zip)
+
+  for (const anchor of COMMUNITY_WEATHER_ANCHORS) {
+    const nameHit = name.includes(anchor.community_name)
+    const streetHit = (anchor.street_keywords ?? []).some((token) => street.includes(normalizeWeatherText(token)))
+    const cityHit = !anchor.city || city === anchor.city
+    const stateHit = !anchor.state || state === anchor.state
+    const zipHit = !anchor.zip || zip === anchor.zip
+    if (nameHit || (streetHit && cityHit && stateHit && zipHit)) return anchor
+  }
+
+  return null
+}
+
+const buildCommunityWeatherLocation = (communities = [], lots = []) => {
+  const activeCommunityIds = new Set((lots ?? []).filter((lot) => lot?.status === 'in_progress').map((lot) => lot.community_id))
+  const orderedCommunities =
+    activeCommunityIds.size > 0
+      ? [...(communities ?? [])].filter((community) => activeCommunityIds.has(community.id))
+      : [...(communities ?? [])]
+
+  const matches = orderedCommunities
+    .map((community) => ({ community, anchor: resolveCommunityWeatherAnchor(community) }))
+    .filter((entry) => entry.anchor)
+
+  if (matches.length === 0) return null
+
+  if (matches.length === 1) {
+    const { anchor, community } = matches[0]
+    return {
+      name: `${anchor.name} (${community.name})`,
+      latitude: anchor.latitude,
+      longitude: anchor.longitude,
+      timezone: anchor.timezone,
+      source: 'community',
+    }
+  }
+
+  const avgLat = matches.reduce((acc, entry) => acc + Number(entry.anchor.latitude), 0) / matches.length
+  const avgLon = matches.reduce((acc, entry) => acc + Number(entry.anchor.longitude), 0) / matches.length
+  return {
+    name: 'Breland Communities - Madison, AL',
+    latitude: avgLat,
+    longitude: avgLon,
+    timezone: 'America/Chicago',
+    source: 'community',
+  }
 }
 
 const TASK_CATEGORIES = [
@@ -1322,7 +1411,14 @@ export default function BuildFlow() {
   const [resetSeedBusy, setResetSeedBusy] = useState(false)
 
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
-  const [weather, setWeather] = useState({ loading: true, forecast: [] })
+  const [weather, setWeather] = useState({
+    loading: true,
+    forecast: [],
+    locationName: WEATHER_FALLBACK.name,
+    source: WEATHER_FALLBACK.source,
+  })
+  const [userWeatherLocation, setUserWeatherLocation] = useState(null)
+  const [weatherGeoRequested, setWeatherGeoRequested] = useState(false)
   const [calendarView, setCalendarView] = useState('day')
   const [calendarDate, setCalendarDate] = useState(() => formatISODate(new Date()))
   const [draggingCalendarTask, setDraggingCalendarTask] = useState(null)
@@ -2643,16 +2739,48 @@ export default function BuildFlow() {
   }, [])
 
   useEffect(() => {
+    if (weatherGeoRequested) return
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setWeatherGeoRequested(true)
+      return
+    }
+
+    setWeatherGeoRequested(true)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setUserWeatherLocation({
+          name: 'Your Location',
+          latitude: Number(pos.coords.latitude),
+          longitude: Number(pos.coords.longitude),
+          timezone: app?.org?.timezone || WEATHER_FALLBACK.timezone,
+          source: 'device',
+        })
+      },
+      () => {
+        // Permission denied / unavailable: fall back to community location.
+      },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
+    )
+  }, [weatherGeoRequested, app?.org?.timezone])
+
+  useEffect(() => {
     let cancelled = false
     const controller = new AbortController()
+    const communityLocation = buildCommunityWeatherLocation(app.communities ?? [], app.lots ?? [])
+    const effectiveLocation = userWeatherLocation ?? communityLocation ?? WEATHER_FALLBACK
 
     const loadWeather = async () => {
-      setWeather((prev) => ({ ...prev, loading: true }))
+      setWeather((prev) => ({
+        ...prev,
+        loading: true,
+        locationName: effectiveLocation.name,
+        source: effectiveLocation.source,
+      }))
       try {
         const url = new URL('https://api.open-meteo.com/v1/forecast')
-        url.searchParams.set('latitude', String(DALLAS.latitude))
-        url.searchParams.set('longitude', String(DALLAS.longitude))
-        url.searchParams.set('timezone', DALLAS.timezone)
+        url.searchParams.set('latitude', String(effectiveLocation.latitude))
+        url.searchParams.set('longitude', String(effectiveLocation.longitude))
+        url.searchParams.set('timezone', effectiveLocation.timezone || WEATHER_FALLBACK.timezone)
         url.searchParams.set('temperature_unit', 'fahrenheit')
         url.searchParams.set('daily', 'temperature_2m_max,temperature_2m_min,precipitation_probability_max,weathercode,wind_speed_10m_max')
 
@@ -2660,11 +2788,18 @@ export default function BuildFlow() {
         if (!res.ok) throw new Error(`Weather request failed: ${res.status}`)
         const json = await res.json()
         const forecast = build7DayForecast(json?.daily)
-        if (!cancelled) setWeather({ loading: false, forecast })
+        if (!cancelled) {
+          setWeather({
+            loading: false,
+            forecast,
+            locationName: effectiveLocation.name,
+            source: effectiveLocation.source,
+          })
+        }
       } catch (err) {
         if (!cancelled && err?.name !== 'AbortError') {
           console.error(err)
-          setWeather((prev) => ({ ...prev, loading: false }))
+          setWeather((prev) => ({ ...prev, loading: false, locationName: effectiveLocation.name, source: effectiveLocation.source }))
         }
       }
     }
@@ -2674,7 +2809,7 @@ export default function BuildFlow() {
       cancelled = true
       controller.abort()
     }
-  }, [isOnline])
+  }, [isOnline, userWeatherLocation, app.communities, app.lots])
 
   useEffect(() => {
     setSelectedScheduleTaskIds([])
@@ -5305,8 +5440,6 @@ export default function BuildFlow() {
     return items
   }, [activeLots, todayIso])
 
-  const delayedLots = useMemo(() => activeLots.filter((l) => lotHasDelay(l)), [activeLots])
-
   const openPunchItems = useMemo(() => {
     let count = 0
     for (const lot of app.lots ?? []) {
@@ -6657,7 +6790,10 @@ export default function BuildFlow() {
                   <p className="text-2xl font-bold">
                     {weather.forecast?.[0]?.max ?? '--'}°F
                   </p>
-                  <p className="text-xs opacity-75">{DALLAS.name}</p>
+                  <p className="text-xs opacity-75">
+                    {weather.locationName}
+                    {weather.source === 'device' ? ' (Live)' : ''}
+                  </p>
                 </div>
                 <Sun className="w-12 h-12 opacity-90" />
               </div>
@@ -6987,7 +7123,10 @@ export default function BuildFlow() {
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-xs text-gray-500">{DALLAS.name}</p>
+                  <p className="text-xs text-gray-500">
+                    {weather.locationName}
+                    {weather.source === 'device' ? ' (Live)' : ''}
+                  </p>
                   {calendarView === 'day' ? (
                     <p className="text-sm font-semibold">
                       {(weatherByIso.get(calendarDate)?.max ?? weather.forecast?.[0]?.max ?? '--')}° /{' '}
