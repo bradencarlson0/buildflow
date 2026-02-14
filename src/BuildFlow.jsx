@@ -416,6 +416,24 @@ const TASK_STATUS_COLORS = {
   pending: '#D1D5DB',
 }
 
+const DASHBOARD_STATUS_META = {
+  active: {
+    title: 'Active Lots',
+    empty: 'No active lots yet.',
+    hint: 'All in-progress lots.',
+  },
+  on_track: {
+    title: 'On Track Lots',
+    empty: 'No on-track lots right now.',
+    hint: 'In-progress lots with no delayed tasks.',
+  },
+  delayed: {
+    title: 'Delayed Lots',
+    empty: 'No delayed lots right now.',
+    hint: 'In-progress lots with at least one delayed task.',
+  },
+}
+
 const TaskStatusBadge = ({ status }) => {
   const entry = STATUS_BADGE[status] ?? STATUS_BADGE.pending
   return <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-lg border ${entry.cls}`}>{entry.label}</span>
@@ -497,6 +515,33 @@ const compareCommunityLots = (a, b) => {
   const numCmp = compareLotNumbers(a?.lot_number, b?.lot_number)
   if (numCmp) return numCmp
   return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
+}
+
+const sanitizeStorageFileName = (value) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) return 'file'
+  // Storage object names are path-based; never allow user-provided path segments.
+  const cleaned = raw.replaceAll('\\', '/').split('/').pop() || raw
+  return cleaned.replaceAll(/[^\w.\- ()]/g, '_').slice(0, 160) || 'file'
+}
+
+const encodeRemoteBlobId = (bucket, path) => {
+  const b = String(bucket ?? '').trim()
+  const p = String(path ?? '').trim()
+  if (!b || !p) return ''
+  return `sb:${b}:${p}`
+}
+
+const decodeRemoteBlobId = (blobId) => {
+  const raw = String(blobId ?? '')
+  if (!raw.startsWith('sb:')) return null
+  const rest = raw.slice(3)
+  const idx = rest.indexOf(':')
+  if (idx < 0) return null
+  const bucket = rest.slice(0, idx)
+  const path = rest.slice(idx + 1)
+  if (!bucket || !path) return null
+  return { bucket, path }
 }
 
 const tintHex = (hex, alpha = '22') => (/^#[0-9a-fA-F]{6}$/.test(hex) ? `${hex}${alpha}` : hex)
@@ -879,7 +924,22 @@ const openBlobInNewTab = async (blobId) => {
   if (!blobId) return
   try {
     const win = window.open('', '_blank')
-    const blob = await getBlob(blobId)
+    let blob = await getBlob(blobId)
+    if (!blob) {
+      const remote = decodeRemoteBlobId(blobId)
+      if (remote) {
+        const { data, error } = await supabase.storage.from(remote.bucket).download(remote.path)
+        if (error) throw error
+        blob = data ?? null
+        if (blob) {
+          try {
+            await putBlob(blobId, blob)
+          } catch {
+            // ignore cache failures
+          }
+        }
+      }
+    }
     if (!blob) return
     const url = URL.createObjectURL(blob)
     if (win && !win.closed) {
@@ -996,6 +1056,150 @@ const BottomNav = ({ value, onChange }) => {
   )
 }
 
+function AuthLandingPage({
+  authInitialized,
+  supabaseStatus,
+  authDraft,
+  authBusy,
+  authError,
+  uiLastCheckAt,
+  onSetAuthField,
+  onSignIn,
+  onCreateLogin,
+  onContinueAsGuest,
+}) {
+  const statusMessage = authInitialized ? supabaseStatus.message : 'Checking existing session...'
+  const statusClass = supabaseStatus.phase === 'error' ? 'text-red-600' : 'text-gray-700'
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-700 via-blue-600 to-sky-500 p-4 sm:p-8">
+      <div className="mx-auto max-w-5xl min-h-[calc(100vh-2rem)] sm:min-h-[calc(100vh-4rem)] flex items-center">
+        <div className="grid w-full gap-5 lg:grid-cols-[1.05fr_1fr]">
+          <div className="rounded-2xl border border-white/25 bg-white/10 p-6 text-white backdrop-blur-sm">
+            <div className="flex items-center gap-2">
+              <Building2 className="h-7 w-7" />
+              <p className="text-2xl font-bold">BuildFlow</p>
+            </div>
+            <p className="mt-4 text-sm text-blue-50 max-w-md">
+              Start with sign-in, then jump directly into active lots, schedule risk, and team execution.
+            </p>
+            <div className="mt-5 space-y-1.5 text-sm text-blue-100">
+              <p>- Focus on active communities and lots</p>
+              <p>- Spot on-track vs delayed work immediately</p>
+              <p>- Continue as guest for demo/testing data</p>
+            </div>
+          </div>
+
+          <Card className="sm:p-6">
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Supabase Access</p>
+            <p className={`mt-2 text-sm ${statusClass}`}>{statusMessage}</p>
+            <p className="mt-1 text-xs text-gray-500">
+              Last check: {uiLastCheckAt && formatSyncTimestamp(uiLastCheckAt) ? formatSyncTimestamp(uiLastCheckAt) : 'Not yet'}
+            </p>
+            {supabaseStatus.warning ? <p className="mt-2 text-xs text-amber-700">{supabaseStatus.warning}</p> : null}
+
+            <div className="mt-4 space-y-2">
+              <input
+                type="email"
+                value={authDraft.email}
+                onChange={(e) => onSetAuthField('email', e.target.value)}
+                placeholder="Email"
+                className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
+                autoComplete="email"
+                disabled={!authInitialized || authBusy}
+              />
+              <input
+                type="password"
+                value={authDraft.password}
+                onChange={(e) => onSetAuthField('password', e.target.value)}
+                placeholder="Password"
+                className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
+                autoComplete="current-password"
+                disabled={!authInitialized || authBusy}
+              />
+              {authError ? <p className="text-xs text-red-600">{authError}</p> : null}
+              <div className="grid grid-cols-2 gap-2">
+                <PrimaryButton onClick={onSignIn} disabled={!authInitialized || authBusy}>
+                  {authBusy ? 'Signing in...' : 'Sign In'}
+                </PrimaryButton>
+                <SecondaryButton onClick={onCreateLogin} disabled={!authInitialized || authBusy} className="border-blue-200">
+                  Create Login
+                </SecondaryButton>
+              </div>
+              <SecondaryButton
+                onClick={onContinueAsGuest}
+                disabled={!authInitialized || authBusy}
+                className="w-full border-blue-200"
+              >
+                Continue as Guest
+              </SecondaryButton>
+              <p className="text-xs text-gray-600">
+                Guest sign-in uses an anonymous Supabase account so test edits persist to shared data.
+              </p>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DashboardStatusLotsModal({ kind, lots, communitiesById, onOpenLot, onClose }) {
+  const meta = DASHBOARD_STATUS_META[kind] ?? DASHBOARD_STATUS_META.active
+
+  const sortedLots = useMemo(() => {
+    return [...(lots ?? [])].sort((a, b) => {
+      const communityA = communitiesById.get(a.community_id)?.name ?? ''
+      const communityB = communitiesById.get(b.community_id)?.name ?? ''
+      const communityCompare = communityA.localeCompare(communityB)
+      if (communityCompare !== 0) return communityCompare
+      const lotA = Number(a.lot_number ?? 0) || 0
+      const lotB = Number(b.lot_number ?? 0) || 0
+      return lotA - lotB
+    })
+  }, [communitiesById, lots])
+
+  return (
+    <Modal title={`${meta.title} (${sortedLots.length})`} onClose={onClose}>
+      <p className="text-xs text-gray-600 mb-3">{meta.hint}</p>
+      {sortedLots.length === 0 ? (
+        <Card className="bg-gray-50">
+          <p className="text-sm text-gray-600">{meta.empty}</p>
+        </Card>
+      ) : (
+        <div className="space-y-2">
+          {sortedLots.map((lot) => {
+            const community = communitiesById.get(lot.community_id) ?? null
+            const progress = calculateLotProgress(lot)
+            const milestone = getCurrentMilestone(lot)
+            const delayed = (lot.tasks ?? []).some((task) => task.status === 'delayed')
+            return (
+              <button
+                key={lot.id}
+                onClick={() => onOpenLot(lot.id)}
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 p-3 text-left hover:border-blue-300 hover:bg-blue-50/40"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-gray-900">
+                      {community?.name ?? 'Community'} {lotCode(lot)}
+                    </p>
+                    <p className="text-xs text-gray-600 mt-1">Milestone: {milestone.label}</p>
+                    <p className={`text-xs mt-1 ${delayed ? 'text-red-600' : 'text-green-700'}`}>
+                      {delayed ? 'Delayed tasks present' : 'No delayed tasks'}
+                    </p>
+                  </div>
+                  <p className="text-sm font-bold text-blue-600">{progress}%</p>
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </Modal>
+  )
+}
+
 export default function BuildFlow() {
   const seedState = useMemo(() => createSeedState(), [])
   const [app, setApp] = useState(() => loadAppState(seedState))
@@ -1033,6 +1237,7 @@ export default function BuildFlow() {
   const [startLotPrefill, setStartLotPrefill] = useState(null)
   const [taskModal, setTaskModal] = useState(null)
   const [onSiteLotModal, setOnSiteLotModal] = useState(null)
+  const [dashboardStatusModal, setDashboardStatusModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
   const [bufferModal, setBufferModal] = useState(null)
@@ -1064,6 +1269,7 @@ export default function BuildFlow() {
   const [authDraft, setAuthDraft] = useState({ email: '', password: '' })
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
+  const [authInitialized, setAuthInitialized] = useState(false)
   const [claimLotBusyId, setClaimLotBusyId] = useState(null)
   const [supabaseSession, setSupabaseSession] = useState(null)
   const [supabaseUser, setSupabaseUser] = useState(null)
@@ -1231,24 +1437,28 @@ export default function BuildFlow() {
     let active = true
 
     const readSession = async () => {
-      const { data, error } = await supabase.auth.getSession()
-      if (!active) return
+      try {
+        const { data, error } = await supabase.auth.getSession()
+        if (!active) return
 
-      if (error) {
-        setSupabaseStatus((prev) => ({
-          ...prev,
-          phase: 'error',
-          message: `Auth session check failed: ${error.message}`,
-          loadedAt: new Date().toISOString(),
-        }))
-        return
-      }
+        if (error) {
+          setSupabaseStatus((prev) => ({
+            ...prev,
+            phase: 'error',
+            message: `Auth session check failed: ${error.message}`,
+            loadedAt: new Date().toISOString(),
+          }))
+          return
+        }
 
-      const session = data?.session ?? null
-      setSupabaseSession(session)
-      setSupabaseUser(session?.user ?? null)
-      if (session?.user?.email) {
-        setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
+        const session = data?.session ?? null
+        setSupabaseSession(session)
+        setSupabaseUser(session?.user ?? null)
+        if (session?.user?.email) {
+          setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
+        }
+      } finally {
+        if (active) setAuthInitialized(true)
       }
     }
 
@@ -1822,7 +2032,93 @@ export default function BuildFlow() {
             await outboxUpdate(op.id, { attempts, last_error: '', last_error_at: null })
           }
 
-          const pushRes = await syncV2Push({ supabase, ops: due })
+          const isStorageAlreadyExistsError = (err) => {
+            const code = String(err?.statusCode ?? err?.status ?? err?.code ?? '')
+            const msg = String(err?.message ?? '').toLowerCase()
+            return code === '409' || msg.includes('already exists') || msg.includes('duplicate')
+          }
+
+          const ready = []
+          const uploadedAttachmentRefs = []
+
+          for (const op of due) {
+            if (op?.kind !== 'attachments_batch') {
+              ready.push(op)
+              continue
+            }
+
+            const items = Array.isArray(op?.payload?.attachments) ? op.payload.attachments : []
+            if (items.length === 0) continue
+
+            let uploadOk = true
+            const uploadedForOp = []
+            for (const item of items) {
+              if (item?.action === 'delete') continue
+              const row = item?.row ?? {}
+              const bucket = row?.storage_bucket ?? 'photos'
+              const path = row?.storage_path ?? ''
+              const clientBlobId = row?.client_blob_id ?? row?.blob_id ?? null
+              if (!bucket || !path || !clientBlobId) {
+                uploadOk = false
+                await outboxUpdate(op.id, {
+                  last_error: 'Attachment upload op missing storage_bucket/storage_path/client_blob_id',
+                  last_error_at: new Date().toISOString(),
+                  next_retry_at: new Date(Date.now() + 15000).toISOString(),
+                })
+                break
+              }
+
+              const blob = await getBlob(clientBlobId)
+              if (!blob) {
+                uploadOk = false
+                await outboxUpdate(op.id, {
+                  last_error: 'Attachment blob missing locally (please re-add the photo)',
+                  last_error_at: new Date().toISOString(),
+                  next_retry_at: new Date(Date.now() + 60000).toISOString(),
+                })
+                break
+              }
+
+              const contentType = row?.mime || blob.type || undefined
+              const { error } = await supabase.storage.from(bucket).upload(path, blob, {
+                contentType,
+                upsert: false,
+              })
+
+              if (error && !isStorageAlreadyExistsError(error)) {
+                uploadOk = false
+                if (looksLikeNetworkError(error)) setIsOnline(false)
+                const attempts = Number(op?.attempts ?? 1) || 1
+                const backoff = Math.min(300000, 8000 * Math.pow(2, Math.max(0, attempts - 1)))
+                await outboxUpdate(op.id, {
+                  last_error: String(error?.message ?? 'Storage upload failed'),
+                  last_error_at: new Date().toISOString(),
+                  next_retry_at: new Date(Date.now() + backoff).toISOString(),
+                })
+                break
+              }
+
+              uploadedForOp.push({
+                id: item?.id,
+                lot_id: row?.lot_id ?? null,
+                storage_bucket: bucket,
+                storage_path: path,
+                thumb_storage_path: row?.thumb_storage_path ?? null,
+              })
+            }
+
+            if (uploadOk) {
+              ready.push(op)
+              uploadedAttachmentRefs.push(...uploadedForOp)
+            }
+          }
+
+          if (ready.length === 0) {
+            scheduleNext(6500)
+            return
+          }
+
+          const pushRes = await syncV2Push({ supabase, ops: ready })
           if (cancelled) return
 
           if (!pushRes.ok) {
@@ -1839,7 +2135,7 @@ export default function BuildFlow() {
 
             // Retry later (unless missing RPCs; then back off longer).
             const delayMs = missing ? 60000 : 8000
-            for (const op of due) {
+            for (const op of ready) {
               const attempts = Number(op?.attempts ?? 0) || 0
               const backoff = Math.min(300000, delayMs * Math.pow(2, Math.max(0, attempts - 1)))
               const nextRetryAt = new Date(Date.now() + backoff).toISOString()
@@ -1850,7 +2146,34 @@ export default function BuildFlow() {
             return
           }
 
-          await outboxAck(due.map((op) => op.id))
+          // Mark local photos as synced when their attachment metadata is pushed.
+          if (uploadedAttachmentRefs.length > 0) {
+            const byId = new Map(uploadedAttachmentRefs.map((r) => [r.id, r]))
+            setApp((prev) => ({
+              ...prev,
+              lots: (prev.lots ?? []).map((lot) => {
+                const photos = Array.isArray(lot.photos) ? lot.photos : []
+                let changed = false
+                const nextPhotos = photos.map((p) => {
+                  const ref = p?.id ? byId.get(p.id) : null
+                  if (!ref) return p
+                  changed = true
+                  return {
+                    ...p,
+                    synced: true,
+                    sync_error: null,
+                    storage_bucket: ref.storage_bucket ?? p.storage_bucket ?? 'photos',
+                    storage_path: ref.storage_path ?? p.storage_path ?? null,
+                    thumb_storage_path: ref.thumb_storage_path ?? p.thumb_storage_path ?? null,
+                    uploaded_at: p.uploaded_at ?? new Date().toISOString(),
+                  }
+                })
+                return changed ? { ...lot, photos: nextPhotos } : lot
+              }),
+            }))
+          }
+
+          await outboxAck(ready.map((op) => op.id))
           setIsOnline(true)
           setSyncV2Status((prev) => ({ ...prev, last_pushed_at: pushRes.server_time ?? new Date().toISOString() }))
         }
@@ -1912,27 +2235,109 @@ export default function BuildFlow() {
             tasksByLotId.set(lotId, list)
           }
 
+          const attachmentsByLotId = new Map()
+          for (const attachmentRow of pullRes.attachments ?? []) {
+            const lotId = attachmentRow?.lot_id
+            if (!lotId) continue
+            const list = attachmentsByLotId.get(lotId) ?? []
+            list.push(attachmentRow)
+            attachmentsByLotId.set(lotId, list)
+          }
+
           const nextLots = lots.map((lot) => {
             const lotRow = blockedLotIds.has(lot.id) ? null : (pullRes.lots ?? []).find((r) => r?.id === lot.id) ?? null
             const incomingTasks = tasksByLotId.get(lot.id) ?? null
-            if (!lotRow && !incomingTasks) return lot
+            const incomingAttachments = attachmentsByLotId.get(lot.id) ?? null
+            if (!lotRow && !incomingTasks && !incomingAttachments) return lot
 
             const nextLotBase = lotRow ? mapLotFromSupabase(lotRow, lot.tasks ?? []) : lot
-            if (!incomingTasks) return { ...nextLotBase, tasks: lot.tasks ?? [] }
+            const baseTasks = Array.isArray(nextLotBase.tasks) ? nextLotBase.tasks : lot.tasks ?? []
 
-            const currentTasks = Array.isArray(nextLotBase.tasks) ? nextLotBase.tasks : []
-            const currentById = new Map(currentTasks.map((t) => [t.id, t]))
-            for (const t of incomingTasks) {
-              if (!t?.id) continue
-              if (t.deleted_at) {
-                currentById.delete(t.id)
-              } else {
-                currentById.set(t.id, t)
+            let mergedTasks = baseTasks
+            if (incomingTasks) {
+              const currentById = new Map(baseTasks.map((t) => [t.id, t]))
+              for (const t of incomingTasks) {
+                if (!t?.id) continue
+                if (t.deleted_at) {
+                  currentById.delete(t.id)
+                } else {
+                  currentById.set(t.id, t)
+                }
               }
+              mergedTasks = Array.from(currentById.values()).slice().sort((a, b) => (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0))
             }
 
-            const mergedTasks = Array.from(currentById.values()).slice().sort((a, b) => (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0))
-            return { ...nextLotBase, tasks: mergedTasks }
+            // Attachments -> photos (transitional mapping: keep lot.photos UX, but source-of-truth is server attachments table).
+            let mergedPhotos = Array.isArray(nextLotBase.photos) ? nextLotBase.photos : []
+            if (incomingAttachments && incomingAttachments.length > 0) {
+              const photoById = new Map(mergedPhotos.map((p) => [p?.id, p]).filter(([id]) => id))
+              for (const a of incomingAttachments) {
+                if (!a?.id) continue
+                if (String(a.kind ?? 'photo') !== 'photo') continue
+                if (a.deleted_at) {
+                  photoById.delete(a.id)
+                  continue
+                }
+
+                const existing = photoById.get(a.id) ?? null
+                const remoteBlobId = encodeRemoteBlobId(a.storage_bucket ?? 'photos', a.thumb_storage_path ?? a.storage_path ?? '')
+                const next = {
+                  id: a.id,
+                  lot_id: a.lot_id,
+                  task_id: a.task_id ?? null,
+                  inspection_id: null,
+                  punch_item_id: null,
+                  daily_log_id: null,
+                  category: a.category ?? 'progress',
+                  blob_id: (existing?.blob_id ?? remoteBlobId) || null,
+                  file_name: a.file_name ?? '',
+                  mime: a.mime ?? '',
+                  file_size: Number.isFinite(Number(a.file_size)) ? Number(a.file_size) : 0,
+                  caption: a.caption ?? '',
+                  location: existing?.location ?? '',
+                  tags: existing?.tags ?? [],
+                  taken_at: a.created_at ?? a.updated_at ?? null,
+                  device_type: existing?.device_type ?? '',
+                  gps_lat: existing?.gps_lat ?? null,
+                  gps_lng: existing?.gps_lng ?? null,
+                  uploaded_at: a.updated_at ?? a.created_at ?? null,
+                  uploaded_by: existing?.uploaded_by ?? '',
+                  upload_source: existing?.upload_source ?? 'cloud',
+                  synced: true,
+                  sync_error: null,
+                  storage_bucket: a.storage_bucket ?? 'photos',
+                  storage_path: a.storage_path ?? null,
+                  thumb_storage_path: a.thumb_storage_path ?? null,
+                }
+
+                // If this photo already exists locally, preserve the local blob_id and metadata while adding storage pointers.
+                if (existing && existing.blob_id && !String(existing.blob_id).startsWith('sb:')) {
+                  next.blob_id = existing.blob_id
+                }
+
+                photoById.set(a.id, { ...(existing ?? {}), ...next })
+              }
+              mergedPhotos = Array.from(photoById.values()).filter(Boolean).slice().sort((x, y) => String(y.taken_at ?? '').localeCompare(String(x.taken_at ?? '')))
+            }
+
+            // Ensure each task has a list of associated photo ids based on task_id pointers.
+            const photoIdsByTaskId = new Map()
+            for (const p of mergedPhotos) {
+              const tid = p?.task_id
+              if (!tid || !p?.id) continue
+              const list = photoIdsByTaskId.get(tid) ?? []
+              list.push(p.id)
+              photoIdsByTaskId.set(tid, list)
+            }
+            const tasksWithPhotos = mergedTasks.map((t) => {
+              const ids = photoIdsByTaskId.get(t.id) ?? []
+              if (ids.length === 0) return t
+              const existing = Array.isArray(t.photos) ? t.photos : []
+              const merged = Array.from(new Set([...existing, ...ids]))
+              return { ...t, photos: merged }
+            })
+
+            return { ...nextLotBase, tasks: tasksWithPhotos, photos: mergedPhotos }
           })
 
           const knownLotIds = new Set(nextLots.map((l) => l.id))
@@ -1940,9 +2345,64 @@ export default function BuildFlow() {
             if (!lotRow?.id || knownLotIds.has(lotRow.id)) continue
             if (blockedLotIds.has(lotRow.id)) continue
             const incomingTasks = tasksByLotId.get(lotRow.id) ?? []
+            const incomingAttachments = attachmentsByLotId.get(lotRow.id) ?? []
             const base = mapLotFromSupabase(lotRow, incomingTasks)
             const mergedTasks = (base.tasks ?? []).filter((t) => !t?.deleted_at).slice().sort((a, b) => (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0))
-            nextLots.push({ ...base, tasks: mergedTasks })
+            let mergedPhotos = Array.isArray(base.photos) ? base.photos : []
+            if (incomingAttachments.length > 0) {
+              const photoById = new Map(mergedPhotos.map((p) => [p?.id, p]).filter(([id]) => id))
+              for (const a of incomingAttachments) {
+                if (!a?.id) continue
+                if (String(a.kind ?? 'photo') !== 'photo') continue
+                if (a.deleted_at) {
+                  photoById.delete(a.id)
+                  continue
+                }
+                const existing = photoById.get(a.id) ?? null
+                const remoteBlobId = encodeRemoteBlobId(a.storage_bucket ?? 'photos', a.thumb_storage_path ?? a.storage_path ?? '')
+                const next = {
+                  id: a.id,
+                  lot_id: a.lot_id,
+                  task_id: a.task_id ?? null,
+                  category: a.category ?? 'progress',
+                  blob_id: (existing?.blob_id ?? remoteBlobId) || null,
+                  file_name: a.file_name ?? '',
+                  mime: a.mime ?? '',
+                  file_size: Number.isFinite(Number(a.file_size)) ? Number(a.file_size) : 0,
+                  caption: a.caption ?? '',
+                  location: existing?.location ?? '',
+                  tags: existing?.tags ?? [],
+                  taken_at: a.created_at ?? a.updated_at ?? null,
+                  uploaded_at: a.updated_at ?? a.created_at ?? null,
+                  upload_source: existing?.upload_source ?? 'cloud',
+                  synced: true,
+                  sync_error: null,
+                  storage_bucket: a.storage_bucket ?? 'photos',
+                  storage_path: a.storage_path ?? null,
+                  thumb_storage_path: a.thumb_storage_path ?? null,
+                }
+                photoById.set(a.id, { ...(existing ?? {}), ...next })
+              }
+              mergedPhotos = Array.from(photoById.values()).filter(Boolean).slice().sort((x, y) => String(y.taken_at ?? '').localeCompare(String(x.taken_at ?? '')))
+            }
+
+            const photoIdsByTaskId = new Map()
+            for (const p of mergedPhotos) {
+              const tid = p?.task_id
+              if (!tid || !p?.id) continue
+              const list = photoIdsByTaskId.get(tid) ?? []
+              list.push(p.id)
+              photoIdsByTaskId.set(tid, list)
+            }
+            const tasksWithPhotos = mergedTasks.map((t) => {
+              const ids = photoIdsByTaskId.get(t.id) ?? []
+              if (ids.length === 0) return t
+              const existing = Array.isArray(t.photos) ? t.photos : []
+              const merged = Array.from(new Set([...existing, ...ids]))
+              return { ...t, photos: merged }
+            })
+
+            nextLots.push({ ...base, tasks: tasksWithPhotos, photos: mergedPhotos })
           }
 
           const nextAssignments = pullRes.lot_assignments ?? null
@@ -2471,6 +2931,96 @@ export default function BuildFlow() {
       kind: 'tasks_batch',
       lot_id: lotId,
       entity_ids: tasksPayload.map((t) => t.id).filter(Boolean),
+      created_at: now,
+      attempts: 0,
+      next_retry_at: null,
+      last_error: '',
+      last_error_at: null,
+      payload,
+    }
+  }
+
+  const buildV2AttachmentUpsertOp = ({ attachmentId, lotId, taskId, kind, category, caption, mime, fileName, fileSize, storageBucket, storagePath, thumbStoragePath, clientBlobId }) => {
+    if (!syncV2Enabled) return null
+    const userId = supabaseUser?.id ?? app?.sync?.supabase_user_id ?? null
+    const orgId = supabaseStatus?.orgId ?? app?.sync?.supabase_org_id ?? null
+    if (!userId || !orgId) return null
+    if (!attachmentId || !lotId || !storageBucket || !storagePath || !clientBlobId) return null
+
+    const opId = uuid()
+    const now = new Date().toISOString()
+
+    const payload = {
+      id: opId,
+      kind: 'attachments_batch',
+      attachments: [
+        {
+          action: 'upsert',
+          id: attachmentId,
+          base_version: null,
+          row: {
+            lot_id: lotId,
+            task_id: taskId ?? null,
+            kind: kind ?? 'photo',
+            category: category ?? null,
+            caption: caption ?? null,
+            mime: mime ?? '',
+            file_name: fileName ?? '',
+            file_size: Number.isFinite(Number(fileSize)) ? Number(fileSize) : 0,
+            storage_bucket: storageBucket,
+            storage_path: storagePath,
+            thumb_storage_path: thumbStoragePath ?? null,
+            client_blob_id: clientBlobId,
+          },
+        },
+      ],
+    }
+
+    return {
+      id: opId,
+      v2: true,
+      kind: 'attachments_batch',
+      lot_id: lotId,
+      entity_ids: [attachmentId].filter(Boolean),
+      created_at: now,
+      attempts: 0,
+      next_retry_at: null,
+      last_error: '',
+      last_error_at: null,
+      payload,
+    }
+  }
+
+  const _buildV2AttachmentDeleteOp = ({ attachmentId, lotId, baseVersion }) => {
+    if (!syncV2Enabled) return null
+    const userId = supabaseUser?.id ?? app?.sync?.supabase_user_id ?? null
+    const orgId = supabaseStatus?.orgId ?? app?.sync?.supabase_org_id ?? null
+    if (!userId || !orgId) return null
+    if (!attachmentId || !lotId) return null
+    if (!Number.isFinite(Number(baseVersion))) return null
+
+    const opId = uuid()
+    const now = new Date().toISOString()
+
+    const payload = {
+      id: opId,
+      kind: 'attachments_batch',
+      attachments: [
+        {
+          action: 'delete',
+          id: attachmentId,
+          base_version: Number(baseVersion),
+          row: null,
+        },
+      ],
+    }
+
+    return {
+      id: opId,
+      v2: true,
+      kind: 'attachments_batch',
+      lot_id: lotId,
+      entity_ids: [attachmentId].filter(Boolean),
       created_at: now,
       attempts: 0,
       next_retry_at: null,
@@ -3953,6 +4503,11 @@ export default function BuildFlow() {
   }
 
   const addPhoto = async ({ lotId, taskId, inspectionId, punchItemId, dailyLogId, category, location, caption, tags, file }) => {
+    if (!canEditLot(lotId)) {
+      alert('Read-only: you are not assigned to this lot. Claim it in Overview to add photos.')
+      return null
+    }
+
     let normalized = null
     try {
       normalized = await normalizeImageBlob(file)
@@ -3968,6 +4523,10 @@ export default function BuildFlow() {
 
     const photoId = uuid()
     const now = new Date().toISOString()
+    const orgId = supabaseStatus?.orgId ?? app?.sync?.supabase_org_id ?? null
+    const shouldQueueV2 = syncV2Enabled && Boolean(supabaseUser?.id) && Boolean(orgId)
+    const storageBucket = 'photos'
+    const storagePath = shouldQueueV2 ? `${orgId}/${lotId}/${photoId}/${sanitizeStorageFileName(normalized.fileName)}` : null
     const photo = {
       id: photoId,
       lot_id: lotId,
@@ -3990,8 +4549,11 @@ export default function BuildFlow() {
       uploaded_at: now,
       uploaded_by: '',
       upload_source: 'gallery',
-      synced: isOnline,
+      synced: shouldQueueV2 ? false : isOnline,
       sync_error: null,
+      storage_bucket: shouldQueueV2 ? storageBucket : null,
+      storage_path: shouldQueueV2 ? storagePath : null,
+      thumb_storage_path: null,
     }
 
     updateLot(lotId, (lot) => {
@@ -4019,7 +4581,28 @@ export default function BuildFlow() {
       return { ...lot, tasks, punch_list, daily_logs, photos: [...(lot.photos ?? []), photo] }
     })
 
-    if (!isOnline) {
+    if (shouldQueueV2 && storagePath) {
+      const op = buildV2AttachmentUpsertOp({
+        attachmentId: photoId,
+        lotId,
+        taskId,
+        kind: 'photo',
+        category,
+        caption: caption ?? '',
+        mime: normalized.mime,
+        fileName: normalized.fileName,
+        fileSize: normalized.size,
+        storageBucket,
+        storagePath,
+        thumbStoragePath: null,
+        clientBlobId: blobId,
+      })
+      if (op) {
+        void Promise.resolve()
+          .then(() => outboxEnqueue(op))
+          .catch(() => {})
+      }
+    } else if (!syncV2Enabled && !isOnline) {
       enqueueSyncOp({
         type: 'photo_upload',
         lot_id: lotId,
@@ -4246,6 +4829,15 @@ export default function BuildFlow() {
   const openLot = (lotId) => openLotTab(lotId, 'overview')
 
   const lotHasDelay = (lot) => (lot?.tasks ?? []).some((t) => t.status === 'delayed')
+
+  const dashboardStatusLots = useMemo(
+    () => ({
+      active: activeLots,
+      on_track: activeLots.filter((lot) => !(lot?.tasks ?? []).some((t) => t.status === 'delayed')),
+      delayed: activeLots.filter((lot) => (lot?.tasks ?? []).some((t) => t.status === 'delayed')),
+    }),
+    [activeLots],
+  )
 
   const lotEta = (lot) => {
     const predicted = getPredictedCompletionDate(lot)
@@ -5823,6 +6415,23 @@ export default function BuildFlow() {
     setShowStartLot(false)
   }
 
+  if (!authInitialized || !supabaseUser) {
+    return (
+      <AuthLandingPage
+        authInitialized={authInitialized}
+        supabaseStatus={supabaseStatus}
+        authDraft={authDraft}
+        authBusy={authBusy}
+        authError={authError}
+        uiLastCheckAt={uiLastCheckAt}
+        onSetAuthField={setAuthField}
+        onSignIn={signInWithSupabase}
+        onCreateLogin={createSupabaseLogin}
+        onContinueAsGuest={signInAsGuest}
+      />
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 pb-24">
       <style>{`@keyframes bfDropSnap{0%{transform:scale(1)}50%{transform:scale(1.02)}100%{transform:scale(1)}}`}</style>
@@ -6076,22 +6685,30 @@ export default function BuildFlow() {
             </div>
 
             <div className="grid grid-cols-4 gap-2">
-              <div className="bg-white rounded-xl p-3 border text-center">
-                <p className="text-xl font-bold text-blue-600">{activeLots.length}</p>
+              <button
+                type="button"
+                onClick={() => setDashboardStatusModal('active')}
+                className="bg-white rounded-xl p-3 border text-center hover:border-blue-300 hover:bg-blue-50/40"
+              >
+                <p className="text-xl font-bold text-blue-600">{dashboardStatusLots.active.length}</p>
                 <p className="text-xs text-gray-500">Active</p>
-              </div>
-              <div className="bg-white rounded-xl p-3 border text-center">
-                <p className="text-xl font-bold text-green-600">
-                  {activeLots.filter((l) => !lotHasDelay(l)).length}
-                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDashboardStatusModal('on_track')}
+                className="bg-white rounded-xl p-3 border text-center hover:border-green-300 hover:bg-green-50/40"
+              >
+                <p className="text-xl font-bold text-green-600">{dashboardStatusLots.on_track.length}</p>
                 <p className="text-xs text-gray-500">On Track</p>
-              </div>
-              <div className="bg-white rounded-xl p-3 border text-center">
-                <p className="text-xl font-bold text-red-600">
-                  {activeLots.filter((l) => lotHasDelay(l)).length}
-                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDashboardStatusModal('delayed')}
+                className="bg-white rounded-xl p-3 border text-center hover:border-red-300 hover:bg-red-50/40"
+              >
+                <p className="text-xl font-bold text-red-600">{dashboardStatusLots.delayed.length}</p>
                 <p className="text-xs text-gray-500">Delayed</p>
-              </div>
+              </button>
               <div className="bg-white rounded-xl p-3 border text-center">
                 <p className="text-xl font-bold text-purple-600">
                   {activeLots.length === 0
@@ -11190,6 +11807,19 @@ export default function BuildFlow() {
         />
       ) : null}
 
+      {dashboardStatusModal ? (
+        <DashboardStatusLotsModal
+          kind={dashboardStatusModal}
+          lots={dashboardStatusLots[dashboardStatusModal] ?? []}
+          communitiesById={communitiesById}
+          onOpenLot={(lotId) => {
+            setDashboardStatusModal(null)
+            openLot(lotId)
+          }}
+          onClose={() => setDashboardStatusModal(null)}
+        />
+      ) : null}
+
       {scheduledReportModal ? (
         <ScheduledReportsModal
           reports={app.scheduled_reports ?? []}
@@ -14715,7 +15345,24 @@ function PhotoThumb({ blobId, alt }) {
     let nextUrl = null
     const load = async () => {
       try {
-        const blob = await getBlob(blobId)
+        if (!blobId) return
+        let blob = await getBlob(blobId)
+        if (!blob) {
+          const remote = decodeRemoteBlobId(blobId)
+          if (remote) {
+            const { data, error } = await supabase.storage.from(remote.bucket).download(remote.path)
+            if (error) throw error
+            blob = data ?? null
+            if (blob) {
+              // Cache for offline viewing on this device.
+              try {
+                await putBlob(blobId, blob)
+              } catch {
+                // ignore cache failures
+              }
+            }
+          }
+        }
         if (!mounted || !blob) return
         nextUrl = URL.createObjectURL(blob)
         setUrl(nextUrl)
