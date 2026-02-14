@@ -504,7 +504,6 @@ const STATUS_BADGE = {
   complete: { label: '✓ Complete', cls: 'bg-green-50 text-green-700 border-green-200' },
   in_progress: { label: '⏳ In Progress', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
   delayed: { label: '⚠️ Delayed', cls: 'bg-red-50 text-red-700 border-red-200' },
-  ready: { label: '▶ Up Next', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
   blocked: { label: '🔒 Blocked', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
   pending: { label: '○ Not Started', cls: 'bg-gray-50 text-gray-600 border-gray-200' },
 }
@@ -537,7 +536,7 @@ const DASHBOARD_STATUS_META = {
 }
 
 const TaskStatusBadge = ({ status }) => {
-  const entry = STATUS_BADGE[status] ?? STATUS_BADGE.pending
+  const entry = STATUS_BADGE[status === 'ready' ? 'pending' : status] ?? STATUS_BADGE.pending
   return <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-lg border ${entry.cls}`}>{entry.label}</span>
 }
 
@@ -10861,7 +10860,6 @@ export default function BuildFlow() {
         if (!lot || !task) return null
         const community = communitiesById.get(lot.community_id) ?? null
         const status = deriveTaskStatus(task, lot.tasks, lot.inspections)
-        const recommendedTask = (lot.tasks ?? []).find((t) => deriveTaskStatus(t, lot.tasks, lot.inspections) === 'ready') ?? null
         const sub = app.subcontractors.find((s) => s.id === task.sub_id) ?? null
         return (
           <TaskModal
@@ -10871,8 +10869,6 @@ export default function BuildFlow() {
             task={task}
             status={status}
             sub={sub}
-            recommendedTask={recommendedTask}
-            onOpenTask={(taskId) => setTaskModal({ lot_id: lot.id, task_id: taskId })}
             isOnline={isOnline}
             specAcknowledgements={lot.spec_acknowledgements ?? {}}
             specDismissals={lot.spec_dismissals ?? {}}
@@ -13246,8 +13242,6 @@ function TaskModal({
   status,
   sub,
   isOnline,
-  recommendedTask,
-  onOpenTask,
   specAcknowledgements,
   specDismissals,
   onToggleSpecAck,
@@ -13347,24 +13341,6 @@ function TaskModal({
             <TaskStatusBadge status={status} />
           </div>
         </Card>
-
-        {status !== 'ready' && recommendedTask && recommendedTask.id !== task.id ? (
-          <Card className="border-blue-200 bg-blue-50">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-blue-800">Up Next</p>
-                <p className="text-sm font-semibold text-gray-900 truncate">{recommendedTask.name}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => onOpenTask?.(recommendedTask.id)}
-                className="shrink-0 h-9 px-3 rounded-xl bg-white border border-blue-200 text-blue-800 text-sm font-semibold"
-              >
-                Open
-              </button>
-            </div>
-          </Card>
-        ) : null}
 
         {visibleSpecs.length > 0 && (
           <Card className="border-purple-200 bg-purple-50">
