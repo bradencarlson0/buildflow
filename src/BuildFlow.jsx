@@ -1059,6 +1059,7 @@ const BottomNav = ({ value, onChange }) => {
 function AuthLandingPage({
   authInitialized,
   supabaseStatus,
+  supabaseUser,
   authDraft,
   authBusy,
   authError,
@@ -1067,6 +1068,8 @@ function AuthLandingPage({
   onSignIn,
   onCreateLogin,
   onContinueAsGuest,
+  onContinueToApp,
+  onSignOut,
 }) {
   const statusMessage = authInitialized ? supabaseStatus.message : 'Checking existing session...'
   const statusClass = supabaseStatus.phase === 'error' ? 'text-red-600' : 'text-gray-700'
@@ -1098,45 +1101,62 @@ function AuthLandingPage({
             </p>
             {supabaseStatus.warning ? <p className="mt-2 text-xs text-amber-700">{supabaseStatus.warning}</p> : null}
 
-            <div className="mt-4 space-y-2">
-              <input
-                type="email"
-                value={authDraft.email}
-                onChange={(e) => onSetAuthField('email', e.target.value)}
-                placeholder="Email"
-                className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
-                autoComplete="email"
-                disabled={!authInitialized || authBusy}
-              />
-              <input
-                type="password"
-                value={authDraft.password}
-                onChange={(e) => onSetAuthField('password', e.target.value)}
-                placeholder="Password"
-                className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
-                autoComplete="current-password"
-                disabled={!authInitialized || authBusy}
-              />
-              {authError ? <p className="text-xs text-red-600">{authError}</p> : null}
-              <div className="grid grid-cols-2 gap-2">
-                <PrimaryButton onClick={onSignIn} disabled={!authInitialized || authBusy}>
-                  {authBusy ? 'Signing in...' : 'Sign In'}
+            {supabaseUser?.id ? (
+              <div className="mt-4 space-y-2">
+                <Card className="bg-blue-50 border-blue-200">
+                  <p className="text-xs text-blue-700 font-semibold">Session Found</p>
+                  <p className="text-sm text-blue-900 mt-1 break-words">
+                    {supabaseUser?.email ?? 'Guest session'}
+                  </p>
+                </Card>
+                <PrimaryButton onClick={onContinueToApp} disabled={!authInitialized}>
+                  Continue to App
                 </PrimaryButton>
-                <SecondaryButton onClick={onCreateLogin} disabled={!authInitialized || authBusy} className="border-blue-200">
-                  Create Login
+                <SecondaryButton onClick={onSignOut} disabled={authBusy} className="w-full border-blue-200">
+                  Sign Out / Switch Account
                 </SecondaryButton>
               </div>
-              <SecondaryButton
-                onClick={onContinueAsGuest}
-                disabled={!authInitialized || authBusy}
-                className="w-full border-blue-200"
-              >
-                Continue as Guest
-              </SecondaryButton>
-              <p className="text-xs text-gray-600">
-                Guest sign-in uses an anonymous Supabase account so test edits persist to shared data.
-              </p>
-            </div>
+            ) : (
+              <div className="mt-4 space-y-2">
+                <input
+                  type="email"
+                  value={authDraft.email}
+                  onChange={(e) => onSetAuthField('email', e.target.value)}
+                  placeholder="Email"
+                  className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
+                  autoComplete="email"
+                  disabled={!authInitialized || authBusy}
+                />
+                <input
+                  type="password"
+                  value={authDraft.password}
+                  onChange={(e) => onSetAuthField('password', e.target.value)}
+                  placeholder="Password"
+                  className="w-full h-11 rounded-xl border border-blue-200 px-3 text-sm"
+                  autoComplete="current-password"
+                  disabled={!authInitialized || authBusy}
+                />
+                {authError ? <p className="text-xs text-red-600">{authError}</p> : null}
+                <div className="grid grid-cols-2 gap-2">
+                  <PrimaryButton onClick={onSignIn} disabled={!authInitialized || authBusy}>
+                    {authBusy ? 'Signing in...' : 'Sign In'}
+                  </PrimaryButton>
+                  <SecondaryButton onClick={onCreateLogin} disabled={!authInitialized || authBusy} className="border-blue-200">
+                    Create Login
+                  </SecondaryButton>
+                </div>
+                <SecondaryButton
+                  onClick={onContinueAsGuest}
+                  disabled={!authInitialized || authBusy}
+                  className="w-full border-blue-200"
+                >
+                  Continue as Guest
+                </SecondaryButton>
+                <p className="text-xs text-gray-600">
+                  Guest sign-in uses an anonymous Supabase account so test edits persist to shared data.
+                </p>
+              </div>
+            )}
           </Card>
         </div>
       </div>
@@ -1238,6 +1258,7 @@ export default function BuildFlow() {
   const [taskModal, setTaskModal] = useState(null)
   const [onSiteLotModal, setOnSiteLotModal] = useState(null)
   const [dashboardStatusModal, setDashboardStatusModal] = useState(null)
+  const [atGlanceModal, setAtGlanceModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
   const [bufferModal, setBufferModal] = useState(null)
@@ -1270,6 +1291,7 @@ export default function BuildFlow() {
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState('')
   const [authInitialized, setAuthInitialized] = useState(false)
+  const [showAuthLanding, setShowAuthLanding] = useState(true)
   const [claimLotBusyId, setClaimLotBusyId] = useState(null)
   const [supabaseSession, setSupabaseSession] = useState(null)
   const [supabaseUser, setSupabaseUser] = useState(null)
@@ -1470,6 +1492,7 @@ export default function BuildFlow() {
       if (!active) return
       setSupabaseSession(session ?? null)
       setSupabaseUser(session?.user ?? null)
+      if (!session?.user?.id) setShowAuthLanding(true)
       if (session?.user?.email) {
         setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
       } else {
@@ -3169,6 +3192,7 @@ export default function BuildFlow() {
       loadedAt: new Date().toISOString(),
       warning: '',
     }))
+    setShowAuthLanding(false)
   }
 
   const signInWithSupabase = async () => {
@@ -3196,6 +3220,7 @@ export default function BuildFlow() {
     }
 
     setAuthDraft((prev) => ({ ...prev, password: '' }))
+    setShowAuthLanding(false)
   }
 
   const createSupabaseLogin = async () => {
@@ -3238,6 +3263,7 @@ export default function BuildFlow() {
       setAuthError(error.message)
       return
     }
+    setShowAuthLanding(true)
     setSupabaseBootstrapVersion((prev) => prev + 1)
   }
 
@@ -5291,6 +5317,17 @@ export default function BuildFlow() {
     return count
   }, [app.lots])
 
+  const openPunchLots = useMemo(() => {
+    const rows = []
+    for (const lot of app.lots ?? []) {
+      const openCount = (lot.punch_list?.items ?? []).filter((item) => item.status !== 'closed' && item.status !== 'verified').length
+      if (openCount <= 0) continue
+      const community = communitiesById.get(lot.community_id) ?? null
+      rows.push({ lot, community, openCount })
+    }
+    return rows.sort((a, b) => b.openCount - a.openCount || Number(a.lot.lot_number ?? 0) - Number(b.lot.lot_number ?? 0))
+  }, [app.lots, communitiesById])
+
   const matchesSalesFilters = (lot, filters, ignoreKey = '') => {
     if (ignoreKey !== 'communityId' && filters.communityId !== 'all' && lot.community_id !== filters.communityId) return false
     if (ignoreKey !== 'productTypeId' && filters.productTypeId !== 'all' && lot.product_type_id !== filters.productTypeId) return false
@@ -6415,11 +6452,12 @@ export default function BuildFlow() {
     setShowStartLot(false)
   }
 
-  if (!authInitialized || !supabaseUser) {
+  if (!authInitialized || showAuthLanding || !supabaseUser) {
     return (
       <AuthLandingPage
         authInitialized={authInitialized}
         supabaseStatus={supabaseStatus}
+        supabaseUser={supabaseUser}
         authDraft={authDraft}
         authBusy={authBusy}
         authError={authError}
@@ -6428,6 +6466,11 @@ export default function BuildFlow() {
         onSignIn={signInWithSupabase}
         onCreateLogin={createSupabaseLogin}
         onContinueAsGuest={signInAsGuest}
+        onContinueToApp={() => {
+          if (!supabaseUser?.id) return
+          setShowAuthLanding(false)
+        }}
+        onSignOut={signOutFromSupabase}
       />
     )
   }
@@ -6874,22 +6917,42 @@ export default function BuildFlow() {
             <Card>
               <h3 className="font-semibold mb-3">At a Glance</h3>
               <div className="grid grid-cols-2 gap-3">
-                <div className="p-4 bg-blue-50 rounded-xl text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTab('calendar')
+                    setCalendarView('day')
+                    setCalendarDate(todayIso)
+                  }}
+                  className="p-4 bg-blue-50 rounded-xl text-center hover:bg-blue-100"
+                >
                   <p className="text-2xl font-bold text-blue-600">{todaysTasks.length}</p>
                   <p className="text-xs text-gray-600">Tasks Today</p>
-                </div>
-                <div className="p-4 bg-orange-50 rounded-xl text-center">
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAtGlanceModal('on_site_today')}
+                  className="p-4 bg-orange-50 rounded-xl text-center hover:bg-orange-100"
+                >
                   <p className="text-2xl font-bold text-orange-600">{todaysAssignments.length}</p>
                   <p className="text-xs text-gray-600">On Site Today</p>
-                </div>
-                <div className="p-4 bg-red-50 rounded-xl text-center">
-                  <p className="text-2xl font-bold text-red-600">{delayedLots.length}</p>
-                  <p className="text-xs text-gray-600">Delayed Lots</p>
-                </div>
-                <div className="p-4 bg-purple-50 rounded-xl text-center">
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAtGlanceModal('critical_deadlines')}
+                  className="p-4 bg-red-50 rounded-xl text-center hover:bg-red-100"
+                >
+                  <p className="text-2xl font-bold text-red-600">{criticalDeadlines.length}</p>
+                  <p className="text-xs text-gray-600">Critical Deadlines</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAtGlanceModal('open_punch')}
+                  className="p-4 bg-purple-50 rounded-xl text-center hover:bg-purple-100"
+                >
                   <p className="text-2xl font-bold text-purple-600">{openPunchItems}</p>
                   <p className="text-xs text-gray-600">Open Punch Items</p>
-                </div>
+                </button>
               </div>
             </Card>
           </div>
@@ -11818,6 +11881,92 @@ export default function BuildFlow() {
           }}
           onClose={() => setDashboardStatusModal(null)}
         />
+      ) : null}
+
+      {atGlanceModal ? (
+        <Modal
+          title={
+            atGlanceModal === 'on_site_today'
+              ? `On Site Today (${todaysAssignments.length})`
+              : atGlanceModal === 'critical_deadlines'
+                ? `Critical Deadlines (${criticalDeadlines.length})`
+                : `Open Punch Items (${openPunchItems})`
+          }
+          onClose={() => setAtGlanceModal(null)}
+        >
+          {atGlanceModal === 'on_site_today' ? (
+            todaysAssignments.length === 0 ? (
+              <p className="text-sm text-gray-600">No active assignments today.</p>
+            ) : (
+              <div className="space-y-2">
+                {todaysAssignments.map(({ lot, task, status, sub }) => (
+                  <button
+                    key={`${lot.id}-${task.id}`}
+                    onClick={() => {
+                      setAtGlanceModal(null)
+                      setOnSiteLotModal({ lot_id: lot.id, task_id: task.id })
+                    }}
+                    className="w-full rounded-xl border border-gray-200 bg-gray-50 p-3 text-left"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="font-semibold text-gray-900">{sub?.company_name ?? 'Unassigned'}</p>
+                        <p className="text-xs text-gray-600 mt-1">{communitiesById.get(lot.community_id)?.name ?? 'Community'} | {lotCode(lot)}</p>
+                        <p className="text-xs text-gray-500 mt-1">{task.name}</p>
+                      </div>
+                      <TaskStatusBadge status={status} />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )
+          ) : atGlanceModal === 'critical_deadlines' ? (
+            criticalDeadlines.length === 0 ? (
+              <p className="text-sm text-gray-600">No critical deadlines.</p>
+            ) : (
+              <div className="space-y-2">
+                {criticalDeadlines.map(({ lot, community, daysRemaining }) => (
+                  <button
+                    key={lot.id}
+                    onClick={() => {
+                      setAtGlanceModal(null)
+                      openLot(lot.id)
+                    }}
+                    className={`w-full rounded-xl p-3 text-left border ${
+                      daysRemaining <= 7 ? 'bg-red-50 border-red-200' : 'bg-yellow-50 border-yellow-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-semibold text-gray-900">{community?.name ?? 'Community'} {lotCode(lot)}</p>
+                      <p className={`text-xs font-bold ${daysRemaining <= 7 ? 'text-red-700' : 'text-yellow-700'}`}>{daysRemaining} days</p>
+                    </div>
+                    <p className="text-xs text-gray-600 mt-1">Target: {formatShortDate(lot.hard_deadline || lot.target_completion_date)}</p>
+                  </button>
+                ))}
+              </div>
+            )
+          ) : openPunchLots.length === 0 ? (
+            <p className="text-sm text-gray-600">No open punch items.</p>
+          ) : (
+            <div className="space-y-2">
+              {openPunchLots.map(({ lot, community, openCount }) => (
+                <button
+                  key={lot.id}
+                  onClick={() => {
+                    setAtGlanceModal(null)
+                    setPunchListLotId(lot.id)
+                  }}
+                  className="w-full rounded-xl border border-gray-200 bg-purple-50 p-3 text-left"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-gray-900">{community?.name ?? 'Community'} {lotCode(lot)}</p>
+                    <p className="text-xs font-bold text-purple-700">{openCount} open</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </Modal>
       ) : null}
 
       {scheduledReportModal ? (
