@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   BarChart3,
@@ -2766,32 +2766,41 @@ export default function BuildFlow() {
     return userWeatherLocation ?? communityWeatherLocation ?? WEATHER_FALLBACK
   }, [weatherLocationMode, userWeatherLocation, communityWeatherLocation])
 
-  useEffect(() => {
-    if (weatherGeoRequested) return
-    if (weatherLocationMode !== 'auto') return
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
-      setWeatherGeoRequested(true)
-      return
-    }
+  const requestWeatherGeo = useCallback(
+    (force = false) => {
+      if (!force && weatherGeoRequested) return
+      if (typeof navigator === 'undefined' || !navigator.geolocation) {
+        setWeatherGeoRequested(true)
+        setUserWeatherLocation(null)
+        return
+      }
 
-    setWeatherGeoRequested(true)
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setUserWeatherLocation({
-          id: 'device',
-          name: 'Your Location',
-          latitude: Number(pos.coords.latitude),
-          longitude: Number(pos.coords.longitude),
-          timezone: app?.org?.timezone || WEATHER_FALLBACK.timezone,
-          source: 'device',
-        })
-      },
-      () => {
-        // Permission denied/unavailable: fall back to community location.
-      },
-      { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
-    )
-  }, [weatherGeoRequested, weatherLocationMode, app?.org?.timezone])
+      setWeatherGeoRequested(true)
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setUserWeatherLocation({
+            id: 'device',
+            name: 'Your Location',
+            latitude: Number(pos.coords.latitude),
+            longitude: Number(pos.coords.longitude),
+            timezone: app?.org?.timezone || WEATHER_FALLBACK.timezone,
+            source: 'device',
+          })
+        },
+        () => {
+          // Permission denied/unavailable: fall back to community location.
+          setUserWeatherLocation(null)
+        },
+        { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
+      )
+    },
+    [weatherGeoRequested, app?.org?.timezone],
+  )
+
+  useEffect(() => {
+    if (weatherLocationMode !== 'auto') return
+    requestWeatherGeo(false)
+  }, [weatherLocationMode, requestWeatherGeo])
 
   useEffect(() => {
     let cancelled = false
@@ -6851,7 +6860,17 @@ export default function BuildFlow() {
               </div>
 
               {weatherLocationMode === 'auto' && weatherGeoRequested && !userWeatherLocation && communityWeatherLocation ? (
-                <p className="mt-2 text-xs opacity-90">Using community weather (device location unavailable).</p>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <p className="text-xs opacity-90">Using community weather (device location unavailable).</p>
+                  <button
+                    type="button"
+                    onClick={() => requestWeatherGeo(true)}
+                    className="h-8 px-3 rounded-lg bg-white/20 border border-white/30 text-white text-xs font-semibold"
+                    title="Retry device location"
+                  >
+                    Retry location
+                  </button>
+                </div>
               ) : null}
               {weatherWarnings.length > 0 ? (
                 <div className="mt-3 bg-white/15 rounded-lg p-3">
@@ -10869,6 +10888,7 @@ export default function BuildFlow() {
             task={task}
             status={status}
             sub={sub}
+            onOpenTask={(taskId) => setTaskModal({ lot_id: lot.id, task_id: taskId })}
             isOnline={isOnline}
             specAcknowledgements={lot.spec_acknowledgements ?? {}}
             specDismissals={lot.spec_dismissals ?? {}}
@@ -13242,6 +13262,7 @@ function TaskModal({
   status,
   sub,
   isOnline,
+  onOpenTask,
   specAcknowledgements,
   specDismissals,
   onToggleSpecAck,
@@ -13313,12 +13334,54 @@ function TaskModal({
   const photoMissing = Boolean(photoReq && (!photoCountOk || !anglesOk))
   const canStart = status !== 'complete' && status !== 'in_progress'
   const startLabel = 'Start Task'
+
+  const taskTrack = task?.track ?? 'misc'
+  const inProgressSameTrack = useMemo(() => {
+    const list = lot?.tasks ?? []
+    return list.filter((t) => t && t.id !== task?.id && (t.track ?? 'misc') === taskTrack && t.status === 'in_progress')
+  }, [lot, task, taskTrack])
+
+  const possibleBlockers = useMemo(() => {
+    if (status !== 'blocked') return []
+    const list = (lot?.tasks ?? []).filter(Boolean)
+    const group = list.filter((t) => (t.track ?? 'misc') === taskTrack && t.id !== task?.id && t.status !== 'complete')
+
+    const currentStart = task?.scheduled_start ? parseISODate(task.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY
+    const currentOrder = Number(task?.sort_order ?? 0) || 0
+
+    group.sort((a, b) => {
+      const aStart = a.scheduled_start ? parseISODate(a.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY
+      const bStart = b.scheduled_start ? parseISODate(b.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY
+      if (aStart !== bStart) return aStart - bStart
+      return (Number(a.sort_order ?? 0) || 0) - (Number(b.sort_order ?? 0) || 0)
+    })
+
+    const earlier = group.filter((t) => {
+      const tStart = t.scheduled_start ? parseISODate(t.scheduled_start)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY
+      const tOrder = Number(t.sort_order ?? 0) || 0
+      if (tStart < currentStart) return true
+      if (tStart === currentStart && tOrder < currentOrder) return true
+      return false
+    })
+
+    return earlier.slice(0, 3)
+  }, [status, lot, task, taskTrack])
+
   const handleStart = () => {
     if (!canStart) return
-    if (status === 'blocked') {
-      const ok = window.confirm('This task is marked Blocked. Start task anyway?')
+
+    const warnings = []
+    if (inProgressSameTrack.length > 0) {
+      const label = inProgressSameTrack[0]?.name ?? 'another task'
+      warnings.push(`Another task is already In Progress in this track: ${label}.`)
+    }
+    if (status === 'blocked') warnings.push('This task is marked Blocked.')
+
+    if (warnings.length > 0) {
+      const ok = window.confirm(`Start this task?\n\nHeads up:\n- ${warnings.join('\n- ')}\n\nYou can still start it if needed.`)
       if (!ok) return
     }
+
     onStart?.()
   }
 
@@ -13341,6 +13404,39 @@ function TaskModal({
             <TaskStatusBadge status={status} />
           </div>
         </Card>
+
+        {status === 'blocked' ? (
+          <Card className="border-orange-200 bg-orange-50">
+            <p className="text-sm font-semibold text-orange-800">Blocked</p>
+            {possibleBlockers.length > 0 ? (
+              <div className="mt-2 space-y-2">
+                <p className="text-xs text-orange-800">Possible blockers in this track:</p>
+                {possibleBlockers.map((t) => (
+                  <div key={t.id} className="bg-white/70 border border-orange-200 rounded-xl p-2 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-gray-900 truncate">{t.name}</p>
+                      <p className="text-[11px] text-gray-600 mt-0.5">
+                        {t.scheduled_start ? formatShortDateWithWeekday(t.scheduled_start) : '—'} -{' '}
+                        {t.scheduled_end ? formatShortDateWithWeekday(t.scheduled_end) : '—'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onOpenTask?.(t.id)}
+                      className="shrink-0 h-9 px-3 rounded-xl bg-white border border-orange-200 text-orange-800 text-sm font-semibold"
+                    >
+                      Open
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-orange-800 mt-1">
+                This task is blocked. Common reasons: waiting on a prior task, an inspection, or a required spec.
+              </p>
+            )}
+          </Card>
+        ) : null}
 
         {visibleSpecs.length > 0 && (
           <Card className="border-purple-200 bg-purple-50">
