@@ -55,6 +55,15 @@ begin
           and (p_since is null or la.updated_at > p_since)
       ),
       '[]'::jsonb
+    ),
+    'attachments', coalesce(
+      (
+        select jsonb_agg(a)
+        from public.attachments a
+        where a.org_id = v_org_id
+          and (p_since is null or a.updated_at > p_since)
+      ),
+      '[]'::jsonb
     )
   );
 end;
@@ -69,6 +78,9 @@ grant execute on function public.sync_pull(timestamptz) to authenticated;
 --   { id, kind: 'tasks_batch', lot_id, tasks: [{ action, id, base_version, row }] }
 --     - action: 'upsert' | 'delete'
 --     - row: task-like object (client sends full row; server enforces org + lot)
+--   { id, kind: 'attachments_batch', attachments: [{ action, id, base_version, row }] }
+--     - action: 'upsert' | 'delete'
+--     - row: attachment-like object (client sends row; server enforces org + lot)
 -- -------------------------------------------------------------------
 
 create or replace function public.sync_push(p_ops jsonb)
@@ -92,6 +104,12 @@ declare
   v_task_id text;
   v_base_version int;
   v_row jsonb;
+  v_attachment jsonb;
+  v_attachment_action text;
+  v_attachment_id text;
+  v_attachment_base_version int;
+  v_attachment_row jsonb;
+  v_attachment_lot_id text;
   v_applied jsonb := '[]'::jsonb;
 begin
   if v_user_id is null then
@@ -262,6 +280,108 @@ begin
       end loop;
 
       v_applied := v_applied || jsonb_build_array(jsonb_build_object('id', v_op_id, 'kind', v_kind, 'lot_id', v_lot_id, 'applied_at', v_now));
+    elsif v_kind = 'attachments_batch' then
+      if jsonb_typeof(v_op->'attachments') <> 'array' then
+        raise exception 'attachments_batch missing attachments array';
+      end if;
+
+      for v_attachment in select value from jsonb_array_elements(v_op->'attachments')
+      loop
+        v_attachment_action := coalesce(v_attachment->>'action', 'upsert');
+        v_attachment_id := nullif(v_attachment->>'id', '');
+        v_attachment_base_version := nullif(v_attachment->>'base_version', '')::int;
+        v_attachment_row := v_attachment->'row';
+
+        if v_attachment_id is null then
+          raise exception 'Attachment missing id';
+        end if;
+
+        if v_attachment_action = 'delete' then
+          if v_attachment_base_version is null then
+            raise exception 'Delete requires base_version (attachment %)', v_attachment_id;
+          end if;
+
+          update public.attachments a
+          set deleted_at = v_now,
+              updated_by = v_user_id
+          where a.org_id = v_org_id
+            and a.id = v_attachment_id::uuid
+            and a.version = v_attachment_base_version
+            and a.deleted_at is null;
+
+          if not found then
+            raise exception 'Conflict (attachment delete): %', v_attachment_id;
+          end if;
+        else
+          if v_attachment_row is null or jsonb_typeof(v_attachment_row) <> 'object' then
+            raise exception 'Upsert requires row object (attachment %)', v_attachment_id;
+          end if;
+
+          v_attachment_lot_id := nullif(v_attachment_row->>'lot_id', '');
+          if v_attachment_lot_id is null then
+            raise exception 'Attachment upsert requires lot_id (attachment %)', v_attachment_id;
+          end if;
+
+          if not public.bf_can_edit_lot(v_attachment_lot_id) then
+            raise exception 'Not authorized to edit lot %', v_attachment_lot_id;
+          end if;
+
+          if v_attachment_base_version is null then
+            begin
+              insert into public.attachments (
+                id, org_id, lot_id, task_id,
+                kind, category, caption, mime, file_name, file_size, checksum,
+                storage_bucket, storage_path, thumb_storage_path,
+                created_by, updated_by
+              )
+              values (
+                v_attachment_id::uuid, v_org_id, v_attachment_lot_id,
+                nullif(v_attachment_row->>'task_id', ''),
+                coalesce(v_attachment_row->>'kind', 'photo'),
+                nullif(v_attachment_row->>'category', ''),
+                nullif(v_attachment_row->>'caption', ''),
+                coalesce(v_attachment_row->>'mime', 'application/octet-stream'),
+                coalesce(v_attachment_row->>'file_name', ''),
+                greatest(0, coalesce((v_attachment_row->>'file_size')::int, 0)),
+                nullif(v_attachment_row->>'checksum', ''),
+                coalesce(v_attachment_row->>'storage_bucket', 'buildflow'),
+                nullif(v_attachment_row->>'storage_path', ''),
+                nullif(v_attachment_row->>'thumb_storage_path', ''),
+                v_user_id, v_user_id
+              );
+            exception
+              when unique_violation then
+                raise exception 'Conflict (attachment insert exists): %', v_attachment_id;
+            end;
+          else
+            update public.attachments a
+            set
+              lot_id = (case when v_attachment_row ? 'lot_id' then nullif(v_attachment_row->>'lot_id','') else a.lot_id end),
+              task_id = (case when v_attachment_row ? 'task_id' then nullif(v_attachment_row->>'task_id','') else a.task_id end),
+              kind = (case when v_attachment_row ? 'kind' then coalesce(v_attachment_row->>'kind', a.kind) else a.kind end),
+              category = (case when v_attachment_row ? 'category' then nullif(v_attachment_row->>'category','') else a.category end),
+              caption = (case when v_attachment_row ? 'caption' then nullif(v_attachment_row->>'caption','') else a.caption end),
+              mime = (case when v_attachment_row ? 'mime' then coalesce(v_attachment_row->>'mime', a.mime) else a.mime end),
+              file_name = (case when v_attachment_row ? 'file_name' then coalesce(v_attachment_row->>'file_name', a.file_name) else a.file_name end),
+              file_size = (case when v_attachment_row ? 'file_size' then greatest(0, coalesce((v_attachment_row->>'file_size')::int, a.file_size)) else a.file_size end),
+              checksum = (case when v_attachment_row ? 'checksum' then nullif(v_attachment_row->>'checksum','') else a.checksum end),
+              storage_bucket = (case when v_attachment_row ? 'storage_bucket' then coalesce(v_attachment_row->>'storage_bucket', a.storage_bucket) else a.storage_bucket end),
+              storage_path = (case when v_attachment_row ? 'storage_path' then nullif(v_attachment_row->>'storage_path','') else a.storage_path end),
+              thumb_storage_path = (case when v_attachment_row ? 'thumb_storage_path' then nullif(v_attachment_row->>'thumb_storage_path','') else a.thumb_storage_path end),
+              updated_by = v_user_id
+            where a.org_id = v_org_id
+              and a.id = v_attachment_id::uuid
+              and a.version = v_attachment_base_version
+              and a.deleted_at is null;
+
+            if not found then
+              raise exception 'Conflict (attachment update): %', v_attachment_id;
+            end if;
+          end if;
+        end if;
+      end loop;
+
+      v_applied := v_applied || jsonb_build_array(jsonb_build_object('id', v_op_id, 'kind', v_kind, 'applied_at', v_now));
     else
       raise exception 'Unsupported op kind: %', v_kind;
     end if;

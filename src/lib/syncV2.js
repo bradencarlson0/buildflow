@@ -36,6 +36,6 @@ export const syncV2Pull = async ({ supabase, since }) => {
     lots: Array.isArray(row.lots) ? row.lots : [],
     tasks: Array.isArray(row.tasks) ? row.tasks : [],
     lot_assignments: Array.isArray(row.lot_assignments) ? row.lot_assignments : [],
+    attachments: Array.isArray(row.attachments) ? row.attachments : [],
   }
 }
-
