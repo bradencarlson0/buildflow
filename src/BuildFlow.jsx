@@ -4462,10 +4462,10 @@ export default function BuildFlow() {
       const now = new Date().toISOString()
       const nextLots = (prev.lots ?? []).map((lot) => {
         if (lot.id !== lotId) return lot
-        const nextTasks = (lot.tasks ?? []).map((t) => {
+        const nextTasks = refreshReadyStatuses((lot.tasks ?? []).map((t) => {
           if (t.id !== taskId) return t
           return { ...t, status: 'in_progress', actual_start: t.actual_start ?? todayIso, updated_at: now }
-        })
+        }))
         const nextLot = { ...lot, tasks: nextTasks }
         op = buildV2TasksBatchOp({ lotId, prevLot: lot, nextLot, mode: 'task' })
         return nextLot
