@@ -247,6 +247,7 @@ const build7DayForecast = (daily) => {
 
   return times.slice(0, 7).map((iso, i) => {
     const when = parseISODate(iso)
+    const md = when ? `${when.getMonth() + 1}/${when.getDate()}` : ''
     const label =
       i === 0
         ? 'Today'
@@ -260,6 +261,7 @@ const build7DayForecast = (daily) => {
 
     return {
       date: iso,
+      md,
       label,
       icon,
       condition,
@@ -6841,6 +6843,7 @@ export default function BuildFlow() {
                 {(weather.forecast ?? []).map((d) => (
                   <div key={d.date} className="text-center">
                     <p className="text-xs opacity-75">{d.label}</p>
+                    <p className="text-[10px] opacity-75">{d.md}</p>
                     <d.icon className={`w-5 h-5 mx-auto my-1 ${d.rainChance > 50 ? 'text-yellow-200' : ''}`} />
                     <p className="text-xs font-medium">{d.max ?? '--'}°</p>
                     {d.rainChance > 50 ? <p className="text-xs text-yellow-200">☔ {d.rainChance}%</p> : null}
