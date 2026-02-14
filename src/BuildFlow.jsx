@@ -101,6 +101,14 @@ const WEATHER_FALLBACK = {
   source: 'fallback',
 }
 
+const WEATHER_HUNTSVILLE = {
+  name: 'Huntsville, AL',
+  latitude: 34.7304,
+  longitude: -86.5861,
+  timezone: 'America/Chicago',
+  source: 'manual',
+}
+
 const COMMUNITY_WEATHER_ANCHORS = [
   {
     id: 'ovation',
@@ -188,19 +196,6 @@ const buildCommunityWeatherLocation = (communities = [], lots = []) => {
     latitude: avgLat,
     longitude: avgLon,
     timezone: 'America/Chicago',
-    source: 'community',
-  }
-}
-
-const getWeatherAnchorLocationById = (id) => {
-  const anchor = COMMUNITY_WEATHER_ANCHORS.find((entry) => entry.id === id)
-  if (!anchor) return null
-  return {
-    id: anchor.id,
-    name: anchor.name,
-    latitude: Number(anchor.latitude),
-    longitude: Number(anchor.longitude),
-    timezone: anchor.timezone || WEATHER_FALLBACK.timezone,
     source: 'community',
   }
 }
@@ -2761,26 +2756,18 @@ export default function BuildFlow() {
   )
 
   const effectiveWeatherLocation = useMemo(() => {
-    if (weatherLocationMode === 'device') {
-      return userWeatherLocation ?? WEATHER_FALLBACK
-    }
-    if (weatherLocationMode === 'community') {
-      return communityWeatherLocation ?? WEATHER_FALLBACK
-    }
-    if (weatherLocationMode === 'ovation') {
-      return getWeatherAnchorLocationById('ovation') ?? WEATHER_FALLBACK
-    }
-    if (weatherLocationMode === 'grove') {
-      return getWeatherAnchorLocationById('grove') ?? WEATHER_FALLBACK
-    }
     if (weatherLocationMode === 'madison') {
       return WEATHER_FALLBACK
+    }
+    if (weatherLocationMode === 'huntsville') {
+      return WEATHER_HUNTSVILLE
     }
     return userWeatherLocation ?? communityWeatherLocation ?? WEATHER_FALLBACK
   }, [weatherLocationMode, userWeatherLocation, communityWeatherLocation])
 
   useEffect(() => {
     if (weatherGeoRequested) return
+    if (weatherLocationMode !== 'auto') return
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
       setWeatherGeoRequested(true)
       return
@@ -2799,33 +2786,11 @@ export default function BuildFlow() {
         })
       },
       () => {
-        // Permission denied / unavailable: fall back to community location.
+        // Permission denied/unavailable: fall back to community location.
       },
       { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
     )
-  }, [weatherGeoRequested, app?.org?.timezone])
-
-  useEffect(() => {
-    if (weatherLocationMode !== 'device') return
-    if (userWeatherLocation?.latitude && userWeatherLocation?.longitude) return
-    if (typeof navigator === 'undefined' || !navigator.geolocation) return
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setUserWeatherLocation({
-          id: 'device',
-          name: 'Your Location',
-          latitude: Number(pos.coords.latitude),
-          longitude: Number(pos.coords.longitude),
-          timezone: app?.org?.timezone || WEATHER_FALLBACK.timezone,
-          source: 'device',
-        })
-      },
-      () => {
-        // Keep fallback behavior when device location is unavailable.
-      },
-      { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
-    )
-  }, [weatherLocationMode, userWeatherLocation, app?.org?.timezone])
+  }, [weatherGeoRequested, weatherLocationMode, app?.org?.timezone])
 
   useEffect(() => {
     let cancelled = false
@@ -4572,7 +4537,7 @@ export default function BuildFlow() {
     if (lotSnapshot) {
       const before = getCurrentMilestone(lotSnapshot)
       const now = new Date().toISOString()
-      const updatedTasks = (lotSnapshot.tasks ?? []).map((t) => {
+      const updatedTasks = refreshReadyStatuses((lotSnapshot.tasks ?? []).map((t) => {
         if (t.id !== taskId) return t
         return {
           ...t,
@@ -4581,7 +4546,7 @@ export default function BuildFlow() {
           actual_end: todayIso,
           updated_at: now,
         }
-      })
+      }))
       const maybeCompleted = updatedTasks.find((t) => t.id === taskId)
       const nextPunch = !lotSnapshot.punch_list && maybeCompleted?.name === 'Final Clean' ? createPunchListFromTemplate(now) : lotSnapshot.punch_list
       const lotStatus = maybeCompleted?.name === 'Punch Complete' ? 'complete' : lotSnapshot.status
@@ -4618,10 +4583,10 @@ export default function BuildFlow() {
       const now = new Date().toISOString()
       const nextLots = (prev.lots ?? []).map((lot) => {
         if (lot.id !== lotId) return lot
-        const updatedTasks = (lot.tasks ?? []).map((t) => {
+        const updatedTasks = refreshReadyStatuses((lot.tasks ?? []).map((t) => {
           if (t.id !== taskId) return t
           return { ...t, status: 'complete', actual_start: t.actual_start ?? todayIso, actual_end: todayIso, updated_at: now }
-        })
+        }))
         const maybeCompleted = updatedTasks.find((t) => t.id === taskId)
         const nextPunch = !lot.punch_list && maybeCompleted?.name === 'Final Clean' ? createPunchListFromTemplate(now) : lot.punch_list
         const lotStatus = maybeCompleted?.name === 'Punch Complete' ? 'complete' : lot.status
@@ -6855,7 +6820,7 @@ export default function BuildFlow() {
                   </p>
                   <p className="text-xs opacity-75">
                     {weather.locationName}
-                    {weather.source === 'device' ? ' (Live)' : ''}
+                    {weatherLocationMode === 'auto' && weather.source === 'device' ? ' (Live)' : ''}
                   </p>
                 </div>
                 <div className="flex items-start gap-2">
@@ -6865,12 +6830,9 @@ export default function BuildFlow() {
                     className="h-8 rounded-lg bg-white/20 border border-white/30 text-white text-xs px-2"
                     title="Weather location"
                   >
-                    <option value="auto" className="text-gray-900">Auto</option>
-                    <option value="device" className="text-gray-900">My Location</option>
-                    <option value="community" className="text-gray-900">Breland Communities</option>
-                    <option value="ovation" className="text-gray-900">Ovation</option>
-                    <option value="grove" className="text-gray-900">The Grove</option>
+                    <option value="auto" className="text-gray-900">Auto Location</option>
                     <option value="madison" className="text-gray-900">Madison, AL</option>
+                    <option value="huntsville" className="text-gray-900">Huntsville, AL</option>
                   </select>
                   <Sun className="w-12 h-12 opacity-90" />
                 </div>
@@ -6886,6 +6848,9 @@ export default function BuildFlow() {
                 ))}
               </div>
 
+              {weatherLocationMode === 'auto' && weatherGeoRequested && !userWeatherLocation && communityWeatherLocation ? (
+                <p className="mt-2 text-xs opacity-90">Using community weather (device location unavailable).</p>
+              ) : null}
               {weatherWarnings.length > 0 ? (
                 <div className="mt-3 bg-white/15 rounded-lg p-3">
                   <p className="text-sm font-semibold">⚠️ Weather Alerts</p>
@@ -6931,10 +6896,6 @@ export default function BuildFlow() {
                     ))}
                   </div>
                 </div>
-              ) : null}
-
-              {weatherLocationMode === 'device' && weather.source !== 'device' ? (
-                <p className="mt-2 text-xs opacity-90">Device location unavailable. Showing fallback weather.</p>
               ) : null}
 
               {(weather.loading || !isOnline) && (
@@ -7207,7 +7168,6 @@ export default function BuildFlow() {
                 <div className="text-right">
                   <p className="text-xs text-gray-500">
                     {weather.locationName}
-                    {weather.source === 'device' ? ' (Live)' : ''}
                   </p>
                   {calendarView === 'day' ? (
                     <p className="text-sm font-semibold">
@@ -13349,6 +13309,16 @@ function TaskModal({
   const specsOk = requiredSpecs.length === 0 || requiredSpecs.every((s) => Boolean(specAcknowledgements?.[s.id]))
   const canComplete = specsOk
   const photoMissing = Boolean(photoReq && (!photoCountOk || !anglesOk))
+  const canStart = status !== 'complete' && status !== 'in_progress'
+  const startLabel = status === 'ready' ? 'Start Task' : 'Start Anyway'
+  const handleStart = () => {
+    if (!canStart) return
+    if (status === 'blocked') {
+      const ok = window.confirm('This task is marked Blocked. Start anyway?')
+      if (!ok) return
+    }
+    onStart?.()
+  }
 
   return (
     <Modal title={task.name} onClose={onClose}>
@@ -13509,9 +13479,9 @@ function TaskModal({
         </div>
 
         <div className="flex gap-2">
-          {status === 'ready' ? (
-            <PrimaryButton onClick={onStart} className="flex-1 bg-green-600">
-              Start Task
+          {canStart ? (
+            <PrimaryButton onClick={handleStart} className={`flex-1 ${status === 'ready' ? 'bg-green-600' : 'bg-green-700'}`}>
+              {startLabel}
             </PrimaryButton>
           ) : null}
           {status === 'in_progress' ? (
