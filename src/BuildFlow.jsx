@@ -18584,8 +18584,7 @@ const PUNCH_CATEGORY_DEFS = [
   { id: 'final', label: 'Final' },
   { id: 'misc', label: 'Misc' },
 ]
-// Punch photo uploads are intentionally disabled for now (kept for future enablement).
-const ENABLE_PUNCH_PHOTOS = false
+const ENABLE_PUNCH_PHOTOS = true
 
 const normalizeTaskCategoryId = (task) => {
   const raw = task?.category ?? task?.category_id ?? task?.track ?? task?.phase ?? ''
