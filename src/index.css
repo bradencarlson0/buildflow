@@ -6,8 +6,42 @@ body,
   height: 100%;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Prevent iOS from auto-zooming focused form controls across the app. */
+@supports (-webkit-touch-callout: none) {
+  @media (hover: none) and (pointer: coarse) {
+    input,
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
+  }
+}
+
 .safe-area-pb {
   padding-bottom: env(safe-area-inset-bottom);
+}
+
+.safe-area-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Keep scrollable page content clear of the bottom nav + iOS home indicator area. */
+.safe-area-content-pb {
+  padding-bottom: calc(6rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* Keep top controls clear of the iOS status bar (Dynamic Island/notch). */
+@supports (-webkit-touch-callout: none) {
+  @media (hover: none) and (pointer: coarse) {
+    .safe-area-pt {
+      padding-top: max(env(safe-area-inset-top, 0px), 2rem);
+    }
+  }
 }
 
 .bottom-nav {

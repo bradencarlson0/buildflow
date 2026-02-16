@@ -417,7 +417,10 @@ function SubcontractorCard({ sub, onEdit, onMessage, tradeLabel }) {
           <button onClick={onEdit} className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white">
             Edit
           </button>
-          <button onClick={onMessage} className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white">
+          <button
+            onClick={() => onMessage?.({ contactId: activeContact?.id ?? null })}
+            className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
+          >
             Message
           </button>
         </div>
@@ -6297,7 +6300,7 @@ export default function BuildFlow() {
   }, [app.templates])
 
   const filteredSubs = useMemo(() => {
-    const list = (app.subcontractors ?? []).slice()
+    const list = allSubsSorted.slice()
     return list.filter((sub) => {
       const trades = new Set([sub?.trade, ...(sub?.secondary_trades ?? [])].filter(Boolean))
       if (subFilterTrade !== 'all' && !trades.has(subFilterTrade)) return false
@@ -6313,7 +6316,7 @@ export default function BuildFlow() {
       }
       return true
     })
-  }, [app.subcontractors, subFilterCategory, subFilterTrade, tradeToCategory])
+  }, [allSubsSorted, subFilterCategory, subFilterTrade, tradeToCategory])
 
   const adminSections = [
     {
@@ -6955,9 +6958,9 @@ export default function BuildFlow() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-24">
+    <div className="min-h-screen bg-gray-50 safe-area-content-pb">
       <style>{`@keyframes bfDropSnap{0%{transform:scale(1)}50%{transform:scale(1.02)}100%{transform:scale(1)}}`}</style>
-      <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30">
+      <div className="safe-area-pt bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30">
         {selectedLot || selectedCommunity ? (
           <button
             onClick={() => {
@@ -7559,46 +7562,56 @@ export default function BuildFlow() {
 
             <Card>
               <p className="font-semibold mb-2">Filters</p>
-              <div className="grid grid-cols-3 gap-2">
-                <select
-                  value={calendarFilters.communityId}
-                  onChange={(e) => setCalendarFilters((p) => ({ ...p, communityId: e.target.value }))}
-                  className="px-3 py-3 border rounded-xl text-sm"
-                >
-                  <option value="all">All Communities</option>
-                  {activeCommunities.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={calendarFilters.trade}
-                  onChange={(e) => setCalendarFilters((p) => ({ ...p, trade: e.target.value }))}
-                  className="px-3 py-3 border rounded-xl text-sm"
-                >
-                  <option value="all">All Trades</option>
-                  {TRADES.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={calendarFilters.subId}
-                  onChange={(e) => setCalendarFilters((p) => ({ ...p, subId: e.target.value }))}
-                  className="px-3 py-3 border rounded-xl text-sm"
-                >
-                  <option value="all">All Subs</option>
-                  {app.subcontractors.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.company_name}
-                    </option>
-                  ))}
-                </select>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-[11px] text-gray-500">Community</span>
+                  <select
+                    value={calendarFilters.communityId}
+                    onChange={(e) => setCalendarFilters((p) => ({ ...p, communityId: e.target.value }))}
+                    className="mt-1 w-full min-w-0 px-3 py-3 border rounded-xl text-sm"
+                  >
+                    <option value="all">All Communities</option>
+                    {activeCommunities.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-[11px] text-gray-500">Trade</span>
+                  <select
+                    value={calendarFilters.trade}
+                    onChange={(e) => setCalendarFilters((p) => ({ ...p, trade: e.target.value }))}
+                    className="mt-1 w-full min-w-0 px-3 py-3 border rounded-xl text-sm"
+                  >
+                    <option value="all">All Trades</option>
+                    {TRADES.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className="text-[11px] text-gray-500">Subcontractor</span>
+                  <select
+                    value={calendarFilters.subId}
+                    onChange={(e) => setCalendarFilters((p) => ({ ...p, subId: e.target.value }))}
+                    className="mt-1 w-full min-w-0 px-3 py-3 border rounded-xl text-sm"
+                  >
+                    <option value="all">All Subs</option>
+                    {allSubsSorted.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.company_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">                <label className="inline-flex items-center gap-2">
+              <div className="mt-3 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                <label className="inline-flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={calendarFilters.showDelayed}
@@ -7813,7 +7826,7 @@ export default function BuildFlow() {
                     className="mb-3 w-full px-3 py-3 border rounded-xl text-sm"
                   >
                     <option value="all">Select a sub…</option>
-                    {app.subcontractors.map((s) => (
+                    {allSubsSorted.map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.company_name}
                       </option>
@@ -8595,7 +8608,7 @@ export default function BuildFlow() {
                         <button
                           key={a.label}
                           onClick={a.onClick}
-                          className="bg-gray-50 rounded-xl p-3 border border-gray-200 text-sm font-semibold"
+                          className="h-24 bg-gray-50 rounded-xl border border-gray-200 px-2 text-sm font-semibold leading-tight text-center flex items-center justify-center"
                         >
                           {a.label}
                         </button>
@@ -9089,7 +9102,12 @@ export default function BuildFlow() {
                       sub={sub}
                       tradeLabel={tradeLabel}
                       onEdit={() => setEditingSubId(sub.id)}
-                      onMessage={() => setSubContactModalId(sub.id)}
+                      onMessage={({ contactId } = {}) =>
+                        setSubContactModalId({
+                          subId: sub.id,
+                          contactId: contactId ?? null,
+                        })
+                      }
                     />
                   )
                 })}
@@ -12431,9 +12449,11 @@ export default function BuildFlow() {
       })()}
 
       {subContactModalId && (() => {
-        const sub = (app.subcontractors ?? []).find((s) => s.id === subContactModalId) ?? null
+        const subId = typeof subContactModalId === 'string' ? subContactModalId : subContactModalId?.subId ?? null
+        const initialContactId = typeof subContactModalId === 'string' ? null : subContactModalId?.contactId ?? null
+        const sub = (app.subcontractors ?? []).find((s) => s.id === subId) ?? null
         if (!sub) return null
-        return <SubContactModal sub={sub} onClose={() => setSubContactModalId(null)} />
+        return <SubContactModal sub={sub} initialContactId={initialContactId} onClose={() => setSubContactModalId(null)} />
       })()}
 
       {editingSubId && (() => {
@@ -18337,10 +18357,53 @@ function MessageModal({ lot, community, task, org, isOnline, subcontractors, ini
   )
 }
 
-function SubContactModal({ sub, onClose }) {
-  const contact = sub?.primary_contact ?? {}
-  const email = contact.email ?? ''
-  const phone = contact.phone ?? ''
+function SubContactModal({ sub, initialContactId, onClose }) {
+  const primary = sub?.primary_contact ?? {}
+  const additional = Array.isArray(sub?.additional_contacts) ? sub.additional_contacts : []
+  const contacts = useMemo(
+    () =>
+      [
+        {
+          id: primary.id ?? 'primary',
+          role: 'Primary Contact',
+          name: String(primary.name ?? '').trim(),
+          phone: String(primary.phone ?? '').trim(),
+          email: String(primary.email ?? '').trim(),
+        },
+        ...additional.map((c, idx) => ({
+          id: c.id ?? `${sub?.id ?? 'sub'}-extra-${idx}`,
+          role: 'Additional Contact',
+          name: String(c.name ?? '').trim(),
+          phone: String(c.phone ?? '').trim(),
+          email: String(c.email ?? '').trim(),
+        })),
+      ].filter((c) => c.name || c.phone || c.email),
+    [additional, primary.email, primary.id, primary.name, primary.phone, sub?.id],
+  )
+
+  const [contactId, setContactId] = useState(() => {
+    if (contacts.length === 0) return ''
+    if (initialContactId && contacts.some((c) => c.id === initialContactId)) return initialContactId
+    return contacts[0].id
+  })
+
+  useEffect(() => {
+    if (contacts.length === 0) {
+      if (contactId) setContactId('')
+      return
+    }
+    if (contactId && contacts.some((c) => c.id === contactId)) return
+    if (initialContactId && contacts.some((c) => c.id === initialContactId)) {
+      setContactId(initialContactId)
+      return
+    }
+    setContactId(contacts[0].id)
+  }, [contacts, contactId, initialContactId])
+
+  const contact = contacts.find((c) => c.id === contactId) ?? contacts[0] ?? null
+  const email = contact?.email ?? ''
+  const phone = contact?.phone ?? ''
+  const call = phone ? `tel:${normalizePhone(phone)}` : ''
   const mailto = buildMailtoLink(email)
   const outlook = buildOutlookWebLink(email)
   const sms = buildSmsLink(phone)
@@ -18360,12 +18423,37 @@ function SubContactModal({ sub, onClose }) {
       <div className="space-y-3">
         <Card className="bg-gray-50">
           <p className="font-semibold">{sub?.company_name ?? 'Subcontractor'}</p>
-          {contact.name ? <p className="text-xs text-gray-600 mt-1">Contact: {contact.name}</p> : null}
+          {contacts.length > 1 ? (
+            <label className="block mt-2">
+              <span className="text-xs text-gray-600">Contact</span>
+              <select
+                value={contactId}
+                onChange={(e) => setContactId(e.target.value)}
+                className="mt-1 w-full px-3 py-2 border rounded-xl bg-white"
+              >
+                {contacts.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {(entry.name || 'Unnamed Contact')} ({entry.role})
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {contact?.name ? <p className="text-xs text-gray-600 mt-1">Contact: {contact.name}</p> : null}
+          {contact?.role ? <p className="text-xs text-gray-600 mt-1">Role: {contact.role}</p> : null}
           <p className="text-xs text-gray-600 mt-1">Phone: {phone || '—'}</p>
           <p className="text-xs text-gray-600 mt-1">Email: {email || '—'}</p>
         </Card>
 
         <div className="grid gap-2">
+          <button
+            type="button"
+            onClick={() => openExternalLink(call, onClose)}
+            disabled={!call}
+            className={`h-12 px-4 rounded-xl border font-semibold ${call ? 'bg-white text-gray-900 border-gray-200' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
+          >
+            Call
+          </button>
           <button
             type="button"
             onClick={() => openExternalLink(mailto, onClose)}
@@ -19378,6 +19466,13 @@ function SendToSubsModal({ open, lot, items, subcontractors, onClose, onDraft })
     sub: subcontractors.find((s) => s.id === subId) ?? null,
     items: subItems,
   }))
+  const openItemCount = groups.reduce((sum, group) => sum + group.items.length, 0)
+  const photoItemCount = groups.reduce(
+    (sum, group) =>
+      sum +
+      group.items.filter((item) => (Array.isArray(item.photo_ids) && item.photo_ids.length > 0) || item.photo_id).length,
+    0,
+  )
 
   return (
     <Modal
@@ -19391,8 +19486,20 @@ function SendToSubsModal({ open, lot, items, subcontractors, onClose, onDraft })
         </div>
       }
     >
-      <div className="space-y-3">
-        <p className="text-sm text-gray-500">{lotCode(lot)} - {groups.length} sub(s)</p>
+      <div className="space-y-3 pb-1">
+        <Card className="bg-blue-50 border-blue-200">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-blue-900">{lotCode(lot)}</p>
+              <p className="text-sm text-blue-800">{groups.length} sub(s) with open punch work</p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Items</p>
+              <p className="text-lg font-bold text-blue-900">{openItemCount}</p>
+            </div>
+          </div>
+          <p className="text-xs text-blue-800 mt-2">{photoItemCount} item(s) include photo attachments.</p>
+        </Card>
         {groups.length === 0 ? (
           <Card className="bg-gray-50">
             <p className="text-sm text-gray-600">No open punch items to send.</p>
@@ -19402,19 +19509,23 @@ function SendToSubsModal({ open, lot, items, subcontractors, onClose, onDraft })
           const phone = getSubPhone(group.sub)
           const email = getSubEmail(group.sub)
           const contactName = group.sub?.primary_contact?.name ?? ''
+          const previewItems = group.items.slice(0, 5)
+          const hiddenCount = Math.max(0, group.items.length - previewItems.length)
           return (
-            <Card key={group.id} className="space-y-2">
+            <Card key={group.id} className="space-y-3">
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="font-semibold">{group.sub?.company_name ?? 'Subcontractor'}</p>
-                  <p className="text-xs text-gray-500">{phone || 'No phone on file'}</p>
-                  {contactName ? <p className="text-xs text-gray-500">Contact: {contactName}</p> : null}
-                  <p className="text-xs text-gray-500">Email: {email || 'No email on file'}</p>
+                  <p className="font-semibold text-base">{group.sub?.company_name ?? 'Subcontractor'}</p>
+                  <p className="text-sm text-gray-600 mt-1">{phone || 'No phone on file'}</p>
+                  {contactName ? <p className="text-sm text-gray-600">Contact: {contactName}</p> : null}
+                  <p className="text-sm text-gray-600">Email: {email || 'No email on file'}</p>
                 </div>
-                <span className="text-xs text-gray-500">{group.items.length} item(s)</span>
+                <span className="text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded-full px-2 py-1 whitespace-nowrap">
+                  {group.items.length} item(s)
+                </span>
               </div>
-              <ul className="text-sm text-gray-700 list-disc pl-5">
-                {group.items.map((item) => (
+              <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1">
+                {previewItems.map((item) => (
                   <li key={item.id}>
                     {punchTaskTypeForItem(item)} - {item.description}
                     {(Array.isArray(item.photo_ids) && item.photo_ids.length > 0) || item.photo_id ? (
@@ -19423,20 +19534,21 @@ function SendToSubsModal({ open, lot, items, subcontractors, onClose, onDraft })
                   </li>
                 ))}
               </ul>
+              {hiddenCount > 0 ? <p className="text-xs text-gray-500">+ {hiddenCount} more item(s)</p> : null}
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => onDraft(group.sub, group.items, 'sms')}
                   disabled={!phone}
-                  className={`flex-1 h-10 rounded-xl border font-semibold ${phone ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
+                  className={`flex-1 h-11 rounded-xl border font-semibold text-sm ${phone ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
                 >
-                  Text
+                  Text (SMS)
                 </button>
                 <button
                   type="button"
                   onClick={() => onDraft(group.sub, group.items, 'email')}
                   disabled={!email}
-                  className={`flex-1 h-10 rounded-xl border font-semibold ${email ? 'bg-white text-gray-900 border-gray-200' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
+                  className={`flex-1 h-11 rounded-xl border font-semibold text-sm ${email ? 'bg-white text-gray-900 border-gray-200' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
                 >
                   Email
                 </button>
@@ -19594,7 +19706,7 @@ function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           disabled={sendBusy}
-          className="w-full min-h-[180px] px-3 py-3 border rounded-xl text-sm"
+          className="w-full min-h-[180px] px-3 py-3 border rounded-xl text-base"
         />
         {sendBusy && channel === 'sms' && nativeIos ? (
           <p className="text-xs text-gray-500">
