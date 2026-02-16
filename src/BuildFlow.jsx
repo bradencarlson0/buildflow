@@ -1354,6 +1354,16 @@ export default function BuildFlow() {
   const [showNotificationPrefs, setShowNotificationPrefs] = useState(false)
   const [showOfflineStatus, setShowOfflineStatus] = useState(false)
   const [showCreateCommunity, setShowCreateCommunity] = useState(false)
+  const [showArchivedCommunitiesInAdmin, setShowArchivedCommunitiesInAdmin] = useState(false)
+  const [showEditCommunityAdmin, setShowEditCommunityAdmin] = useState(false)
+  const [editCommunityAdminId, setEditCommunityAdminId] = useState(null)
+  const [editCommunityAdminDraft, setEditCommunityAdminDraft] = useState({
+    name: '',
+    street: '',
+    city: '',
+    state: '',
+    zip: '',
+  })
   const [showStartLot, setShowStartLot] = useState(false)
   const [startLotPrefill, setStartLotPrefill] = useState(null)
   const [taskModal, setTaskModal] = useState(null)
@@ -2751,10 +2761,12 @@ export default function BuildFlow() {
     }
   }, [])
 
-  const communityWeatherLocation = useMemo(
-    () => buildCommunityWeatherLocation(app.communities ?? [], app.lots ?? []),
-    [app.communities, app.lots],
-  )
+  const communityWeatherLocation = useMemo(() => {
+    const activeCommunities = (app.communities ?? []).filter((c) => c?.is_active !== false && !c?.deleted_at)
+    const activeCommunityIds = new Set(activeCommunities.map((c) => c.id))
+    const activeLots = (app.lots ?? []).filter((lot) => activeCommunityIds.has(lot.community_id))
+    return buildCommunityWeatherLocation(activeCommunities, activeLots)
+  }, [app.communities, app.lots])
 
   const effectiveWeatherLocation = useMemo(() => {
     if (weatherLocationMode === 'madison') {
@@ -2859,6 +2871,23 @@ export default function BuildFlow() {
 
   const org = app.org
   const communities = app.communities ?? []
+  const activeCommunities = useMemo(
+    () => (communities ?? []).filter((c) => c?.is_active !== false && !c?.deleted_at),
+    [communities],
+  )
+  const communityIsActiveById = useMemo(() => {
+    const map = new Map()
+    for (const c of communities ?? []) {
+      if (!c?.id) continue
+      map.set(c.id, c?.is_active !== false && !c?.deleted_at)
+    }
+    return map
+  }, [communities])
+  const visibleLots = useMemo(() => {
+    const lots = app.lots ?? []
+    if (communities.length === 0) return lots
+    return lots.filter((lot) => communityIsActiveById.get(lot.community_id) !== false)
+  }, [app.lots, communities.length, communityIsActiveById])
   const productTypes = app.product_types ?? []
   const plans = app.plans ?? []
   const agencies = app.agencies ?? []
@@ -2870,7 +2899,7 @@ export default function BuildFlow() {
   const todayIso = formatISODateInTimeZone(new Date(), org?.timezone) || formatISODate(new Date())
 
   const communitiesById = useMemo(() => new Map(app.communities.map((c) => [c.id, c])), [app.communities])
-  const lotsById = useMemo(() => new Map(app.lots.map((l) => [l.id, l])), [app.lots])
+  const lotsById = useMemo(() => new Map(visibleLots.map((l) => [l.id, l])), [visibleLots])
 
   const activeSuperAssignments = useMemo(() => {
     if (!Array.isArray(lotAssignments) || lotAssignments.length === 0) return []
@@ -2958,7 +2987,7 @@ export default function BuildFlow() {
     }
   }
 
-  const activeLots = useMemo(() => app.lots.filter((l) => l.status === 'in_progress'), [app.lots])
+  const activeLots = useMemo(() => visibleLots.filter((l) => l.status === 'in_progress'), [visibleLots])
 
   const unreadNotifications = useMemo(
     () => (app.notifications ?? []).filter((n) => !n.read).length,
@@ -4320,6 +4349,83 @@ export default function BuildFlow() {
     })
   }
 
+  const openEditCommunityAdmin = (communityId) => {
+    const community = communityId ? communitiesById.get(communityId) ?? null : null
+    if (!community) return
+    setEditCommunityAdminId(communityId)
+    setEditCommunityAdminDraft({
+      name: String(community.name ?? ''),
+      street: String(community.address?.street ?? ''),
+      city: String(community.address?.city ?? ''),
+      state: String(community.address?.state ?? ''),
+      zip: String(community.address?.zip ?? ''),
+    })
+    setShowEditCommunityAdmin(true)
+  }
+
+  const closeEditCommunityAdmin = () => {
+    setShowEditCommunityAdmin(false)
+    setEditCommunityAdminId(null)
+  }
+
+  const saveEditCommunityAdmin = () => {
+    const communityId = editCommunityAdminId
+    if (!communityId) return
+    const nextName = String(editCommunityAdminDraft?.name ?? '').trim()
+    if (!nextName) {
+      alert('Community name is required.')
+      return
+    }
+
+    updateCommunity(communityId, (c) => ({
+      ...c,
+      name: nextName,
+      address: {
+        ...(c.address ?? {}),
+        street: String(editCommunityAdminDraft?.street ?? '').trim(),
+        city: String(editCommunityAdminDraft?.city ?? '').trim(),
+        state: String(editCommunityAdminDraft?.state ?? '').trim(),
+        zip: String(editCommunityAdminDraft?.zip ?? '').trim(),
+      },
+    }))
+
+    closeEditCommunityAdmin()
+  }
+
+  const setCommunityArchived = (communityId, archived) => {
+    const community = communityId ? communitiesById.get(communityId) ?? null : null
+    if (!community) return
+
+    const lots = (app.lots ?? []).filter((l) => l.community_id === communityId)
+    const activeCount = lots.filter((l) => l.status === 'in_progress').length
+
+    if (archived) {
+      const msg = [
+        `Archive "${community.name}"?`,
+        activeCount ? `${activeCount} lot(s) are currently in progress in this community.` : null,
+        'This hides the community and its lots across the app (data remains in sync).',
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+      if (!confirm(msg)) return
+    } else {
+      if (!confirm(`Restore "${community.name}"?`)) return
+    }
+
+    updateCommunity(communityId, (c) => ({ ...c, is_active: !archived }))
+
+    // If the user is viewing an archived community/lot, clear selection to avoid a confusing blank screen.
+    if (archived) {
+      setSelectedCommunityId((prev) => (prev === communityId ? null : prev))
+      setSelectedLotId((prev) => {
+        if (!prev) return prev
+        const lot = (app.lots ?? []).find((l) => l.id === prev) ?? null
+        if (lot?.community_id === communityId) return null
+        return prev
+      })
+    }
+  }
+
   const updateContactLibrary = (updater) => {
     setApp((prev) => {
       const current = prev.contact_library ?? { builders: [], realtors: [] }
@@ -5609,7 +5715,7 @@ export default function BuildFlow() {
 
   const criticalDeadlines = useMemo(() => {
     const list = []
-    for (const lot of app.lots ?? []) {
+    for (const lot of visibleLots) {
       if (lot.status === 'complete') continue
       const target = lot.hard_deadline || lot.target_completion_date
       if (!target) continue
@@ -5620,11 +5726,11 @@ export default function BuildFlow() {
       list.push({ lot, community, daysRemaining })
     }
     return list.sort((a, b) => a.daysRemaining - b.daysRemaining)
-  }, [app.lots, communitiesById, todayIso])
+  }, [visibleLots, communitiesById, todayIso])
 
   const upcomingInspections = useMemo(() => {
     const list = []
-    for (const lot of app.lots ?? []) {
+    for (const lot of visibleLots) {
       for (const inspection of lot.inspections ?? []) {
         if (!inspection?.scheduled_date) continue
         if (inspection.type === 'NOTE') continue
@@ -5640,7 +5746,7 @@ export default function BuildFlow() {
       if (dateSort !== 0) return dateSort
       return String(a.inspection.scheduled_time ?? '').localeCompare(String(b.inspection.scheduled_time ?? ''))
     })
-  }, [app.lots, communitiesById, todayIso])
+  }, [visibleLots, communitiesById, todayIso])
 
   const todaysTasks = useMemo(() => {
     const items = []
@@ -5655,24 +5761,24 @@ export default function BuildFlow() {
 
   const openPunchItems = useMemo(() => {
     let count = 0
-    for (const lot of app.lots ?? []) {
+    for (const lot of visibleLots) {
       for (const item of lot.punch_list?.items ?? []) {
         if (item.status !== 'closed' && item.status !== 'verified') count += 1
       }
     }
     return count
-  }, [app.lots])
+  }, [visibleLots])
 
   const openPunchLots = useMemo(() => {
     const rows = []
-    for (const lot of app.lots ?? []) {
+    for (const lot of visibleLots) {
       const openCount = (lot.punch_list?.items ?? []).filter((item) => item.status !== 'closed' && item.status !== 'verified').length
       if (openCount <= 0) continue
       const community = communitiesById.get(lot.community_id) ?? null
       rows.push({ lot, community, openCount })
     }
     return rows.sort((a, b) => b.openCount - a.openCount || Number(a.lot.lot_number ?? 0) - Number(b.lot.lot_number ?? 0))
-  }, [app.lots, communitiesById])
+  }, [visibleLots, communitiesById])
 
   const matchesSalesFilters = (lot, filters, ignoreKey = '') => {
     if (ignoreKey !== 'communityId' && filters.communityId !== 'all' && lot.community_id !== filters.communityId) return false
@@ -5685,11 +5791,11 @@ export default function BuildFlow() {
 
   const filteredSalesLots = useMemo(() => {
     const filters = salesFilters ?? {}
-    return (app.lots ?? []).filter((lot) => matchesSalesFilters(lot, filters))
-  }, [app.lots, salesFilters])
+    return visibleLots.filter((lot) => matchesSalesFilters(lot, filters))
+  }, [visibleLots, salesFilters])
 
   const salesFilterOptions = useMemo(() => {
-    const lots = app.lots ?? []
+    const lots = visibleLots
     const filters = salesFilters ?? {}
     const communityIds = new Set(lots.filter((lot) => matchesSalesFilters(lot, filters, 'communityId')).map((lot) => lot.community_id))
     const productTypeIds = new Set(
@@ -5702,7 +5808,7 @@ export default function BuildFlow() {
       productTypes: productTypes.filter((pt) => productTypeIds.has(pt.id)),
       plans: plans.filter((p) => planIds.has(p.id)),
     }
-  }, [app.lots, salesFilters, communities, productTypes, plans])
+  }, [visibleLots, salesFilters, communities, productTypes, plans])
 
   useEffect(() => {
     setSalesFilters((prev) => {
@@ -6189,6 +6295,12 @@ export default function BuildFlow() {
   }, [app.subcontractors, subFilterCategory, subFilterTrade, tradeToCategory])
 
   const adminSections = [
+    {
+      id: 'communities',
+      label: 'Communities',
+      description: 'Edit or archive communities (hides their lots across the app).',
+      count: communities.filter((c) => c?.is_active !== false && !c?.deleted_at).length,
+    },
     { id: 'product_types', label: 'Product Types', description: 'Define categories, build days, and templates.', count: productTypes.length },
     { id: 'plans', label: 'Plans', description: 'Attach floor plans to product types.', count: plans.length },
     { id: 'agencies', label: 'Agencies', description: 'Configure inspection agencies and types.', count: agencies.length },
@@ -7433,7 +7545,7 @@ export default function BuildFlow() {
                   className="px-3 py-3 border rounded-xl text-sm"
                 >
                   <option value="all">All Communities</option>
-                  {app.communities.map((c) => (
+                  {activeCommunities.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
                     </option>
@@ -7849,8 +7961,8 @@ export default function BuildFlow() {
               <Plus className="w-5 h-5" /> New Community
             </button>
 
-            {app.communities.map((c) => {
-              const lots = app.lots.filter((l) => l.community_id === c.id)
+            {activeCommunities.map((c) => {
+              const lots = visibleLots.filter((l) => l.community_id === c.id)
               const complete = lots.filter((l) => l.status === 'complete').length
               const active = lots.filter((l) => l.status === 'in_progress').length
               const pct = lots.length === 0 ? 0 : Math.round((complete / lots.length) * 100)
@@ -7936,7 +8048,7 @@ export default function BuildFlow() {
                   ) : null}
                   {(selectedCommunity.blocks ?? []).length > 0 ? (
                     (selectedCommunity.blocks ?? []).map((b) => {
-                      const lots = app.lots
+                      const lots = visibleLots
                         .filter((l) => l.community_id === selectedCommunity.id && l.block === b.label)
                         .slice()
                         .sort(compareCommunityLots)
@@ -7982,7 +8094,7 @@ export default function BuildFlow() {
                     })
                   ) : (
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                      {app.lots
+                      {visibleLots
                         .filter((l) => l.community_id === selectedCommunity.id)
                         .slice()
                         .sort(compareCommunityLots)
@@ -8025,7 +8137,7 @@ export default function BuildFlow() {
 
               {lotViewMode === 'list' && (
                 <div className="space-y-2">
-                  {app.lots
+                  {visibleLots
                     .filter((l) => l.community_id === selectedCommunity.id)
                     .slice()
                     .sort(compareCommunityLots)
@@ -8074,7 +8186,7 @@ export default function BuildFlow() {
                     { key: 'in_progress', title: 'In Progress' },
                     { key: 'complete', title: 'Complete' },
                   ].map((col) => {
-                    const lots = app.lots
+                    const lots = visibleLots
                       .filter((l) => l.community_id === selectedCommunity.id && l.status === col.key)
                       .slice()
                       .sort(compareCommunityLots)
@@ -9207,6 +9319,97 @@ export default function BuildFlow() {
               </Card>
 
               <div className="space-y-4">
+                {adminSection === 'communities' && (
+                  <Card className="space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                      <div>
+                        <p className="font-semibold">Communities</p>
+                        <p className="text-xs text-gray-500 mt-1">Edit community info or archive communities (hides their lots across the app).</p>
+                      </div>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                        <label className="inline-flex items-center gap-2 text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(showArchivedCommunitiesInAdmin)}
+                            onChange={(e) => setShowArchivedCommunitiesInAdmin(e.target.checked)}
+                          />
+                          Show archived
+                        </label>
+                        <SecondaryButton onClick={openCreateCommunity} className="h-10 w-full sm:w-auto">
+                          + New Community
+                        </SecondaryButton>
+                      </div>
+                    </div>
+
+                    {((showArchivedCommunitiesInAdmin ? communities : activeCommunities) ?? []).length === 0 ? (
+                      <p className="text-sm text-gray-600">No communities yet.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {(showArchivedCommunitiesInAdmin ? communities : activeCommunities)
+                          .slice()
+                          .sort((a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? '')))
+                          .map((c) => {
+                            const lots = (app.lots ?? []).filter((l) => l.community_id === c.id)
+                            const complete = lots.filter((l) => l.status === 'complete').length
+                            const inProgress = lots.filter((l) => l.status === 'in_progress').length
+                            const archived = c?.is_active === false || Boolean(c?.deleted_at)
+                            return (
+                              <div key={c.id} className="bg-gray-50 border border-gray-200 rounded-xl p-3 space-y-3">
+                                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <p className="font-semibold truncate">{c.name}</p>
+                                      <span
+                                        className={`text-[11px] px-2 py-0.5 rounded-lg border ${
+                                          archived ? 'bg-gray-100 text-gray-600 border-gray-200' : 'bg-green-50 text-green-700 border-green-200'
+                                        }`}
+                                      >
+                                        {archived ? 'Archived' : 'Active'}
+                                      </span>
+                                    </div>
+                                    <p className="text-xs text-gray-600 mt-1">
+                                      {c.address?.street ? `${c.address.street}, ` : ''}
+                                      {c.address?.city ?? ''} {c.address?.state ?? ''} {c.address?.zip ?? ''}
+                                    </p>
+                                    <p className="text-xs text-gray-500 mt-1">
+                                      Lots: {lots.length} {inProgress ? `• ${inProgress} in progress` : ''} {complete ? `• ${complete} complete` : ''}
+                                    </p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedCommunityId(c.id)}
+                                      className="h-10 px-3 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                                    >
+                                      Open
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditCommunityAdmin(c.id)}
+                                      className="h-10 px-3 rounded-xl border border-gray-200 bg-white text-sm font-semibold"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setCommunityArchived(c.id, !archived)}
+                                      className={`h-10 px-3 rounded-xl border text-sm font-semibold ${
+                                        archived ? 'border-gray-200 bg-white text-gray-800' : 'border-red-200 bg-red-50 text-red-700'
+                                      }`}
+                                    >
+                                      {archived ? 'Restore' : 'Archive'}
+                                    </button>
+                                  </div>
+                                </div>
+                                <p className="text-[11px] text-gray-500">ID: {c.id}</p>
+                              </div>
+                            )
+                          })}
+                      </div>
+                    )}
+                  </Card>
+                )}
+
                 {adminSection === 'product_types' && (
                   <Card className="space-y-4">
                     <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
@@ -9929,6 +10132,78 @@ export default function BuildFlow() {
             setShowOfflineStatus(false)
           }}
         />
+      )}
+
+      {showEditCommunityAdmin && (
+        <Modal
+          title="Edit Community"
+          onClose={closeEditCommunityAdmin}
+          footer={
+            <div className="flex gap-2">
+              <SecondaryButton onClick={closeEditCommunityAdmin} className="flex-1">
+                Cancel
+              </SecondaryButton>
+              <PrimaryButton onClick={saveEditCommunityAdmin} className="flex-1">
+                Save
+              </PrimaryButton>
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            <Card className="bg-gray-50">
+              <p className="text-xs text-gray-500">Community ID</p>
+              <p className="text-sm font-semibold mt-1 break-all">{editCommunityAdminId ?? '—'}</p>
+              <p className="text-xs text-gray-500 mt-2">Note</p>
+              <p className="text-xs text-gray-700 mt-1">
+                Editing a community updates the shared dataset and will sync to Supabase when online.
+              </p>
+            </Card>
+
+            <label className="block">
+              <span className="text-sm font-semibold">Name *</span>
+              <input
+                value={editCommunityAdminDraft.name}
+                onChange={(e) => setEditCommunityAdminDraft((d) => ({ ...d, name: e.target.value }))}
+                className="mt-1 w-full px-3 py-3 border rounded-xl"
+              />
+            </label>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block sm:col-span-2">
+                <span className="text-sm font-semibold">Street</span>
+                <input
+                  value={editCommunityAdminDraft.street}
+                  onChange={(e) => setEditCommunityAdminDraft((d) => ({ ...d, street: e.target.value }))}
+                  className="mt-1 w-full px-3 py-3 border rounded-xl"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-semibold">City</span>
+                <input
+                  value={editCommunityAdminDraft.city}
+                  onChange={(e) => setEditCommunityAdminDraft((d) => ({ ...d, city: e.target.value }))}
+                  className="mt-1 w-full px-3 py-3 border rounded-xl"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-semibold">State</span>
+                <input
+                  value={editCommunityAdminDraft.state}
+                  onChange={(e) => setEditCommunityAdminDraft((d) => ({ ...d, state: e.target.value }))}
+                  className="mt-1 w-full px-3 py-3 border rounded-xl"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-semibold">Zip</span>
+                <input
+                  value={editCommunityAdminDraft.zip}
+                  onChange={(e) => setEditCommunityAdminDraft((d) => ({ ...d, zip: e.target.value }))}
+                  className="mt-1 w-full px-3 py-3 border rounded-xl"
+                />
+              </label>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {showCreateCommunity && (
@@ -12532,8 +12807,10 @@ function OfflineStatusModal({
 }
 
 function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
-  const communities = app.communities ?? []
-  const lots = app.lots ?? []
+  const communitiesAll = app.communities ?? []
+  const communities = communitiesAll.filter((c) => c?.is_active !== false && !c?.deleted_at)
+  const activeCommunityIds = new Set(communities.map((c) => c.id))
+  const lots = (app.lots ?? []).filter((l) => activeCommunityIds.has(l.community_id))
   const templates = app.templates ?? []
   const productTypes = app.product_types ?? []
   const plans = app.plans ?? []
