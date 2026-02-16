@@ -92,6 +92,8 @@ import { isSyncV2Enabled, writeFlag } from './lib/flags.js'
 import { syncV2Pull, syncV2Push } from './lib/syncV2.js'
 import { uuid } from './lib/uuid.js'
 import { supabase } from './lib/supabaseClient.js'
+import { composeMessage, isNativeIos } from './lib/native/messageComposer.js'
+import { buildPunchMessageAttachments } from './lib/messageAttachments.js'
 
 const WEATHER_FALLBACK = {
   name: 'Madison, AL',
@@ -19456,16 +19458,26 @@ function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
   }, [open, draft, buildDraft])
 
   const [message, setMessage] = useState(base.body ?? '')
+  const [sendBusy, setSendBusy] = useState(false)
+  const [sendProgress, setSendProgress] = useState(null)
 
   useEffect(() => {
     setMessage(base.body ?? '')
   }, [base.body])
+
+  useEffect(() => {
+    if (!open) {
+      setSendBusy(false)
+      setSendProgress(null)
+    }
+  }, [open])
 
   if (!open || !draft) return null
 
   const { sub, items, channel } = draft
   const subject = base.subject ?? ''
   const contactName = sub?.primary_contact?.name ?? ''
+  const nativeIos = isNativeIos()
 
   const photos = items
     .flatMap((item) => {
@@ -19479,15 +19491,72 @@ function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
     .map((id) => (lot.photos ?? []).find((p) => p.id === id))
     .filter(Boolean)
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (channel === 'sms') {
-      const baseLink = buildSmsLink(getSubPhone(sub))
+      const phone = getSubPhone(sub)
+      const baseLink = buildSmsLink(phone)
       if (!baseLink) {
         alert('No phone number on file for this sub.')
         return
       }
-      const href = `${baseLink}${baseLink.includes('?') ? '&' : '?'}body=${encodeURIComponent(message)}`
-      openExternalLink(href)
+
+      if (!nativeIos) {
+        const href = `${baseLink}${baseLink.includes('?') ? '&' : '?'}body=${encodeURIComponent(message)}`
+        openExternalLink(href)
+        return
+      }
+
+      if (sendBusy) return
+      setSendBusy(true)
+      setSendProgress(null)
+
+      try {
+        let attachments = []
+        let failedCount = 0
+        let omittedCount = 0
+
+        if (photos.length > 0) {
+          const built = await buildPunchMessageAttachments({
+            lot,
+            photos,
+            maxAttachments: 6,
+            onProgress: (progress) => setSendProgress(progress),
+          })
+          attachments = built.attachments
+          failedCount = built.failedCount
+          omittedCount = built.omittedCount
+        }
+
+        if (failedCount > 0 || omittedCount > 0) {
+          const parts = []
+          if (omittedCount > 0) parts.push(`${omittedCount} photo(s) omitted (max 6).`)
+          if (failedCount > 0) parts.push(`${failedCount} photo(s) could not be loaded.`)
+          alert(`Some photos were not attached.\n\n${parts.join('\n')}\n\nYou can add remaining photos manually in Messages.`)
+        }
+
+        const recipient = normalizePhone(phone)
+        const result = await composeMessage({
+          recipients: [recipient],
+          body: message,
+          attachments,
+        })
+
+        const status = String(result?.status ?? '')
+        if (status === 'sent') {
+          onClose?.()
+        } else if (status === 'failed') {
+          alert('Message failed to send.')
+        }
+      } catch (err) {
+        console.error(err)
+        alert('Unable to open iMessage composer on this device. Falling back to text-only message.')
+        const href = `${baseLink}${baseLink.includes('?') ? '&' : '?'}body=${encodeURIComponent(message)}`
+        openExternalLink(href)
+      } finally {
+        setSendBusy(false)
+        setSendProgress(null)
+      }
+
       return
     }
     const baseLink = buildMailtoLink(getSubEmail(sub))
@@ -19505,11 +19574,11 @@ function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
       onClose={onClose}
       footer={
         <div className="flex gap-2">
-          <SecondaryButton onClick={onClose} className="flex-1">
+          <SecondaryButton onClick={onClose} className="flex-1" disabled={sendBusy}>
             Close
           </SecondaryButton>
-          <PrimaryButton onClick={handleSend} className="flex-1">
-            {channel === 'sms' ? 'Preview in iMessage' : 'Preview in Email'}
+          <PrimaryButton onClick={handleSend} className="flex-1" disabled={sendBusy}>
+            {sendBusy ? 'Preparing...' : channel === 'sms' ? 'Preview in iMessage' : 'Preview in Email'}
           </PrimaryButton>
         </div>
       }
@@ -19524,8 +19593,15 @@ function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
+          disabled={sendBusy}
           className="w-full min-h-[180px] px-3 py-3 border rounded-xl text-sm"
         />
+        {sendBusy && channel === 'sms' && nativeIos ? (
+          <p className="text-xs text-gray-500">
+            Preparing photos...{' '}
+            {sendProgress && sendProgress.total ? `${Math.min(sendProgress.current ?? 0, sendProgress.total)}/${sendProgress.total}` : ''}
+          </p>
+        ) : null}
         {photos.length > 0 ? (
           <div className="grid grid-cols-2 gap-2">
             {photos.map((photo) => (
@@ -19540,7 +19616,11 @@ function MessageDraftModal({ open, lot, draft, onClose, buildDraft }) {
             ))}
           </div>
         ) : null}
-        <p className="text-xs text-gray-500">Attachments open in your native app. Add photos there before sending.</p>
+        <p className="text-xs text-gray-500">
+          {channel === 'sms' && nativeIos
+            ? 'On iOS, photos will be attached automatically in iMessage (up to 6).'
+            : 'Attachments open in your native app. Add photos there before sending.'}
+        </p>
       </div>
     </Modal>
   )
