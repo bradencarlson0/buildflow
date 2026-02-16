@@ -5308,10 +5308,10 @@ export default function BuildFlow() {
         'Not Started',
         'In Progress',
         'Complete',
-        'Avg % Complete (active)',
-        'Avg Build Days (complete)',
-        'On-Time % (complete)',
-        'Total Delays (all time)',
+        'Avg % Complete\n(active)',
+        'Avg Build Days\n(complete)',
+        'On-Time %\n(complete)',
+        'Total Delays\n(all time)',
       ]
       const rows = [header]
 
@@ -5511,6 +5511,12 @@ export default function BuildFlow() {
           const cols = headers.length
           const normalizedName = String(sheetName ?? '').toLowerCase()
 
+          if (reportType === 'community_summary' && normalizedName === 'community summary') {
+            // Tuned for the Community Summary report (8 columns with multi-line headers).
+            const base = [140, 74, 74, 64, 96, 96, 86, 102]
+            return scaleToFit(base.slice(0, cols), available)
+          }
+
           if (reportType === 'progress' && normalizedName === 'progress') {
             // Tuned for the Progress report. Remaining space is distributed by scaleToFit.
             const base = includePhotos
@@ -5597,18 +5603,31 @@ export default function BuildFlow() {
           }
 
           const drawHeaderRow = () => {
-            const rowH = 18
+            const headerFontSize = 8
+            const lineH = 9
+            const maxLines = 3
+
+            const wrappedHeaders = headerRow.map((text, i) => {
+              const w = colWidths[i]
+              return doc.splitTextToSize(String(text ?? ''), Math.max(10, w - 8)).slice(0, maxLines)
+            })
+            const maxHeaderLines = Math.max(1, ...wrappedHeaders.map((lines) => lines.length))
+            const rowH = Math.max(18, maxHeaderLines * lineH + 10)
+
             doc.setFillColor(245, 246, 248)
             doc.setDrawColor(220, 220, 220)
             doc.rect(x0, y, colWidths.reduce((a, b) => a + b, 0), rowH, 'FD')
             doc.setFont('helvetica', 'bold')
-            doc.setFontSize(9)
+            doc.setFontSize(headerFontSize)
             let x = x0
             for (let c = 0; c < headerRow.length; c++) {
-              const text = headerRow[c]
               const w = colWidths[c]
-              const padded = doc.splitTextToSize(text, w - 8)
-              doc.text(padded.slice(0, 2), x + 4, y + 12) // clamp to 2 lines
+              const lines = wrappedHeaders[c] ?? []
+              const textH = lines.length * lineH
+              const startY = y + Math.max(6, (rowH - textH) / 2) + headerFontSize
+              for (let i = 0; i < lines.length; i++) {
+                doc.text(String(lines[i] ?? ''), x + 4, startY + i * lineH)
+              }
               x += w
               // vertical grid
               doc.setDrawColor(230, 230, 230)
