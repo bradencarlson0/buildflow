@@ -12,6 +12,9 @@
     "preview:lan": "vite preview --host 0.0.0.0 --port 4173 --strictPort"
   },
   "dependencies": {
+    "@capacitor/cli": "^8.1.0",
+    "@capacitor/core": "^8.1.0",
+    "@capacitor/ios": "^8.1.0",
     "@supabase/supabase-js": "^2.93.3",
     "jspdf": "^3.0.2",
     "lucide-react": "^0.561.0",

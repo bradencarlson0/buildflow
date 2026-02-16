@@ -1,0 +1,5 @@
+{
+  "appId": "com.breland.buildflow",
+  "appName": "BuildFlow",
+  "webDir": "dist"
+}
