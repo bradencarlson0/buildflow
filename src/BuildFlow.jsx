@@ -5178,7 +5178,7 @@ export default function BuildFlow() {
           pct,
           lot.start_date ?? '',
           target ?? '',
-          predicted ?? '',
+          predicted ? formatISODate(predicted) : '',
           daysDelta,
           delayCountsByLot.get(key) ?? 0,
           includePhotos ? photoCountsByLot.get(key) ?? 0 : null,
@@ -5319,7 +5319,15 @@ export default function BuildFlow() {
             const milestone = getCurrentMilestone(l)
             const predicted = getPredictedCompletionDate(l)
             const delayed = (l.tasks ?? []).some((t) => t.status === 'delayed')
-            return [community?.name ?? '', lotCode(l), milestone?.label ?? '', pct, l.target_completion_date ?? '', predicted ?? '', delayed ? 'YES' : 'NO']
+            return [
+              community?.name ?? '',
+              lotCode(l),
+              milestone?.label ?? '',
+              pct,
+              l.target_completion_date ?? '',
+              predicted ? formatISODate(predicted) : '',
+              delayed ? 'YES' : 'NO',
+            ]
           }),
       ]
       return { title: 'Schedule Forecast', sheets: [{ name: 'Forecast', rows }] }
@@ -5354,37 +5362,204 @@ export default function BuildFlow() {
       } else if (format === 'pdf') {
         const mod = await import('jspdf')
         const jsPDF = mod.jsPDF ?? mod.default?.jsPDF ?? mod.default
-        const doc = new jsPDF({ unit: 'pt', format: 'letter' })
-        const pageWidth = doc.internal.pageSize.getWidth()
-        let y = 40
-        doc.setFontSize(16)
-        doc.text(title, 40, y)
-        y += 18
-        doc.setFontSize(10)
-        doc.text(`Date range: ${fromIso} to ${toIso}`, 40, y)
-        y += 14
-        doc.text(`Generated: ${new Date().toLocaleString()}`, 40, y)
-        y += 20
+        const defaultOrientation = sheets.some((s) => (s?.rows?.[0] ?? []).length > 7) ? 'landscape' : 'portrait'
+        const doc = new jsPDF({ unit: 'pt', format: 'letter', orientation: defaultOrientation })
 
-        doc.setFontSize(10)
-        const sheet = sheets[0]
-        doc.text(String(sheet.name ?? 'Report'), 40, y)
-        y += 14
-
-        const rows = sheet.rows ?? []
-        const maxRows = Math.min(rows.length, 26)
-        for (let i = 0; i < maxRows; i++) {
-          const line = (rows[i] ?? []).map((c) => String(c ?? '')).join('  |  ')
-          const wrapped = doc.splitTextToSize(line, pageWidth - 80)
-          for (const w of wrapped) {
-            if (y > 740) {
-              doc.addPage()
-              y = 40
-            }
-            doc.text(w, 40, y)
-            y += 12
-          }
+        const PAGE = {
+          margin: 40,
+          headerH: 56,
+          footerH: 26,
         }
+
+        const asText = (value) => {
+          if (value === null || value === undefined) return ''
+          if (value instanceof Date) return formatISODate(value)
+          return String(value)
+        }
+
+        const formatCell = (value, header) => {
+          const raw = asText(value)
+          if (!raw) return ''
+          const h = String(header ?? '').toLowerCase()
+          if (h.includes('date') || h.includes('completion') || h.includes('logged')) {
+            // Prefer M/D/YY for readability when value looks like ISO date.
+            const iso = raw.length >= 10 ? raw.slice(0, 10) : raw
+            if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return formatShortDate(iso)
+            return raw
+          }
+          if (h.includes('status')) {
+            return raw.replaceAll('_', ' ')
+          }
+          return raw
+        }
+
+        const scaleToFit = (widths, available) => {
+          const sum = widths.reduce((a, b) => a + b, 0)
+          if (sum <= available) return widths
+          const ratio = available / sum
+          return widths.map((w) => Math.max(28, Math.floor(w * ratio)))
+        }
+
+        const presetWidthsFor = (sheetName, headers, pageW) => {
+          const available = pageW - PAGE.margin * 2
+          const cols = headers.length
+          const normalizedName = String(sheetName ?? '').toLowerCase()
+
+          if (reportType === 'progress' && normalizedName === 'progress') {
+            // Tuned for the Progress report. Remaining space is distributed by scaleToFit.
+            const base = includePhotos
+              ? [120, 54, 72, 118, 56, 72, 88, 96, 78, 68, 68]
+              : [128, 58, 78, 130, 60, 78, 96, 110, 86, 78]
+            return scaleToFit(base.slice(0, cols), available)
+          }
+          if (reportType === 'progress' && normalizedName === 'delays') {
+            const base = [120, 54, 130, 84, 90, 44, 130, 130, 78]
+            return scaleToFit(base.slice(0, cols), available)
+          }
+
+          // Generic fallback: first two columns narrower, middle wider.
+          const first = Math.max(90, Math.floor(available * 0.18))
+          const second = Math.max(54, Math.floor(available * 0.09))
+          const rest = cols > 2 ? Math.floor((available - first - second) / (cols - 2)) : Math.floor(available / cols)
+          const widths = []
+          for (let i = 0; i < cols; i++) {
+            if (i === 0) widths.push(first)
+            else if (i === 1) widths.push(second)
+            else widths.push(Math.max(56, rest))
+          }
+          return scaleToFit(widths, available)
+        }
+
+        const drawHeader = ({ sheetName, pageNo }) => {
+          const pageW = doc.internal.pageSize.getWidth()
+          doc.setFont('helvetica', 'bold')
+          doc.setFontSize(16)
+          doc.text(title, PAGE.margin, PAGE.margin)
+
+          doc.setFont('helvetica', 'normal')
+          doc.setFontSize(10)
+          doc.text(`Date range: ${formatShortDate(fromIso)} to ${formatShortDate(toIso)}`, PAGE.margin, PAGE.margin + 18)
+          doc.text(`Generated: ${new Date().toLocaleString()}`, PAGE.margin, PAGE.margin + 32)
+
+          doc.setFont('helvetica', 'bold')
+          doc.setFontSize(11)
+          doc.text(String(sheetName ?? 'Report'), PAGE.margin, PAGE.margin + 50)
+
+          // Page number
+          doc.setFont('helvetica', 'normal')
+          doc.setFontSize(9)
+          doc.text(`Page ${pageNo}`, pageW - PAGE.margin, PAGE.margin + 50, { align: 'right' })
+
+          // Divider line
+          doc.setDrawColor(210, 210, 210)
+          doc.setLineWidth(1)
+          doc.line(PAGE.margin, PAGE.margin + PAGE.headerH, pageW - PAGE.margin, PAGE.margin + PAGE.headerH)
+        }
+
+        const drawFooter = ({ pageNo }) => {
+          const pageW = doc.internal.pageSize.getWidth()
+          const pageH = doc.internal.pageSize.getHeight()
+          doc.setFont('helvetica', 'normal')
+          doc.setFontSize(9)
+          doc.setTextColor(120, 120, 120)
+          doc.text(`${title}`, PAGE.margin, pageH - PAGE.margin + 10)
+          doc.text(`Page ${pageNo}`, pageW - PAGE.margin, pageH - PAGE.margin + 10, { align: 'right' })
+          doc.setTextColor(0, 0, 0)
+        }
+
+        const drawTable = ({ sheetName, rows }) => {
+          const pageW = doc.internal.pageSize.getWidth()
+          const pageH = doc.internal.pageSize.getHeight()
+          const tableTop = PAGE.margin + PAGE.headerH + 14
+          const bottomLimit = pageH - PAGE.margin - PAGE.footerH
+
+          const headerRow = (rows?.[0] ?? []).map((h) => String(h ?? ''))
+          const bodyRows = (rows ?? []).slice(1)
+          const colWidths = presetWidthsFor(sheetName, headerRow, pageW)
+
+          const x0 = PAGE.margin
+          let y = tableTop
+          let pageNo = doc.getCurrentPageInfo?.().pageNumber ?? 1
+
+          const newPage = () => {
+            if ((doc.getNumberOfPages?.() ?? 1) > 0) drawFooter({ pageNo })
+            doc.addPage()
+            pageNo = doc.getCurrentPageInfo?.().pageNumber ?? pageNo + 1
+            drawHeader({ sheetName, pageNo })
+            y = tableTop
+            drawHeaderRow()
+          }
+
+          const drawHeaderRow = () => {
+            const rowH = 18
+            doc.setFillColor(245, 246, 248)
+            doc.setDrawColor(220, 220, 220)
+            doc.rect(x0, y, colWidths.reduce((a, b) => a + b, 0), rowH, 'FD')
+            doc.setFont('helvetica', 'bold')
+            doc.setFontSize(9)
+            let x = x0
+            for (let c = 0; c < headerRow.length; c++) {
+              const text = headerRow[c]
+              const w = colWidths[c]
+              const padded = doc.splitTextToSize(text, w - 8)
+              doc.text(padded.slice(0, 2), x + 4, y + 12) // clamp to 2 lines
+              x += w
+              // vertical grid
+              doc.setDrawColor(230, 230, 230)
+              doc.line(x, y, x, y + rowH)
+            }
+            y += rowH
+            doc.setFont('helvetica', 'normal')
+            doc.setFontSize(9)
+          }
+
+          drawHeaderRow()
+
+          const wrapCell = (text, w) => doc.splitTextToSize(String(text ?? ''), Math.max(10, w - 8))
+
+          for (let r = 0; r < bodyRows.length; r++) {
+            const row = bodyRows[r] ?? []
+            const cells = headerRow.map((h, idx) => formatCell(row[idx], h))
+            const wrappedByCol = cells.map((t, i) => wrapCell(t, colWidths[i]))
+            const maxLines = Math.max(1, ...wrappedByCol.map((lines) => Math.min(4, lines.length)))
+            const lineH = 11
+            const rowH = Math.max(16, maxLines * lineH + 8)
+
+            if (y + rowH > bottomLimit) newPage()
+
+            // row background + border
+            if (r % 2 === 0) {
+              doc.setFillColor(252, 252, 252)
+              doc.setDrawColor(235, 235, 235)
+              doc.rect(x0, y, colWidths.reduce((a, b) => a + b, 0), rowH, 'FD')
+            } else {
+              doc.setDrawColor(235, 235, 235)
+              doc.rect(x0, y, colWidths.reduce((a, b) => a + b, 0), rowH)
+            }
+
+            let x = x0
+            for (let c = 0; c < headerRow.length; c++) {
+              const w = colWidths[c]
+              const lines = wrappedByCol[c].slice(0, 4)
+              doc.text(lines, x + 4, y + 14)
+              x += w
+              doc.setDrawColor(240, 240, 240)
+              doc.line(x, y, x, y + rowH)
+            }
+
+            y += rowH
+          }
+
+          drawFooter({ pageNo })
+        }
+
+        // Render each sheet on its own page set (keeps headers consistent).
+        sheets.forEach((sheet, idx) => {
+          if (idx > 0) doc.addPage()
+          const pageNo = doc.getCurrentPageInfo?.().pageNumber ?? idx + 1
+          drawHeader({ sheetName: sheet.name, pageNo })
+          drawTable({ sheetName: sheet.name, rows: sheet.rows ?? [] })
+        })
 
         doc.save(`${base}.pdf`)
       }
