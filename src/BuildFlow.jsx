@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
+  ArrowUpRight,
   BarChart3,
   Bell,
   Building2,
@@ -10,6 +11,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Circle,
   Cloud,
   CloudRain,
   DollarSign,
@@ -21,10 +23,16 @@ import {
   Mail,
   MapPin,
   MessageSquare,
+  Palette,
+  PenLine,
   Phone,
   Play,
   Plus,
+  Square,
   Sun,
+  Trash2,
+  Type,
+  Undo2,
   Upload,
   Users,
   Wifi,
@@ -486,19 +494,19 @@ const unlockBodyScroll = () => {
   modalScrollStyles = null
 }
 
-function Modal({ title, onClose, children, footer, zIndex = 'z-[70]' }) {
+function Modal({ title, onClose, children, footer, zIndex = 'z-[70]', panelClassName = '', bodyClassName = '' }) {
   useEffect(() => lockBodyScroll(), [])
 
   return (
     <div className={`fixed inset-0 bg-black/40 ${zIndex} flex items-end sm:items-center justify-center`}>
-      <div className="w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200">
+      <div className={`w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200 ${panelClassName}`}>
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-lg">{title}</h2>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className="max-h-[70vh] overflow-auto pb-2">{children}</div>
+        <div className={`max-h-[70vh] overflow-auto pb-2 ${bodyClassName}`}>{children}</div>
         {footer ? <div className="pt-3 border-t mt-3">{footer}</div> : null}
       </div>
     </div>
@@ -722,6 +730,174 @@ const normalizeImageBlob = async (file) => {
   const blob = file.slice(0, file.size, mime)
   const fallbackName = file.name || `photo.${mime.split('/')[1] || 'jpg'}`
   return { blob, mime, fileName: fallbackName, size: blob.size }
+}
+
+const PHOTO_ANNOTATION_TOOLS = [
+  { id: 'pen', label: 'Draw', icon: PenLine },
+  { id: 'arrow', label: 'Arrow', icon: ArrowUpRight },
+  { id: 'rect', label: 'Rectangle', icon: Square },
+  { id: 'ellipse', label: 'Circle', icon: Circle },
+  { id: 'text', label: 'Text', icon: Type },
+]
+
+const PHOTO_ANNOTATION_COLORS = ['#EAB308', '#EF4444', '#10B981', '#2563EB', '#FFFFFF', '#111827']
+
+const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value))
+
+const annotationDistance = (a, b) => {
+  if (!a || !b) return 0
+  const dx = Number(b.x ?? 0) - Number(a.x ?? 0)
+  const dy = Number(b.y ?? 0) - Number(a.y ?? 0)
+  return Math.hypot(dx, dy)
+}
+
+const canvasToBlob = (canvas, type = 'image/jpeg', quality = 0.92) =>
+  new Promise((resolve) => {
+    canvas?.toBlob?.((blob) => resolve(blob), type, quality)
+  })
+
+const buildAnnotatedImageName = (name) => {
+  const raw = String(name ?? '').trim() || `photo-${Date.now()}`
+  const dot = raw.lastIndexOf('.')
+  const base = dot > 0 ? raw.slice(0, dot) : raw
+  const safeBase = sanitizeStorageFileName(base).replace(/\.[^.]*$/, '')
+  return `${safeBase || 'photo'}-annotated.jpg`
+}
+
+const drawPhotoAnnotationLabel = (ctx, text, x, y, color, strokeWidth = 3) => {
+  const label = String(text ?? '').trim()
+  if (!label) return
+  const fontSize = Math.max(14, Math.round(strokeWidth * 4))
+  ctx.save()
+  ctx.font = `600 ${fontSize}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+  ctx.textBaseline = 'top'
+  const measured = ctx.measureText(label)
+  const drawX = clampNumber(Number(x ?? 0) + 10, 6, Math.max(6, ctx.canvas.width - measured.width - 6))
+  const drawY = clampNumber(Number(y ?? 0) + 10, 6, Math.max(6, ctx.canvas.height - fontSize - 6))
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)'
+  ctx.lineWidth = Math.max(3, Math.round(strokeWidth))
+  ctx.strokeText(label, drawX, drawY)
+  ctx.fillStyle = color || '#111827'
+  ctx.fillText(label, drawX, drawY)
+  ctx.restore()
+}
+
+const getPhotoAnnotationTextLayout = (ctx, annotation) => {
+  if (!ctx || !annotation || annotation.type !== 'text') return null
+  const text = String(annotation.text ?? '').trim()
+  if (!text) return null
+  const width = Math.max(2, Number(annotation.size ?? 4))
+  const fontSize = Math.max(16, Math.round(width * 5))
+  ctx.save()
+  ctx.font = `700 ${fontSize}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+  ctx.textBaseline = 'top'
+  const textWidth = ctx.measureText(text).width
+  ctx.restore()
+  return {
+    text,
+    width,
+    fontSize,
+    textWidth,
+    x: clampNumber(Number(annotation.x ?? 0), 6, Math.max(6, ctx.canvas.width - textWidth - 6)),
+    y: clampNumber(Number(annotation.y ?? 0), 6, Math.max(6, ctx.canvas.height - fontSize - 6)),
+  }
+}
+
+const drawSelectedTextAnnotationOutline = (ctx, annotation) => {
+  const layout = getPhotoAnnotationTextLayout(ctx, annotation)
+  if (!layout) return
+  ctx.save()
+  ctx.lineWidth = 2
+  ctx.setLineDash([6, 4])
+  ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)'
+  ctx.strokeRect(layout.x - 4, layout.y - 4, layout.textWidth + 8, layout.fontSize + 8)
+  ctx.restore()
+}
+
+const drawPhotoAnnotation = (ctx, annotation) => {
+  if (!ctx || !annotation) return
+  const color = annotation.color || '#EF4444'
+  const width = Math.max(2, Number(annotation.size ?? 4))
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = width
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  if (annotation.type === 'pen') {
+    const points = Array.isArray(annotation.points) ? annotation.points : []
+    if (points.length < 2) {
+      ctx.restore()
+      return
+    }
+    ctx.beginPath()
+    ctx.moveTo(points[0].x, points[0].y)
+    for (let i = 1; i < points.length; i += 1) {
+      ctx.lineTo(points[i].x, points[i].y)
+    }
+    ctx.stroke()
+    ctx.restore()
+    return
+  }
+
+  if (annotation.type === 'arrow') {
+    const { x1, y1, x2, y2 } = annotation
+    const angle = Math.atan2(y2 - y1, x2 - x1)
+    const head = Math.max(10, width * 3)
+    ctx.beginPath()
+    ctx.moveTo(x1, y1)
+    ctx.lineTo(x2, y2)
+    ctx.lineTo(x2 - head * Math.cos(angle - Math.PI / 7), y2 - head * Math.sin(angle - Math.PI / 7))
+    ctx.moveTo(x2, y2)
+    ctx.lineTo(x2 - head * Math.cos(angle + Math.PI / 7), y2 - head * Math.sin(angle + Math.PI / 7))
+    ctx.stroke()
+    if (annotation.label) drawPhotoAnnotationLabel(ctx, annotation.label, x2, y2, color, width)
+    ctx.restore()
+    return
+  }
+
+  if (annotation.type === 'rect') {
+    const x = Math.min(annotation.x1, annotation.x2)
+    const y = Math.min(annotation.y1, annotation.y2)
+    const w = Math.abs(annotation.x2 - annotation.x1)
+    const h = Math.abs(annotation.y2 - annotation.y1)
+    if (w >= 2 || h >= 2) ctx.strokeRect(x, y, w, h)
+    if (annotation.label) drawPhotoAnnotationLabel(ctx, annotation.label, annotation.x2, annotation.y2, color, width)
+    ctx.restore()
+    return
+  }
+
+  if (annotation.type === 'ellipse') {
+    const cx = (annotation.x1 + annotation.x2) / 2
+    const cy = (annotation.y1 + annotation.y2) / 2
+    const rx = Math.abs(annotation.x2 - annotation.x1) / 2
+    const ry = Math.abs(annotation.y2 - annotation.y1) / 2
+    if (rx >= 1 || ry >= 1) {
+      ctx.beginPath()
+      ctx.ellipse(cx, cy, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+    if (annotation.label) drawPhotoAnnotationLabel(ctx, annotation.label, annotation.x2, annotation.y2, color, width)
+    ctx.restore()
+    return
+  }
+
+  if (annotation.type === 'text') {
+    const layout = getPhotoAnnotationTextLayout(ctx, annotation)
+    if (!layout) {
+      ctx.restore()
+      return
+    }
+    ctx.font = `700 ${layout.fontSize}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+    ctx.textBaseline = 'top'
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)'
+    ctx.lineWidth = Math.max(3, Math.round(width))
+    ctx.strokeText(layout.text, layout.x, layout.y)
+    ctx.fillStyle = color
+    ctx.fillText(layout.text, layout.x, layout.y)
+    ctx.restore()
+  }
 }
 
 const normalizePhone = (phone) => String(phone ?? '').replace(/[^\d+]/g, '')
@@ -15852,6 +16028,557 @@ function InspectionNoteModal({ lot, community, tasks, inspection, isOnline, onCl
   )
 }
 
+function PhotoAnnotateModal({ file, onClose, onApply }) {
+  const canvasRef = useRef(null)
+  const [imageState, setImageState] = useState(null)
+  const [tool, setTool] = useState('pen')
+  const [color, setColor] = useState(PHOTO_ANNOTATION_COLORS[0])
+  const [lineWidth, setLineWidth] = useState(4)
+  const [annotations, setAnnotations] = useState([])
+  const [draftPath, setDraftPath] = useState(null)
+  const [draftShape, setDraftShape] = useState(null)
+  const [loadingError, setLoadingError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [pendingTextPoint, setPendingTextPoint] = useState(null)
+  const [textDraft, setTextDraft] = useState('')
+  const [shapeLabelTargetId, setShapeLabelTargetId] = useState(null)
+  const [shapeLabelDraft, setShapeLabelDraft] = useState('')
+  const [textMode, setTextMode] = useState('text')
+  const [description, setDescription] = useState('')
+  const [selectedTextId, setSelectedTextId] = useState(null)
+  const activePointersRef = useRef(new Map())
+  const pinchRef = useRef({ active: false, targetId: null, startDistance: 0, baseSize: 0 })
+
+  useEffect(() => {
+    if (!file) {
+      setImageState(null)
+      setLoadingError('Missing photo')
+      return
+    }
+    let mounted = true
+    const url = URL.createObjectURL(file)
+    const img = new window.Image()
+    img.onload = () => {
+      if (!mounted) return
+      const rawW = Math.max(1, Number(img.naturalWidth || 1))
+      const rawH = Math.max(1, Number(img.naturalHeight || 1))
+      const maxEdge = 2000
+      const scale = Math.min(1, maxEdge / Math.max(rawW, rawH))
+      setImageState({
+        image: img,
+        width: Math.max(1, Math.round(rawW * scale)),
+        height: Math.max(1, Math.round(rawH * scale)),
+      })
+      setLoadingError('')
+    }
+    img.onerror = () => {
+      if (!mounted) return
+      setImageState(null)
+      setLoadingError('Unable to load this image for annotation.')
+    }
+    img.src = url
+
+    return () => {
+      mounted = false
+      URL.revokeObjectURL(url)
+    }
+  }, [file])
+
+  useEffect(() => {
+    if (shapeLabelTargetId && !annotations.some((item) => item.id === shapeLabelTargetId)) {
+      setShapeLabelTargetId(null)
+      setShapeLabelDraft('')
+    }
+  }, [annotations, shapeLabelTargetId])
+
+  useEffect(() => {
+    if (selectedTextId && !annotations.some((item) => item.id === selectedTextId && item.type === 'text')) {
+      setSelectedTextId(null)
+    }
+  }, [annotations, selectedTextId])
+
+  useEffect(
+    () => () => {
+      activePointersRef.current.clear()
+      pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext?.('2d')
+    if (!canvas || !ctx || !imageState?.image) return
+    if (canvas.width !== imageState.width) canvas.width = imageState.width
+    if (canvas.height !== imageState.height) canvas.height = imageState.height
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(imageState.image, 0, 0, canvas.width, canvas.height)
+    for (const annotation of annotations) drawPhotoAnnotation(ctx, annotation)
+    if (draftPath) drawPhotoAnnotation(ctx, draftPath)
+    if (draftShape) drawPhotoAnnotation(ctx, draftShape)
+    if (selectedTextId) {
+      const selectedText = annotations.find((item) => item.id === selectedTextId && item.type === 'text')
+      if (selectedText) drawSelectedTextAnnotationOutline(ctx, selectedText)
+    }
+  }, [annotations, draftPath, draftShape, imageState, selectedTextId])
+
+  const getPointerPoint = useCallback((e) => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    if (!rect.width || !rect.height) return null
+    return {
+      x: clampNumber((e.clientX - rect.left) * (canvas.width / rect.width), 0, canvas.width),
+      y: clampNumber((e.clientY - rect.top) * (canvas.height / rect.height), 0, canvas.height),
+    }
+  }, [])
+
+  const findTextAnnotationAtPoint = useCallback(
+    (pt) => {
+      const canvas = canvasRef.current
+      const ctx = canvas?.getContext?.('2d')
+      if (!canvas || !ctx || !pt) return null
+      for (let i = annotations.length - 1; i >= 0; i -= 1) {
+        const annotation = annotations[i]
+        if (!annotation || annotation.type !== 'text') continue
+        const box = getPhotoAnnotationTextLayout(ctx, annotation)
+        if (!box) continue
+        if (pt.x >= box.x - 12 && pt.x <= box.x + box.textWidth + 12 && pt.y >= box.y - 12 && pt.y <= box.y + box.fontSize + 12) {
+          return annotation.id
+        }
+      }
+      return null
+    },
+    [annotations],
+  )
+
+  const cycleColor = useCallback(() => {
+    setColor((prev) => {
+      const idx = PHOTO_ANNOTATION_COLORS.indexOf(prev)
+      return PHOTO_ANNOTATION_COLORS[(idx + 1 + PHOTO_ANNOTATION_COLORS.length) % PHOTO_ANNOTATION_COLORS.length]
+    })
+  }, [])
+
+  const beginDraw = (e) => {
+    if (!imageState || saving) return
+    const pt = getPointerPoint(e)
+    if (!pt) return
+    e.preventDefault()
+    activePointersRef.current.set(e.pointerId, pt)
+
+    if (tool === 'text' && activePointersRef.current.size >= 2) {
+      const targetId = selectedTextId
+      const target = targetId ? annotations.find((item) => item.id === targetId && item.type === 'text') : null
+      const points = Array.from(activePointersRef.current.values())
+      if (target && points.length >= 2) {
+        const startDistance = annotationDistance(points[0], points[1])
+        if (startDistance > 0) {
+          pinchRef.current = {
+            active: true,
+            targetId,
+            startDistance,
+            baseSize: Math.max(2, Number(target.size ?? lineWidth)),
+          }
+          setPendingTextPoint(null)
+          setTextDraft('')
+          return
+        }
+      }
+    }
+
+    if (tool === 'text') {
+      const hitTextId = findTextAnnotationAtPoint(pt)
+      if (hitTextId) {
+        setSelectedTextId(hitTextId)
+        setPendingTextPoint(null)
+        setTextDraft('')
+        return
+      }
+      setSelectedTextId(null)
+      setPendingTextPoint(pt)
+      setTextDraft('')
+      return
+    }
+
+    setPendingTextPoint(null)
+    setTextDraft('')
+
+    if (tool === 'pen') {
+      setDraftPath({
+        id: uuid(),
+        type: 'pen',
+        color,
+        size: lineWidth,
+        points: [pt],
+      })
+      canvasRef.current?.setPointerCapture?.(e.pointerId)
+      return
+    }
+
+    setDraftShape({
+      id: uuid(),
+      type: tool,
+      color,
+      size: lineWidth,
+      x1: pt.x,
+      y1: pt.y,
+      x2: pt.x,
+      y2: pt.y,
+      label: '',
+    })
+    canvasRef.current?.setPointerCapture?.(e.pointerId)
+  }
+
+  const moveDraw = (e) => {
+    if (saving) return
+    const pt = getPointerPoint(e)
+    if (!pt) return
+    activePointersRef.current.set(e.pointerId, pt)
+    if (pinchRef.current.active) {
+      const targetId = pinchRef.current.targetId
+      const points = Array.from(activePointersRef.current.values())
+      if (points.length >= 2 && targetId) {
+        const nextDistance = annotationDistance(points[0], points[1])
+        if (nextDistance > 0 && pinchRef.current.startDistance > 0) {
+          e.preventDefault()
+          const scale = nextDistance / pinchRef.current.startDistance
+          const nextSize = clampNumber(pinchRef.current.baseSize * scale, 2, 20)
+          setAnnotations((prev) => prev.map((item) => (item.id === targetId ? { ...item, size: nextSize } : item)))
+        }
+      }
+      return
+    }
+    if (draftPath) {
+      e.preventDefault()
+      setDraftPath((prev) => (prev ? { ...prev, points: [...prev.points, pt] } : prev))
+      return
+    }
+    if (draftShape) {
+      e.preventDefault()
+      setDraftShape((prev) => (prev ? { ...prev, x2: pt.x, y2: pt.y } : prev))
+    }
+  }
+
+  const endDraw = (e) => {
+    if (saving) return
+    const pt = getPointerPoint(e)
+    activePointersRef.current.delete(e.pointerId)
+    if (pinchRef.current.active) {
+      if (activePointersRef.current.size < 2) {
+        pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
+      }
+      return
+    }
+    if (draftPath) {
+      e.preventDefault()
+      const finalized = pt ? { ...draftPath, points: [...draftPath.points, pt] } : draftPath
+      if ((finalized.points ?? []).length >= 2) {
+        setAnnotations((prev) => [...prev, finalized])
+      }
+      setDraftPath(null)
+      return
+    }
+    if (draftShape) {
+      e.preventDefault()
+      const finalized = pt ? { ...draftShape, x2: pt.x, y2: pt.y } : draftShape
+      const movement = annotationDistance({ x: finalized.x1, y: finalized.y1 }, { x: finalized.x2, y: finalized.y2 })
+      if (movement >= 6) {
+        setAnnotations((prev) => [...prev, finalized])
+        setShapeLabelTargetId(finalized.id)
+        setShapeLabelDraft('')
+        setSelectedTextId(null)
+      }
+      setDraftShape(null)
+    }
+  }
+
+  const undo = () => {
+    pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
+    activePointersRef.current.clear()
+    if (draftPath || draftShape) {
+      setDraftPath(null)
+      setDraftShape(null)
+      return
+    }
+    if (pendingTextPoint) {
+      setPendingTextPoint(null)
+      setTextDraft('')
+      return
+    }
+    setAnnotations((prev) => prev.slice(0, -1))
+  }
+
+  const clearAll = () => {
+    pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
+    activePointersRef.current.clear()
+    setAnnotations([])
+    setDraftPath(null)
+    setDraftShape(null)
+    setPendingTextPoint(null)
+    setTextDraft('')
+    setShapeLabelTargetId(null)
+    setShapeLabelDraft('')
+    setSelectedTextId(null)
+  }
+
+  const applyAnnotations = async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setSaving(true)
+    try {
+      const blob = await canvasToBlob(canvas, 'image/jpeg', 0.92)
+      if (!blob) throw new Error('Failed to render annotated image')
+      const nextName = buildAnnotatedImageName(file?.name)
+      const annotatedFile =
+        typeof File === 'function' ? new File([blob], nextName, { type: 'image/jpeg', lastModified: Date.now() }) : blob
+      onApply?.(annotatedFile, description)
+    } catch (err) {
+      console.error(err)
+      alert('Unable to save annotations on this photo.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const hasPendingEdits = annotations.length > 0 || Boolean(draftPath) || Boolean(draftShape)
+  const promptOpen = Boolean(pendingTextPoint || shapeLabelTargetId)
+  const promptTitle = pendingTextPoint ? 'Add Text' : 'Add Label'
+  const promptValue = pendingTextPoint ? textDraft : shapeLabelDraft
+  const setPromptValue = pendingTextPoint ? setTextDraft : setShapeLabelDraft
+  const savePrompt = () => {
+    const value = String(promptValue ?? '').trim()
+    if (!value) return
+    if (pendingTextPoint) {
+      const nextId = uuid()
+      setAnnotations((prev) => [
+        ...prev,
+        {
+          id: nextId,
+          type: 'text',
+          x: pendingTextPoint.x,
+          y: pendingTextPoint.y,
+          text: value,
+          color,
+          size: lineWidth,
+        },
+      ])
+      setSelectedTextId(nextId)
+      setPendingTextPoint(null)
+      setTextDraft('')
+      return
+    }
+    if (shapeLabelTargetId) {
+      setAnnotations((prev) => prev.map((item) => (item.id === shapeLabelTargetId ? { ...item, label: value } : item)))
+      setShapeLabelTargetId(null)
+      setShapeLabelDraft('')
+    }
+  }
+
+  const cancelPrompt = () => {
+    if (pendingTextPoint) {
+      setPendingTextPoint(null)
+      setTextDraft('')
+      return
+    }
+    if (shapeLabelTargetId) {
+      setShapeLabelTargetId(null)
+      setShapeLabelDraft('')
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[95] bg-[#0A0A0D] text-white flex flex-col">
+      <div className="safe-area-pt px-3 py-2 border-b border-white/10">
+        <div className="flex items-center justify-between gap-2">
+          <button type="button" onClick={onClose} className="h-10 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-sm font-semibold">
+            Close
+          </button>
+          <div className="text-sm font-semibold text-white/90">Photo Markup</div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={undo}
+              disabled={saving || (!hasPendingEdits && !pendingTextPoint)}
+              className="h-10 w-10 rounded-xl bg-white/10 hover:bg-white/15 disabled:opacity-40 flex items-center justify-center"
+              aria-label="Undo"
+            >
+              <Undo2 className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={clearAll}
+              disabled={saving || !hasPendingEdits}
+              className="h-10 w-10 rounded-xl bg-white/10 hover:bg-white/15 disabled:opacity-40 flex items-center justify-center"
+              aria-label="Clear all"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={applyAnnotations}
+              disabled={saving || annotations.length === 0}
+              className="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/60 text-sm font-semibold"
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="relative flex-1 overflow-hidden">
+        <div className="absolute inset-0 flex items-center justify-center p-3">
+          {loadingError ? (
+            <p className="text-sm text-red-300">{loadingError}</p>
+          ) : (
+            <canvas
+              ref={canvasRef}
+              className="w-auto h-auto max-w-full max-h-full rounded-xl bg-black touch-none border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"
+              onPointerDown={beginDraw}
+              onPointerMove={moveDraw}
+              onPointerUp={endDraw}
+              onPointerCancel={endDraw}
+              onPointerLeave={endDraw}
+              onContextMenu={(e) => e.preventDefault()}
+            />
+          )}
+        </div>
+
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-black/75 border border-white/10 rounded-2xl p-2 flex flex-col gap-2">
+          {PHOTO_ANNOTATION_TOOLS.map((entry) => {
+            const Icon = entry.icon
+            const active = tool === entry.id
+            return (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => {
+                  setTool(entry.id)
+                  setDraftPath(null)
+                  setDraftShape(null)
+                }}
+                className={`h-11 w-11 rounded-xl flex items-center justify-center border ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-white/5 border-white/10 text-white/80 hover:bg-white/10'}`}
+                title={entry.label}
+                aria-label={entry.label}
+              >
+                <Icon className="w-5 h-5" />
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="absolute left-3 right-[4.75rem] bottom-3 bg-black/75 border border-white/10 rounded-2xl px-3 py-2">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={cycleColor}
+              className="h-10 px-3 rounded-xl border border-white/20 bg-white/10 hover:bg-white/15 flex items-center gap-2 shrink-0"
+              aria-label="Change annotation color"
+              title="Tap to cycle colors"
+            >
+              <span className="w-6 h-6 rounded-full border border-white/40 flex items-center justify-center" style={{ backgroundColor: color }}>
+                <Palette className="w-3.5 h-3.5 text-white mix-blend-difference" />
+              </span>
+              <span className="text-xs font-semibold text-white/85">Color</span>
+            </button>
+
+            <div className="flex-1 min-w-0 space-y-1.5">
+              <div className="h-7 rounded-lg border border-white/15 bg-white/5 px-2 flex items-center">
+                <div className="w-full rounded-full" style={{ height: `${Math.max(2, lineWidth)}px`, backgroundColor: color }} />
+              </div>
+              <label className="flex items-center gap-2 text-xs text-white/80">
+                <span>Thickness</span>
+                <input
+                  type="range"
+                  min={2}
+                  max={14}
+                  value={lineWidth}
+                  onChange={(e) => setLineWidth(Number(e.target.value))}
+                  className="flex-1"
+                />
+                <span className="w-6 text-right tabular-nums">{lineWidth}</span>
+              </label>
+              {tool === 'text' && selectedTextId ? <p className="text-[11px] text-white/60">Pinch on selected text to resize</p> : null}
+            </div>
+          </div>
+        </div>
+
+        {promptOpen ? (
+          <div className="absolute inset-0 bg-black/55 flex items-start justify-center p-4 pt-[14vh]">
+            <div className="w-full max-w-sm bg-white text-gray-900 rounded-2xl shadow-xl border border-gray-200 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTextMode('text')}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'text' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
+                >
+                  Abc
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTextMode('feet_inches')}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'feet_inches' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
+                >
+                  ft. in.
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTextMode('feet_cm')}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'feet_cm' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
+                >
+                  ft. cm.
+                </button>
+              </div>
+
+              <p className="text-sm font-semibold">{promptTitle}</p>
+              <input
+                autoFocus
+                value={promptValue}
+                onChange={(e) => setPromptValue(e.target.value)}
+                placeholder={
+                  textMode === 'text'
+                    ? 'Type note'
+                    : textMode === 'feet_inches'
+                      ? 'Example: 4 ft 2 in'
+                      : 'Example: 4 ft 20 cm'
+                }
+                className="w-full px-3 py-2 border rounded-xl"
+              />
+
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={cancelPrompt} className="px-4 py-2 rounded-xl border border-gray-300 bg-white text-sm font-semibold">
+                  Cancel
+                </button>
+                <button type="button" onClick={savePrompt} className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold">
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="safe-area-pb px-3 py-2 border-t border-white/10 bg-black/90">
+        <div className="flex items-center gap-2">
+          <input
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Add a description for this marked-up photo..."
+            className="flex-1 h-11 rounded-xl bg-white/10 border border-white/15 px-3 text-sm placeholder:text-white/45"
+          />
+          <button
+            type="button"
+            onClick={applyAnnotations}
+            disabled={saving || annotations.length === 0}
+            className="h-11 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/60 text-sm font-semibold"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function PhotoCaptureModal({ lot, task, onClose, onSave, source }) {
   const [category, setCategory] = useState(task ? 'progress' : 'daily')
   const [taskId, setTaskId] = useState(task?.id ?? '')
@@ -15873,6 +16600,7 @@ function PhotoCaptureModal({ lot, task, onClose, onSave, source }) {
   const cameraInputRef = useRef(null)
   const libraryInputRef = useRef(null)
   const [previewUrl, setPreviewUrl] = useState(null)
+  const [annotateOpen, setAnnotateOpen] = useState(false)
 
   useEffect(() => {
     if (!source) return
@@ -15894,10 +16622,15 @@ function PhotoCaptureModal({ lot, task, onClose, onSave, source }) {
     }
   }, [file])
 
+  useEffect(() => {
+    if (!file) setAnnotateOpen(false)
+  }, [file])
+
   const modalTitle = source === 'library' ? '📁 Upload Photo' : '📷 Take Photo'
 
   return (
-    <Modal
+    <>
+      <Modal
       title={modalTitle}
       onClose={onClose}
       footer={
@@ -16015,17 +16748,26 @@ function PhotoCaptureModal({ lot, task, onClose, onSave, source }) {
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold">Photo</p>
             {file ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setFile(null)
-                  if (cameraInputRef.current) cameraInputRef.current.value = ''
-                  if (libraryInputRef.current) libraryInputRef.current.value = ''
-                }}
-                className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
-              >
-                Remove
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAnnotateOpen(true)}
+                  className="text-sm font-semibold px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 text-blue-700"
+                >
+                  Annotate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFile(null)
+                    if (cameraInputRef.current) cameraInputRef.current.value = ''
+                    if (libraryInputRef.current) libraryInputRef.current.value = ''
+                  }}
+                  className="text-sm font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
+                >
+                  Remove
+                </button>
+              </div>
             ) : null}
           </div>
 
@@ -16075,13 +16817,28 @@ function PhotoCaptureModal({ lot, task, onClose, onSave, source }) {
             <div className="bg-gray-50 border border-gray-200 rounded-xl p-3">
               <p className="text-xs font-semibold text-gray-700 mb-2">Preview</p>
               <img src={previewUrl} alt="Selected upload preview" className="w-full max-h-[40vh] object-contain rounded-xl bg-white border border-gray-200" />
+              <p className="text-xs text-gray-500 mt-2">Need callouts? Tap Annotate to draw arrows, shapes, and labels before saving.</p>
             </div>
           ) : (
             <p className="text-xs text-gray-500">Save is enabled after you pick a photo.</p>
           )}
         </div>
       </div>
-    </Modal>
+      </Modal>
+
+      {annotateOpen && file ? (
+        <PhotoAnnotateModal
+          file={file}
+          onClose={() => setAnnotateOpen(false)}
+          onApply={(nextFile, note) => {
+            setFile(nextFile ?? file)
+            const clean = String(note ?? '').trim()
+            if (clean) setCaption((prev) => (String(prev ?? '').trim() ? prev : clean))
+            setAnnotateOpen(false)
+          }}
+        />
+      ) : null}
+    </>
   )
 }
 
