@@ -157,6 +157,72 @@ const getDriedInDate = (allTasks, scheduledDatesById) => {
   return roofDates?.end ?? null
 }
 
+const applyTemplateTrackScheduling = (tasks, lotStartDate, orgSettings) => {
+  const scheduledDatesById = new Map()
+
+  const foundationTasks = tasks.filter((t) => t.track === 'foundation')
+  const structureTasks = tasks.filter((t) => t.track === 'structure')
+  const interiorTasks = tasks.filter((t) => t.track === 'interior')
+  const exteriorTasks = tasks.filter((t) => t.track === 'exterior')
+  const finalTasks = tasks.filter((t) => t.track === 'final')
+
+  scheduleSequential(foundationTasks, lotStartDate ?? new Date(), orgSettings, scheduledDatesById)
+
+  const { addWorkDays } = makeWorkdayHelpers(orgSettings)
+  const lastFoundationEnd = maxDateLike(foundationTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const structureStart = lastFoundationEnd ? addWorkDays(lastFoundationEnd, 1) : lotStartDate ?? new Date()
+  scheduleSequential(structureTasks, structureStart, orgSettings, scheduledDatesById)
+
+  const driedInDate = getDriedInDate(tasks, scheduledDatesById)
+  const trackStart = driedInDate ? addWorkDays(driedInDate, 1) : null
+
+  if (trackStart) {
+    scheduleSequential(interiorTasks, trackStart, orgSettings, scheduledDatesById)
+    scheduleSequential(exteriorTasks, trackStart, orgSettings, scheduledDatesById)
+  }
+
+  const blockingTasks = tasks.filter((t) => t.track !== 'final' && t.blocks_final !== false)
+  const blockingEnd = maxDateLike(blockingTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const finalStartBase = blockingEnd
+  const finalStart = finalStartBase ? addWorkDays(finalStartBase, 1) : null
+  if (finalStart) scheduleSequential(finalTasks, finalStart, orgSettings, scheduledDatesById)
+
+  for (const task of tasks) {
+    const dates = scheduledDatesById.get(task.id)
+    task.scheduled_start = dates ? formatISODate(dates.start) : null
+    task.scheduled_end = dates ? formatISODate(dates.end) : null
+  }
+
+  const blockingInteriorEnd = maxDateLike(interiorTasks.filter((t) => t.blocks_final !== false).map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const blockingExteriorEnd = maxDateLike(exteriorTasks.filter((t) => t.blocks_final !== false).map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
+  const bottleneckTrack =
+    !blockingExteriorEnd || (blockingInteriorEnd && blockingInteriorEnd >= blockingExteriorEnd) ? 'interior' : 'exterior'
+  for (const task of tasks) {
+    task.is_critical_path =
+      task.track === 'foundation' || task.track === 'structure' || task.track === 'final' || task.track === bottleneckTrack
+  }
+}
+
+const scaleTemplateTaskDurationsToTarget = (tasks, targetBuildDays, orgSettings) => {
+  const target = Math.max(1, Number(targetBuildDays) || 1)
+  const starts = tasks.map((t) => t.scheduled_start).filter(Boolean)
+  const ends = tasks.map((t) => t.scheduled_end).filter(Boolean)
+  const earliest = minDateLike(starts)
+  const latest = maxDateLike(ends)
+  if (!earliest || !latest) return
+
+  const { businessDaysBetweenInclusive } = makeWorkdayHelpers(orgSettings)
+  const current = Math.max(1, Number(businessDaysBetweenInclusive(formatISODate(earliest), formatISODate(latest)) || 1))
+  if (current === target) return
+
+  const ratio = target / current
+  for (const task of tasks) {
+    if (isBufferTask(task)) continue
+    const duration = Math.max(1, Number(task.duration ?? 1) || 1)
+    task.duration = Math.max(1, Math.round(duration * ratio))
+  }
+}
+
 export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSettings) => {
   const templateTasks = (template?.tasks ?? []).slice()
 
@@ -198,51 +264,7 @@ export const buildLotTasksFromTemplate = (lotId, lotStartDate, template, orgSett
     }
   })
 
-  // Schedule dates by track using spec-style workday logic
-  const scheduledDatesById = new Map()
-
-  const foundationTasks = created.filter((t) => t.track === 'foundation')
-  const structureTasks = created.filter((t) => t.track === 'structure')
-  const interiorTasks = created.filter((t) => t.track === 'interior')
-  const exteriorTasks = created.filter((t) => t.track === 'exterior')
-  const finalTasks = created.filter((t) => t.track === 'final')
-
-  scheduleSequential(foundationTasks, lotStartDate ?? new Date(), orgSettings, scheduledDatesById)
-
-  const { addWorkDays } = makeWorkdayHelpers(orgSettings)
-  const lastFoundationEnd = maxDateLike(foundationTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
-  const structureStart = lastFoundationEnd ? addWorkDays(lastFoundationEnd, 1) : lotStartDate ?? new Date()
-  scheduleSequential(structureTasks, structureStart, orgSettings, scheduledDatesById)
-
-  const driedInDate = getDriedInDate(created, scheduledDatesById)
-  const trackStart = driedInDate ? addWorkDays(driedInDate, 1) : null
-
-  if (trackStart) {
-    scheduleSequential(interiorTasks, trackStart, orgSettings, scheduledDatesById)
-    scheduleSequential(exteriorTasks, trackStart, orgSettings, scheduledDatesById)
-  }
-
-  const blockingTasks = created.filter((t) => t.track !== 'final' && t.blocks_final !== false)
-  const blockingEnd = maxDateLike(blockingTasks.map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
-  const finalStartBase = blockingEnd
-  const finalStart = finalStartBase ? addWorkDays(finalStartBase, 1) : null
-  if (finalStart) scheduleSequential(finalTasks, finalStart, orgSettings, scheduledDatesById)
-
-  for (const task of created) {
-    const dates = scheduledDatesById.get(task.id)
-    task.scheduled_start = dates ? formatISODate(dates.start) : null
-    task.scheduled_end = dates ? formatISODate(dates.end) : null
-  }
-
-  // Mark basic critical path: all sequential phases + the slower of interior/exterior + final
-  const blockingInteriorEnd = maxDateLike(interiorTasks.filter((t) => t.blocks_final !== false).map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
-  const blockingExteriorEnd = maxDateLike(exteriorTasks.filter((t) => t.blocks_final !== false).map((t) => scheduledDatesById.get(t.id)?.end).filter(Boolean))
-  const bottleneckTrack =
-    !blockingExteriorEnd || (blockingInteriorEnd && blockingInteriorEnd >= blockingExteriorEnd) ? 'interior' : 'exterior'
-  for (const task of created) {
-    task.is_critical_path =
-      task.track === 'foundation' || task.track === 'structure' || task.track === 'final' || task.track === bottleneckTrack
-  }
+  applyTemplateTrackScheduling(created, lotStartDate, orgSettings)
 
   // Ensure the first actionable task reads as ready
   const sortedAll = created.slice().sort(bySortOrder)
@@ -1185,17 +1207,27 @@ export const startLotFromTemplate = ({
   subcontractors,
   draftTasks,
   draft_tasks,
+  build_days_override,
 }) => {
   const { getNextWorkDay } = makeWorkdayHelpers(orgSettings)
   const normalizedStart = start_date ? formatISODate(getNextWorkDay(start_date) ?? start_date) : null
   if (!normalizedStart) return lot
 
+  const overrideBuildDaysRaw = Number(build_days_override)
+  const hasBuildDaysOverride = Number.isFinite(overrideBuildDaysRaw) && overrideBuildDaysRaw > 0
+  const overrideBuildDays = hasBuildDaysOverride ? Math.max(1, Math.round(overrideBuildDaysRaw)) : null
+
   const providedTasks = (draftTasks ?? draft_tasks ?? []).map((t) => ({ ...t }))
-  const baseTasks = providedTasks.length > 0 ? providedTasks : buildLotTasksFromTemplate(lot.id, normalizedStart, template, orgSettings)
+  const baseTasks =
+    providedTasks.length > 0 ? providedTasks : buildLotTasksFromTemplate(lot.id, normalizedStart, template, orgSettings)
+  if (providedTasks.length === 0 && overrideBuildDays) {
+    scaleTemplateTaskDurationsToTarget(baseTasks, overrideBuildDays, orgSettings)
+    applyTemplateTrackScheduling(baseTasks, normalizedStart, orgSettings)
+  }
   const tasksWithSubs = assignSubsToTasks(baseTasks, subcontractors)
   const nextTasks = refreshReadyStatuses(tasksWithSubs)
 
-  const effectiveBuildDays = template?.build_days ?? lot.build_days
+  const effectiveBuildDays = overrideBuildDays ?? template?.build_days ?? lot.build_days
   const target_completion_date = calculateTargetCompletionDate(normalizedStart, effectiveBuildDays, orgSettings)
 
   return {

@@ -12219,6 +12219,7 @@ export default function BuildFlow() {
                     address: form.address,
                     permit_number: form.permit_number,
                     hard_deadline: form.hard_deadline,
+                    build_days_override: form.build_days_target,
                     template: resolvedTemplate ?? prev.template,
                     orgSettings: prev.org,
                     subcontractors: prev.subcontractors,
@@ -13943,11 +13944,13 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     ? templates.find((t) => t.id === resolvedProductType.template_id) ?? null
     : null
   const buildDays = resolvedProductType?.build_days ?? template?.build_days ?? org.default_build_days ?? 135
+  const defaultBuildDaysTarget = Math.max(1, Number(resolvedLot?.build_days ?? buildDays ?? org.default_build_days ?? 135) || 1)
   const availablePlans = resolvedProductType ? plans.filter((p) => p.product_type_id === resolvedProductType.id) : []
 
   const [form, setForm] = useState(() => ({
     start_date: '',
     plan_id: '',
+    build_days_target: defaultBuildDaysTarget,
     hard_deadline: '',
     address: '',
     permit_number: '',
@@ -13997,6 +14000,13 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
   }, [resolvedLot, resolvedLotId, plans, org.custom_fields])
 
   useEffect(() => {
+    if (!resolvedLotId) return
+    setForm((prev) => ({ ...prev, build_days_target: defaultBuildDaysTarget }))
+  }, [defaultBuildDaysTarget, resolvedLotId])
+
+  const buildDaysTarget = Math.max(1, Number(form.build_days_target ?? defaultBuildDaysTarget) || defaultBuildDaysTarget)
+
+  useEffect(() => {
     if (!resolvedLot || !form.start_date) {
       setDraftTasks([])
       setPreviewTouched(false)
@@ -14014,6 +14024,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       permit_number: form.permit_number,
       hard_deadline: form.hard_deadline || null,
       template,
+      build_days_override: buildDaysTarget,
       orgSettings: org,
       subcontractors: app.subcontractors,
     })
@@ -14022,7 +14033,20 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     setDraftTasks(nextTasks)
     setPreviewCollapsedTracks(new Set(nextTasks.map((t) => t?.track ?? 'misc')))
     setPreviewTouched(false)
-  }, [resolvedLot, form.start_date, form.plan_id, form.job_number, form.custom_fields, form.address, form.permit_number, form.hard_deadline, template, org, app.subcontractors])
+  }, [
+    resolvedLot,
+    form.start_date,
+    form.plan_id,
+    form.job_number,
+    form.custom_fields,
+    form.address,
+    form.permit_number,
+    form.hard_deadline,
+    buildDaysTarget,
+    template,
+    org,
+    app.subcontractors,
+  ])
 
   useEffect(() => {
     return () => {
@@ -14032,7 +14056,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     }
   }, [])
 
-  const targetCompletion = form.start_date ? calculateTargetCompletionDate(form.start_date, buildDays, org) : null
+  const targetCompletion = form.start_date ? calculateTargetCompletionDate(form.start_date, buildDaysTarget, org) : null
   const previewCompletion = useMemo(() => {
     if (!draftTasks || draftTasks.length === 0) return null
     const completion = getPredictedCompletionDate({ tasks: draftTasks })
@@ -14300,6 +14324,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       permit_number: form.permit_number,
       hard_deadline: form.hard_deadline || null,
       template,
+      build_days_override: buildDaysTarget,
       orgSettings: org,
       subcontractors: app.subcontractors,
     })
@@ -14438,7 +14463,20 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
 
         <label className="block">
           <span className="text-sm font-semibold">Build Days Target</span>
-          <input type="number" value={buildDays} readOnly className="mt-1 w-full px-3 py-3 border rounded-xl bg-gray-50" />
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={buildDaysTarget}
+            onChange={(e) =>
+              setForm((prev) => ({
+                ...prev,
+                build_days_target: Math.max(1, Number(e.target.value) || 1),
+              }))
+            }
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+          />
+          <p className="text-xs text-gray-500 mt-1">Override to condense or expand the auto-generated schedule.</p>
         </label>
 
         <label className="block">
