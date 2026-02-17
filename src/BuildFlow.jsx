@@ -95,9 +95,32 @@ import {
   startLotFromTemplate,
 } from './lib/scheduleEngine.js'
 import { deleteBlob, getBlob, putBlob } from './lib/idb.js'
-import { ensureImportedFromSnapshotV1, outboxAck, outboxEnqueue, outboxList, outboxListV2Due, outboxUpdate, getSyncV2Cursor, setSyncV2Cursor } from './lib/localDb.js'
+import {
+  clearLocalDb,
+  ensureImportedFromSnapshotV1,
+  getSyncV2Cursor,
+  importSnapshotV1,
+  outboxAck,
+  outboxEnqueue,
+  outboxEnqueueMany,
+  outboxList,
+  outboxListV2Due,
+  outboxUpdate,
+  setSyncV2Cursor,
+} from './lib/localDb.js'
+import {
+  BASELINE_DEFAULT_ID,
+  baselineArtifactToJson,
+  buildBaselineArtifact,
+  loadBaselineArtifact,
+  loadBaselineMetadata,
+  persistBaselineArtifact,
+  persistRestorePoint,
+  verifyBaselineArtifact,
+  withBaselineMetadata,
+} from './lib/baseline.js'
 import { isSyncV2Enabled, writeFlag } from './lib/flags.js'
-import { syncV2Pull, syncV2Push } from './lib/syncV2.js'
+import { syncV2HealthCheck, syncV2Pull, syncV2Push } from './lib/syncV2.js'
 import { uuid } from './lib/uuid.js'
 import { supabase } from './lib/supabaseClient.js'
 import { composeMessage, isNativeIos } from './lib/native/messageComposer.js'
@@ -235,6 +258,10 @@ const CUSTOM_TASK_PRESET = { id: 'custom', name: 'Custom', trade: 'other', durat
 const DURATION_OPTIONS = Array.from({ length: 10 }, (_, i) => i + 1)
 const FILE_ACCEPT = '.pdf,.csv,.xls,.xlsx,.doc,.docx,.ppt,.pptx,.txt,.rtf,.jpg,.jpeg,.png,.heic,.heif'
 const SUPABASE_ORG_ID_FALLBACK = String(import.meta.env.VITE_SUPABASE_ORG_ID ?? '').trim()
+const BASELINE_OVERRIDE_TOKEN = String(import.meta.env.VITE_BASELINE_OVERRIDE_TOKEN ?? '').trim()
+const BASELINE_OVERRIDE_UNTIL_KEY = 'buildflow:baseline_override_until'
+const BASELINE_OVERRIDE_WINDOW_MS = 15 * 60 * 1000
+const BASELINE_RTO_TARGET_MINUTES = 5
 
 const getWeatherFromCode = (code) => {
   const n = Number(code)
@@ -498,7 +525,13 @@ function Modal({ title, onClose, children, footer, zIndex = 'z-[70]', panelClass
   useEffect(() => lockBodyScroll(), [])
 
   return (
-    <div className={`fixed inset-0 bg-black/40 ${zIndex} flex items-end sm:items-center justify-center`}>
+    <div
+      className={`fixed inset-0 bg-black/40 ${zIndex} flex items-end sm:items-center justify-center p-2 sm:p-4`}
+      style={{
+        paddingTop: 'calc(env(safe-area-inset-top, 0px) + 0.5rem)',
+        paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)',
+      }}
+    >
       <div className={`w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200 ${panelClassName}`}>
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-lg">{title}</h2>
@@ -681,6 +714,58 @@ const downloadTextFile = (filename, text, mime = 'text/plain;charset=utf-8') => 
   } catch (err) {
     console.error(err)
     alert('Download failed in this browser.')
+  }
+}
+
+const downloadJsonFile = (filename, value) => {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  downloadTextFile(filename, text, 'application/json;charset=utf-8')
+}
+
+const pickJsonFile = () =>
+  new Promise((resolve, reject) => {
+    try {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = 'application/json,.json'
+      input.onchange = async () => {
+        try {
+          const file = input.files?.[0]
+          if (!file) {
+            resolve(null)
+            return
+          }
+          const text = await file.text()
+          resolve({ file, text })
+        } catch (err) {
+          reject(err)
+        }
+      }
+      input.click()
+    } catch (err) {
+      reject(err)
+    }
+  })
+
+const readOverrideUntilMs = () => {
+  try {
+    const raw = localStorage.getItem(BASELINE_OVERRIDE_UNTIL_KEY)
+    const ms = Number(raw)
+    return Number.isFinite(ms) ? ms : 0
+  } catch {
+    return 0
+  }
+}
+
+const hasActiveBaselineOverride = () => readOverrideUntilMs() > Date.now()
+
+const writeBaselineOverrideWindow = (durationMs = BASELINE_OVERRIDE_WINDOW_MS) => {
+  try {
+    const untilMs = Date.now() + Math.max(60000, Number(durationMs) || BASELINE_OVERRIDE_WINDOW_MS)
+    localStorage.setItem(BASELINE_OVERRIDE_UNTIL_KEY, String(untilMs))
+    return untilMs
+  } catch {
+    return 0
   }
 }
 
@@ -1607,11 +1692,15 @@ export default function BuildFlow() {
     phase: 'idle',
     last_pulled_at: null,
     last_pushed_at: null,
+    pending_ops: 0,
+    rpc_health: 'unknown',
     warning: '',
     error: '',
   })
   const [cloudRetryTick, setCloudRetryTick] = useState(0)
   const [resetSeedBusy, setResetSeedBusy] = useState(false)
+  const [baselineBusy, setBaselineBusy] = useState(false)
+  const [baselineError, setBaselineError] = useState('')
 
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true))
   const [weather, setWeather] = useState({
@@ -1700,6 +1789,27 @@ export default function BuildFlow() {
       cancelled = true
     }
   }, [seedState])
+
+  useEffect(() => {
+    let cancelled = false
+    void loadBaselineMetadata()
+      .then((metadata) => {
+        if (cancelled || !metadata) return
+        setApp((prev) => {
+          const currentId = prev?.sync?.baseline_meta?.baseline_id ?? ''
+          const currentChecksum = prev?.sync?.baseline_meta?.checksum ?? ''
+          const nextId = metadata?.baseline_id ?? ''
+          const nextChecksum = metadata?.checksum ?? ''
+          if (currentId && currentId === nextId && currentChecksum === nextChecksum) return prev
+          return withBaselineMetadata(prev, metadata)
+        })
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     const orgId = supabaseStatus?.orgId ?? app?.org?.id ?? null
@@ -1806,6 +1916,22 @@ export default function BuildFlow() {
       subscription?.unsubscribe?.()
     }
   }, [])
+
+  const ensureGuestOrg = useCallback(async () => {
+    if (!supabaseUser?.is_anonymous) return null
+    const { data, error } = await supabase.rpc('ensure_guest_org')
+    if (error) {
+      setSupabaseStatus((prev) => ({
+        ...prev,
+        phase: 'error',
+        message: `Guest org provisioning failed: ${error.message}`,
+        loadedAt: new Date().toISOString(),
+      }))
+      return null
+    }
+    const row = Array.isArray(data) ? data[0] ?? null : data
+    return row
+  }, [supabaseUser?.is_anonymous])
 
   useEffect(() => {
     let cancelled = false
@@ -2006,11 +2132,40 @@ export default function BuildFlow() {
         // Persist last-known auth scope into the snapshot so we can enforce "super assignment"
         // rules even if the device restarts offline.
         const prevSync = prev.sync ?? {}
+        const hasServerBaselineColumns = Boolean(orgRow && Object.prototype.hasOwnProperty.call(orgRow, 'baseline_protection_enabled'))
+        const serverBaselineEnabled = Boolean(orgRow?.baseline_protection_enabled)
+        const serverBaselineId = String(orgRow?.baseline_id ?? '').trim()
+        const serverBaselineChecksum = String(orgRow?.baseline_checksum ?? '').trim()
+        const serverBaselineCreatedAt = orgRow?.baseline_protected_at ?? null
+        const serverBaselineMeta =
+          hasServerBaselineColumns && (serverBaselineEnabled || serverBaselineId || serverBaselineChecksum)
+            ? {
+                baseline_id: serverBaselineId || BASELINE_DEFAULT_ID,
+                created_at: serverBaselineCreatedAt ?? prevSync?.baseline_meta?.created_at ?? null,
+                checksum: serverBaselineChecksum || prevSync?.baseline_meta?.checksum || '',
+                source_device: prevSync?.baseline_meta?.source_device ?? 'supabase',
+                org_id: orgId ?? null,
+                restore_point: prevSync?.baseline_meta?.restore_point ?? null,
+              }
+            : null
+
         const nextSync = {
           ...prevSync,
           supabase_user_id: supabaseUser?.id ?? prevSync.supabase_user_id ?? null,
           supabase_org_id: orgId ?? prevSync.supabase_org_id ?? null,
           supabase_role: profile?.role ?? guestRole ?? prevSync.supabase_role ?? null,
+          baseline_meta: hasServerBaselineColumns ? serverBaselineMeta : prevSync.baseline_meta ?? null,
+          baseline_protection: hasServerBaselineColumns
+            ? {
+                ...(prevSync.baseline_protection ?? {}),
+                enabled: serverBaselineEnabled || Boolean(serverBaselineMeta),
+                baseline_id: serverBaselineMeta?.baseline_id ?? null,
+                checksum: serverBaselineMeta?.checksum ?? '',
+                org_id: orgId ?? null,
+                created_at: serverBaselineMeta?.created_at ?? null,
+                mode: serverBaselineEnabled ? 'server' : 'local',
+              }
+            : prevSync.baseline_protection ?? { enabled: false },
         }
 
         if (!hasRemoteCoreData) {
@@ -2073,7 +2228,7 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [supabaseUser?.id, supabaseBootstrapVersion])
+  }, [ensureGuestOrg, supabaseBootstrapVersion, supabaseUser?.id, supabaseUser?.is_anonymous])
 
   const syncPayloadToSupabase = async (pendingPayload) => {
     const {
@@ -2194,12 +2349,12 @@ export default function BuildFlow() {
     return { syncedAt }
   }
 
-  const buildCloudPayload = () => {
+  const buildCloudPayloadForState = useCallback((sourceState) => {
     if (!supabaseUser?.id || !supabaseStatus.orgId) return null
 
     const orgId = supabaseStatus.orgId
-    const orgConfig = app.org ?? {}
-    const effectiveRole = supabaseStatus.role ?? app?.sync?.supabase_role ?? null
+    const orgConfig = sourceState?.org ?? {}
+    const effectiveRole = supabaseStatus.role ?? sourceState?.sync?.supabase_role ?? null
     if (!effectiveRole) return null
     const isRestrictedSuper = effectiveRole === 'super' && !orgConfig?.is_demo
     const timezoneRaw = String(orgConfig?.timezone ?? '').trim()
@@ -2222,31 +2377,35 @@ export default function BuildFlow() {
 
     const productTypes = isRestrictedSuper
       ? []
-      : (app.product_types ?? [])
+      : (sourceState?.product_types ?? [])
           .map((row) => mapProductTypeToSupabase(row, orgId))
           .filter((row) => row?.id)
 
-    const plansRows = isRestrictedSuper ? [] : (app.plans ?? []).map((row) => mapPlanToSupabase(row, orgId)).filter((row) => row?.id)
+    const plansRows = isRestrictedSuper
+      ? []
+      : (sourceState?.plans ?? []).map((row) => mapPlanToSupabase(row, orgId)).filter((row) => row?.id)
 
     const agenciesRows = isRestrictedSuper
       ? []
-      : (app.agencies ?? [])
+      : (sourceState?.agencies ?? [])
           .map((row) => mapAgencyToSupabase(row, orgId))
           .filter((row) => row?.id)
 
     const communitiesRows = isRestrictedSuper
       ? []
-      : (app.communities ?? [])
+      : (sourceState?.communities ?? [])
           .map((row) => mapCommunityToSupabase(row, orgId))
           .filter((row) => row?.id)
 
     const subcontractorRows = isRestrictedSuper
       ? []
-      : (app.subcontractors ?? [])
+      : (sourceState?.subcontractors ?? [])
           .map((row) => mapSubcontractorToSupabase(row, orgId))
           .filter((row) => row?.id)
 
-    const lotsToSync = isRestrictedSuper ? (app.lots ?? []).filter((l) => myAssignedLotIds.has(l.id)) : app.lots ?? []
+    const lotsToSync = isRestrictedSuper
+      ? (sourceState?.lots ?? []).filter((l) => myAssignedLotIds.has(l.id))
+      : sourceState?.lots ?? []
     const lotRows = lotsToSync.map((row) => mapLotToSupabase(row, orgId)).filter((row) => row?.id)
 
     const taskRows = []
@@ -2258,7 +2417,7 @@ export default function BuildFlow() {
       }
     }
 
-    const deletedTaskIds = isRestrictedSuper ? [] : coerceArray(app.sync?.deleted_task_ids).filter(Boolean)
+    const deletedTaskIds = isRestrictedSuper ? [] : coerceArray(sourceState?.sync?.deleted_task_ids).filter(Boolean)
 
     const nextPayload = {
       orgId,
@@ -2279,7 +2438,9 @@ export default function BuildFlow() {
       payload: nextPayload,
       hash: nextHash,
     }
-  }
+  }, [myAssignedLotIds, supabaseStatus.orgId, supabaseStatus.role, supabaseUser?.id])
+
+  const buildCloudPayload = useCallback(() => buildCloudPayloadForState(app), [app, buildCloudPayloadForState])
 
   useEffect(() => {
     if (syncV2Enabled) return
@@ -2314,11 +2475,67 @@ export default function BuildFlow() {
       setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
       setCloudRetryTick((prev) => prev + 1)
     }
-  }, [app, supabaseUser?.id, supabaseStatus.orgId, supabaseStatus.phase, syncV2Enabled])
+  }, [buildCloudPayload, supabaseStatus.orgId, supabaseStatus.phase, supabaseUser?.id, syncV2Enabled])
+
+  useEffect(() => {
+    if (!syncV2Enabled || !supabaseUser?.id || supabaseStatus.phase !== 'ready') {
+      setSyncV2Status((prev) => ({
+        ...prev,
+        rpc_health: syncV2Enabled ? prev.rpc_health : 'disabled',
+      }))
+      return
+    }
+
+    let cancelled = false
+    setSyncV2Status((prev) => ({ ...prev, rpc_health: 'checking', warning: '', error: '' }))
+
+    const run = async () => {
+      const health = await syncV2HealthCheck({ supabase })
+      if (cancelled) return
+      if (health.ok) {
+        setSyncV2Status((prev) => ({
+          ...prev,
+          phase: prev.phase === 'idle' ? 'ready' : prev.phase,
+          rpc_health: 'healthy',
+          warning: '',
+          error: '',
+        }))
+        return
+      }
+
+      const msg = health.missing
+        ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).'
+        : `Sync v2 RPC health check failed (${health.stage}): ${String(health.error?.message ?? 'unknown error')}`
+
+      setSyncV2Status((prev) => ({
+        ...prev,
+        phase: 'error',
+        rpc_health: health.missing ? 'missing' : 'down',
+        warning: msg,
+        error: msg,
+      }))
+    }
+
+    void run().catch((err) => {
+      if (cancelled) return
+      setSyncV2Status((prev) => ({
+        ...prev,
+        phase: 'error',
+        rpc_health: 'down',
+        warning: prev.warning,
+        error: String(err?.message ?? 'Sync v2 health check failed'),
+      }))
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [syncV2Enabled, supabaseStatus.phase, supabaseUser?.id])
 
   useEffect(() => {
     if (!syncV2Enabled) return
     if (!supabaseUser?.id || supabaseStatus.phase !== 'ready') return
+    if (syncV2Status.rpc_health && syncV2Status.rpc_health !== 'healthy') return
 
     let cancelled = false
     let timer = null
@@ -2335,20 +2552,31 @@ export default function BuildFlow() {
       timer = setTimeout(() => tick(), Math.max(350, Number(ms) || 0))
     }
 
+    const setPendingOpsCount = async () => {
+      const all = await outboxList()
+      if (cancelled) return 0
+      const count = all.filter((op) => op && op.v2 === true).length
+      setSyncV2Status((prev) => ({ ...prev, pending_ops: count }))
+      return count
+    }
+
     const tick = async () => {
       if (cancelled) return
       if (inFlight) return
       inFlight = true
 
       const startedAt = new Date().toISOString()
-      setSyncV2Status((prev) => ({ ...prev, phase: 'syncing', error: '', warning: prev.warning }))
+      setSyncV2Status((prev) => ({ ...prev, phase: 'syncing', error: '', warning: prev.warning, rpc_health: 'healthy' }))
 
       try {
+        await setPendingOpsCount()
+
         // Push due ops (durable outbox)
         const due = await outboxListV2Due({ limit: 5 })
         if (cancelled) return
 
         if (due.length > 0) {
+          let pushHadIssues = false
           // Mark attempt + exponential backoff on errors.
           for (const op of due) {
             const attempts = (Number(op?.attempts ?? 0) || 0) + 1
@@ -2423,6 +2651,7 @@ export default function BuildFlow() {
 
               uploadedForOp.push({
                 id: item?.id,
+                op_id: op.id,
                 lot_id: row?.lot_id ?? null,
                 storage_bucket: bucket,
                 storage_path: path,
@@ -2450,6 +2679,7 @@ export default function BuildFlow() {
             setSyncV2Status((prev) => ({
               ...prev,
               phase: 'error',
+              rpc_health: missing ? 'missing' : 'degraded',
               warning: missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
               error: msg,
             }))
@@ -2469,8 +2699,76 @@ export default function BuildFlow() {
             return
           }
 
+          const resultRows = Array.isArray(pushRes.results) ? pushRes.results : []
+          const resultById = new Map(
+            resultRows
+              .map((row) => [String(row?.id ?? ''), row])
+              .filter(([id]) => id),
+          )
+
+          const appliedStatuses = new Set(['applied', 'ack', 'accepted'])
+          const terminalStatuses = new Set(['conflict', 'rejected', 'denied'])
+          const retryStatuses = new Set(['unknown', 'unavailable', 'retry'])
+
+          const idsToAck = []
+          const retryRows = []
+          const conflictRows = []
+          for (const op of ready) {
+            const id = String(op?.id ?? '')
+            if (!id) continue
+            const row = resultById.get(id) ?? null
+            const status = String(row?.status ?? 'unknown').toLowerCase()
+            if (appliedStatuses.has(status)) {
+              idsToAck.push(id)
+            } else if (terminalStatuses.has(status)) {
+              conflictRows.push(row ?? { id, status, conflict_reason: 'Conflict' })
+            } else if (retryStatuses.has(status) || !row) {
+              retryRows.push({ id, row, op, status })
+            } else {
+              retryRows.push({ id, row, op, status: 'unknown' })
+            }
+          }
+
+          if (conflictRows.length > 0) {
+            pushHadIssues = true
+            for (const row of conflictRows) {
+              const msg = String(row?.conflict_reason ?? row?.conflict_code ?? 'Conflict')
+              await outboxUpdate(row.id, {
+                last_error: msg,
+                last_error_at: new Date().toISOString(),
+                next_retry_at: null,
+              })
+            }
+            setSyncV2Status((prev) => ({
+              ...prev,
+              phase: 'error',
+              error: `${conflictRows.length} sync conflict${conflictRows.length === 1 ? '' : 's'} require resolution`,
+            }))
+          }
+
+          if (retryRows.length > 0) {
+            pushHadIssues = true
+            for (const entry of retryRows) {
+              const msg = String(entry?.row?.conflict_reason ?? entry?.row?.conflict_code ?? `Sync op not acknowledged (${entry.status})`)
+              const attempts = Number(entry?.op?.attempts ?? 0) || 0
+              const backoff = Math.min(300000, 8000 * Math.pow(2, Math.max(0, attempts)))
+              await outboxUpdate(entry.id, {
+                last_error: msg,
+                last_error_at: new Date().toISOString(),
+                next_retry_at: new Date(Date.now() + backoff).toISOString(),
+              })
+            }
+            setSyncV2Status((prev) => ({
+              ...prev,
+              phase: 'error',
+              warning: prev.warning || 'One or more sync ops were not acknowledged by the server contract.',
+              error: `${retryRows.length} op${retryRows.length === 1 ? '' : 's'} pending server acknowledgement`,
+            }))
+          }
+
           // Mark local photos as synced when their attachment metadata is pushed.
-          if (uploadedAttachmentRefs.length > 0) {
+          if (uploadedAttachmentRefs.length > 0 && idsToAck.length > 0) {
+            const ackedSet = new Set(idsToAck)
             const byId = new Map(uploadedAttachmentRefs.map((r) => [r.id, r]))
             setApp((prev) => ({
               ...prev,
@@ -2479,6 +2777,7 @@ export default function BuildFlow() {
                 let changed = false
                 const nextPhotos = photos.map((p) => {
                   const ref = p?.id ? byId.get(p.id) : null
+                  if (ref?.op_id && !ackedSet.has(String(ref.op_id))) return p
                   if (!ref) return p
                   changed = true
                   return {
@@ -2496,9 +2795,29 @@ export default function BuildFlow() {
             }))
           }
 
-          await outboxAck(ready.map((op) => op.id))
+          if (idsToAck.length > 0) {
+            await outboxAck(idsToAck)
+          }
           setIsOnline(true)
-          setSyncV2Status((prev) => ({ ...prev, last_pushed_at: pushRes.server_time ?? new Date().toISOString() }))
+          setSyncV2Status((prev) => ({
+            ...prev,
+            rpc_health: 'healthy',
+            last_pushed_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.last_pushed_at ?? null,
+          }))
+          setApp((prev) => ({
+            ...prev,
+            sync: {
+              ...(prev.sync ?? {}),
+              pending: idsToAck.length > 0 ? (prev.sync?.pending ?? []).filter((op) => !idsToAck.includes(String(op?.id ?? ''))) : prev.sync?.pending ?? [],
+              last_synced_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.sync?.last_synced_at ?? null,
+            },
+          }))
+
+          await setPendingOpsCount()
+          if (pushHadIssues) {
+            scheduleNext(7000)
+            return
+          }
         }
 
         // Pull incremental changes
@@ -2511,6 +2830,7 @@ export default function BuildFlow() {
           setSyncV2Status((prev) => ({
             ...prev,
             phase: 'error',
+            rpc_health: pullRes.missing ? 'missing' : 'degraded',
             warning: pullRes.missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
             error: msg,
           }))
@@ -2743,12 +3063,21 @@ export default function BuildFlow() {
         })
 
         await setSyncV2Cursor(serverTime)
-        setSyncV2Status((prev) => ({ ...prev, phase: 'ready', last_pulled_at: serverTime, error: '', warning: prev.warning }))
+        const outboxAfterPullCount = await setPendingOpsCount()
+        setSyncV2Status((prev) => ({
+          ...prev,
+          phase: 'ready',
+          rpc_health: 'healthy',
+          last_pulled_at: serverTime,
+          pending_ops: outboxAfterPullCount,
+          error: '',
+          warning: '',
+        }))
 
         scheduleNext(4500)
       } catch (err) {
         const msg = String(err?.message ?? 'Sync v2 failed')
-        setSyncV2Status((prev) => ({ ...prev, phase: 'error', error: msg }))
+        setSyncV2Status((prev) => ({ ...prev, phase: 'error', rpc_health: 'degraded', error: msg }))
         if (looksLikeNetworkError(err)) setIsOnline(false)
         scheduleNext(12000)
       } finally {
@@ -2762,13 +3091,13 @@ export default function BuildFlow() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase])
+  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase, syncV2Status.rpc_health])
 
   const pendingSyncOps = app.sync?.pending ?? []
   const pendingSyncCount = pendingSyncOps.length
   const lastSyncedAt = app.sync?.last_synced_at ?? null
   const isGuestSession = Boolean(supabaseUser?.is_anonymous)
-  const cloudQueue = Array.isArray(app.sync?.cloud_queue) ? app.sync.cloud_queue : []
+  const cloudQueue = useMemo(() => (Array.isArray(app.sync?.cloud_queue) ? app.sync.cloud_queue : []), [app.sync?.cloud_queue])
   const cloudQueueCount = cloudQueue.length
   const cloudHasPending =
     cloudQueueCount > 0 ||
@@ -2798,16 +3127,71 @@ export default function BuildFlow() {
     if (cloudQueueCount > 0 || writeSyncState.phase === 'pending') return 'Pending'
     return 'Synced'
   })()
+  const baselineMeta = app?.sync?.baseline_meta ?? null
+  const baselineProtection = app?.sync?.baseline_protection ?? {}
+  const baselineProtectionEnabled = Boolean(
+    baselineProtection?.enabled === true ||
+      baselineMeta?.baseline_id ||
+      app?.org?.is_demo,
+  )
+  const syncV2Required = Boolean(app?.org?.is_demo || baselineProtectionEnabled)
+  const syncV2RpcHealthy = syncV2Status?.rpc_health === 'healthy'
+  const activeOverrideUntilMs = readOverrideUntilMs()
+  const hasDestructiveOverride = hasActiveBaselineOverride()
+  const syncStatus = useMemo(
+    () => ({
+      phase: syncV2Enabled ? syncV2Status?.phase ?? 'idle' : writeSyncState?.phase ?? 'idle',
+      pending_count: Number(pendingSyncCount || 0) + Number(cloudQueueCount || 0) + Number(syncV2Status?.pending_ops || 0),
+      last_ack_at: syncV2Status?.last_pushed_at ?? cloudLastSyncedAt ?? lastSyncedAt ?? null,
+      last_error: syncV2Status?.error || cloudLastError || writeSyncState?.error || '',
+      rpc_health: syncV2Enabled ? syncV2Status?.rpc_health ?? 'unknown' : 'legacy',
+      baseline_protection: baselineProtectionEnabled,
+    }),
+    [
+      syncV2Enabled,
+      syncV2Status?.phase,
+      syncV2Status?.pending_ops,
+      syncV2Status?.last_pushed_at,
+      syncV2Status?.error,
+      syncV2Status?.rpc_health,
+      writeSyncState?.phase,
+      writeSyncState?.error,
+      pendingSyncCount,
+      cloudQueueCount,
+      cloudLastSyncedAt,
+      lastSyncedAt,
+      cloudLastError,
+      baselineProtectionEnabled,
+    ],
+  )
 
   useEffect(() => {
     if (!supabaseUser?.id) {
       setWriteSyncState({ phase: 'idle', lastSyncedAt: null, error: '' })
       return
     }
-    if (cloudQueue.length === 0 && writeSyncState.phase !== 'syncing') {
-      setWriteSyncState((prev) => (prev.phase === 'synced' ? prev : { ...prev, phase: 'synced', error: '' }))
+    if (cloudQueue.length === 0 && writeSyncState.phase !== 'syncing' && writeSyncState.phase !== 'error') {
+      const hasAck = Boolean(app?.sync?.cloud_last_synced_at || app?.sync?.last_synced_at)
+      const nextPhase = hasAck ? 'synced' : 'idle'
+      setWriteSyncState((prev) =>
+        prev.phase === nextPhase && prev.error === ''
+          ? prev
+          : {
+              ...prev,
+              phase: nextPhase,
+              lastSyncedAt: app?.sync?.cloud_last_synced_at ?? prev.lastSyncedAt ?? null,
+              error: '',
+            },
+      )
     }
-  }, [cloudQueue.length, supabaseUser?.id])
+  }, [app?.sync?.cloud_last_synced_at, app?.sync?.last_synced_at, cloudQueue.length, supabaseUser?.id, writeSyncState.phase])
+
+  useEffect(() => {
+    if (!syncV2Required) return
+    if (syncV2Enabled) return
+    setSyncV2Enabled(true)
+    writeFlag('bf:sync_v2', true)
+  }, [syncV2Required, syncV2Enabled])
 
   useEffect(() => {
     if (cloudQueue.length === 0) return
@@ -2910,28 +3294,13 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [cloudQueue, supabaseUser?.id, supabaseStatus.phase, isOnline, cloudRetryTick, syncV2Enabled])
+  }, [buildCloudPayload, cloudQueue, cloudRetryTick, isOnline, supabaseStatus.phase, supabaseUser?.id, syncV2Enabled])
 
   useEffect(() => {
     const onOnline = () => {
       setIsOnline(true)
-      // Simulated "sync": mark queued items as synced when connectivity returns.
-      setApp((prev) => {
-        const now = new Date().toISOString()
-        return {
-          ...prev,
-          lots: (prev.lots ?? []).map((lot) => ({
-            ...lot,
-            photos: (lot.photos ?? []).map((p) => (p && !p.synced ? { ...p, synced: true, sync_error: null } : p)),
-          })),
-          messages: (prev.messages ?? []).map((m) => (m && m.status === 'queued' ? { ...m, status: 'sent', sent_at: now } : m)),
-          sync: {
-            ...(prev.sync ?? {}),
-            pending: [],
-            last_synced_at: now,
-          },
-        }
-      })
+      setCloudRetryTick((prev) => prev + 1)
+      setWriteSyncState((prev) => (prev.phase === 'error' ? { ...prev, phase: 'pending' } : prev))
     }
     const onOffline = () => setIsOnline(false)
     window.addEventListener('online', onOnline)
@@ -3177,12 +3546,20 @@ export default function BuildFlow() {
 
   const enqueueSyncOp = ({ type, lot_id, entity_type, entity_id, summary }) => {
     const now = new Date().toISOString()
+    const opId = uuid()
+    const actorId = supabaseUser?.id ?? app?.sync?.supabase_user_id ?? 'local'
     const op = {
-      id: uuid(),
+      id: opId,
+      op_id: opId,
       type,
       lot_id: lot_id ?? null,
+      entity: entity_type ?? 'app',
       entity_type: entity_type ?? null,
       entity_id: entity_id ?? null,
+      op_type: type,
+      payload: { summary: summary ?? '' },
+      base_version: null,
+      actor_id: actorId,
       summary: summary ?? '',
       created_at: now,
     }
@@ -3190,7 +3567,7 @@ export default function BuildFlow() {
     // Best-effort: mirror into IndexedDB outbox so v2 sync can pick it up later.
     // (Do not await; UI must stay responsive and localStorage snapshot remains the primary durability today.)
     try {
-      Promise.resolve().then(() => outboxEnqueue({ ...op, next_retry_at: null }))
+      Promise.resolve().then(() => outboxEnqueue({ ...op, v2: false, next_retry_at: null }))
     } catch {
       // ignore
     }
@@ -3333,8 +3710,14 @@ export default function BuildFlow() {
 
     return {
       id: opId,
+      op_id: opId,
       v2: true,
       kind: 'tasks_batch',
+      entity: 'task',
+      entity_id: lotId,
+      op_type: 'tasks_batch',
+      base_version: canIncludeLotPatch ? lotBaseVersion : null,
+      actor_id: userId,
       lot_id: lotId,
       entity_ids: tasksPayload.map((t) => t.id).filter(Boolean),
       created_at: now,
@@ -3384,8 +3767,14 @@ export default function BuildFlow() {
 
     return {
       id: opId,
+      op_id: opId,
       v2: true,
       kind: 'attachments_batch',
+      entity: 'attachment',
+      entity_id: attachmentId,
+      op_type: 'attachments_batch',
+      base_version: null,
+      actor_id: userId,
       lot_id: lotId,
       entity_ids: [attachmentId].filter(Boolean),
       created_at: now,
@@ -3423,8 +3812,14 @@ export default function BuildFlow() {
 
     return {
       id: opId,
+      op_id: opId,
       v2: true,
       kind: 'attachments_batch',
+      entity: 'attachment',
+      entity_id: attachmentId,
+      op_type: 'attachments_batch',
+      base_version: Number(baseVersion),
+      actor_id: userId,
       lot_id: lotId,
       entity_ids: [attachmentId].filter(Boolean),
       created_at: now,
@@ -3439,23 +3834,13 @@ export default function BuildFlow() {
   const syncNow = () => {
     if (!isOnline) return
     setApp((prev) => {
-      const now = new Date().toISOString()
       const sync = prev.sync ?? {}
       const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
       const refreshedQueue = queue.map((item) => ({ ...item, next_retry_at: null }))
       return {
         ...prev,
-        lots: (prev.lots ?? []).map((lot) => ({
-          ...lot,
-          photos: (lot.photos ?? []).map((p) => (p && !p.synced ? { ...p, synced: true, sync_error: null } : p)),
-        })),
-        messages: (prev.messages ?? []).map((m) =>
-          m && m.status === 'queued' ? { ...m, status: 'sent', sent_at: now } : m,
-        ),
         sync: {
           ...sync,
-          pending: [],
-          last_synced_at: now,
           cloud_queue: refreshedQueue,
           cloud_last_error: '',
           cloud_last_error_at: null,
@@ -3468,7 +3853,289 @@ export default function BuildFlow() {
     }
   }
 
+  const ensureDestructiveOverride = (actionLabel) => {
+    if (!baselineProtectionEnabled) return true
+    if (hasDestructiveOverride) return true
+
+    if (!BASELINE_OVERRIDE_TOKEN) {
+      alert(
+        `Baseline-protected mode is enabled. ${actionLabel} is blocked until an override token is configured (VITE_BASELINE_OVERRIDE_TOKEN).`,
+      )
+      return false
+    }
+
+    const entered = typeof window === 'undefined' ? '' : window.prompt(`Enter override token to ${actionLabel}:`, '')
+    if (String(entered ?? '').trim() !== BASELINE_OVERRIDE_TOKEN) {
+      alert('Invalid override token. Destructive operation blocked.')
+      return false
+    }
+
+    const untilMs = writeBaselineOverrideWindow(BASELINE_OVERRIDE_WINDOW_MS)
+    if (untilMs) {
+      alert(`Override granted until ${new Date(untilMs).toLocaleString()}.`)
+    }
+    return true
+  }
+
+  const captureBaselineFromState = async (state, { baselineId = BASELINE_DEFAULT_ID, label = 'demo_baseline_capture' } = {}) => {
+    const orgId = supabaseStatus?.orgId ?? state?.sync?.supabase_org_id ?? state?.org?.id ?? null
+    const artifact = await buildBaselineArtifact({
+      state,
+      baselineId,
+      orgId,
+      label,
+    })
+    await persistBaselineArtifact(artifact)
+    setApp((prev) => withBaselineMetadata(prev, artifact.metadata))
+    return artifact
+  }
+
+  const captureDemoBaseline = async ({ quiet = false } = {}) => {
+    const snapshot = latestAppRef.current
+    if (!snapshot || typeof snapshot !== 'object') return null
+    setBaselineBusy(true)
+    setBaselineError('')
+    try {
+      const artifact = await captureBaselineFromState(snapshot, {
+        baselineId: BASELINE_DEFAULT_ID,
+        label: 'demo_baseline_capture',
+      })
+      if (!quiet) {
+        alert(
+          `Captured baseline ${artifact.metadata.baseline_id} (${artifact.metadata.checksum.slice(0, 12)}...). Protected mode is active.`,
+        )
+      }
+      return artifact
+    } catch (err) {
+      const message = String(err?.message ?? 'Baseline capture failed')
+      setBaselineError(message)
+      if (!quiet) alert(message)
+      return null
+    } finally {
+      setBaselineBusy(false)
+    }
+  }
+
+  const exportActiveBaseline = async () => {
+    setBaselineBusy(true)
+    setBaselineError('')
+    try {
+      const artifact = (await loadBaselineArtifact()) ?? (await captureDemoBaseline({ quiet: true }))
+      if (!artifact) {
+        alert('No baseline available to export.')
+        return
+      }
+      const fileName = `${artifact?.metadata?.baseline_id ?? BASELINE_DEFAULT_ID}-${(artifact?.metadata?.created_at ?? new Date().toISOString()).replaceAll(':', '-').slice(0, 19)}.json`
+      downloadJsonFile(fileName, baselineArtifactToJson(artifact))
+    } catch (err) {
+      const message = String(err?.message ?? 'Baseline export failed')
+      setBaselineError(message)
+      alert(message)
+    } finally {
+      setBaselineBusy(false)
+    }
+  }
+
+  const applyBaselineArtifactLocally = async (artifact) => {
+    if (!artifact || typeof artifact !== 'object') throw new Error('Invalid baseline artifact.')
+    const check = await verifyBaselineArtifact(artifact)
+    if (!check.ok) {
+      throw new Error(
+        `Baseline checksum mismatch (${check.reason || 'invalid'}). Expected ${check.expected || 'n/a'}, got ${check.actual || 'n/a'}.`,
+      )
+    }
+
+    const metadata = artifact.metadata ?? null
+    const nextState = withBaselineMetadata(artifact.state, metadata)
+    latestAppRef.current = nextState
+    setApp(nextState)
+    saveAppState(nextState)
+
+    await clearLocalDb()
+    await importSnapshotV1(nextState, { org_id: metadata?.org_id ?? supabaseStatus?.orgId ?? null })
+    if (Array.isArray(artifact.idb_outbox) && artifact.idb_outbox.length > 0) {
+      // Do not rehydrate attachment uploads that depend on local blobs not present on a clean device.
+      const safeOps = artifact.idb_outbox
+        .filter((op) => op?.id)
+        .filter((op) => {
+          if (String(op?.kind ?? '') !== 'attachments_batch') return true
+          const items = Array.isArray(op?.payload?.attachments) ? op.payload.attachments : []
+          return items.every((item) => String(item?.action ?? '') === 'delete')
+        })
+      if (safeOps.length > 0) {
+        await outboxEnqueueMany(safeOps)
+      }
+    }
+    if (artifact.sync_v2_cursor) {
+      await setSyncV2Cursor(artifact.sync_v2_cursor)
+    }
+    await persistBaselineArtifact({ ...artifact, state: nextState })
+    return nextState
+  }
+
+  const setServerBaselineProtection = async ({ enabled, baselineId, checksum } = {}) => {
+    if (!supabaseUser?.id || !supabaseStatus?.orgId || supabaseStatus.phase !== 'ready') {
+      return { ok: false, skipped: true, reason: 'not_ready' }
+    }
+
+    const { data, error } = await supabase.rpc('set_demo_baseline_protection', {
+      p_enabled: Boolean(enabled),
+      p_baseline_id: baselineId ?? null,
+      p_baseline_checksum: checksum ?? null,
+    })
+
+    if (error) {
+      const code = String(error?.code ?? '')
+      const msgLower = String(error?.message ?? '').toLowerCase()
+      const missing = code === '42883' || (msgLower.includes('set_demo_baseline_protection') && msgLower.includes('does not exist'))
+      if (missing) {
+        throw new Error('Baseline protection RPC is missing. Apply Supabase hardening SQL (011) before promoting demo baseline.')
+      }
+      throw new Error(`Failed to update server baseline protection: ${String(error?.message ?? 'unknown error')}`)
+    }
+
+    const row = Array.isArray(data) ? data[0] ?? null : data
+    return { ok: true, row }
+  }
+
+  const importBaselineFromFile = async () => {
+    setBaselineBusy(true)
+    setBaselineError('')
+    try {
+      const picked = await pickJsonFile()
+      if (!picked?.text) return
+      const parsed = JSON.parse(picked.text)
+      await applyBaselineArtifactLocally(parsed)
+      alert('Baseline imported locally.')
+    } catch (err) {
+      const message = String(err?.message ?? 'Baseline import failed')
+      setBaselineError(message)
+      alert(message)
+    } finally {
+      setBaselineBusy(false)
+    }
+  }
+
+  const promoteStateToSupabase = async (state, { label = 'baseline_promotion' } = {}) => {
+    if (!isOnline) throw new Error('Internet connection required for Supabase promotion.')
+    if (!supabaseUser?.id || !supabaseStatus?.orgId || supabaseStatus.phase !== 'ready') {
+      throw new Error('Sign in and wait for Supabase ready before promoting baseline.')
+    }
+    const built = buildCloudPayloadForState(state)
+    if (!built) throw new Error('Unable to build Supabase payload for baseline promotion.')
+    const result = await syncPayloadToSupabase(built.payload)
+    const syncedAt = result?.syncedAt ?? new Date().toISOString()
+    setWriteSyncState({ phase: 'synced', lastSyncedAt: syncedAt, error: '' })
+    setApp((prev) => ({
+      ...prev,
+      sync: {
+        ...(prev.sync ?? {}),
+        cloud_queue: [],
+        cloud_last_synced_at: syncedAt,
+        cloud_last_synced_hash: built.hash,
+        cloud_last_queued_hash: built.hash,
+        cloud_last_error: '',
+        cloud_last_error_at: null,
+        pending: [],
+        last_synced_at: syncedAt,
+      },
+    }))
+    return { syncedAt, hash: built.hash, label }
+  }
+
+  const promoteBaselineToSupabase = async () => {
+    setBaselineBusy(true)
+    setBaselineError('')
+    try {
+      const artifact = (await loadBaselineArtifact()) ?? (await captureDemoBaseline({ quiet: true }))
+      if (!artifact) {
+        alert('No baseline artifact available.')
+        return
+      }
+      const confirmed =
+        typeof window === 'undefined'
+          ? false
+          : window.confirm(
+              `Promote ${artifact?.metadata?.baseline_id ?? BASELINE_DEFAULT_ID} to Supabase now?\n\nThis updates shared demo data for all devices.`,
+            )
+      if (!confirmed) return
+
+      await promoteStateToSupabase(artifact.state, { label: 'baseline_promote' })
+      await setServerBaselineProtection({
+        enabled: true,
+        baselineId: artifact?.metadata?.baseline_id ?? BASELINE_DEFAULT_ID,
+        checksum: artifact?.metadata?.checksum ?? '',
+      })
+      const nextArtifact = {
+        ...artifact,
+        metadata: {
+          ...(artifact.metadata ?? {}),
+          last_promoted_at: new Date().toISOString(),
+          last_promoted_by: supabaseUser?.id ?? null,
+        },
+      }
+      await persistBaselineArtifact(nextArtifact)
+      setApp((prev) => withBaselineMetadata(prev, nextArtifact.metadata))
+      setSupabaseBootstrapVersion((prev) => prev + 1)
+      alert('Baseline promoted to Supabase successfully.')
+    } catch (err) {
+      const message = String(err?.message ?? 'Baseline promotion failed')
+      setBaselineError(message)
+      alert(message)
+    } finally {
+      setBaselineBusy(false)
+    }
+  }
+
+  const rollbackToActiveBaseline = async () => {
+    setBaselineBusy(true)
+    setBaselineError('')
+    try {
+      const activeArtifact = await loadBaselineArtifact()
+      if (!activeArtifact) {
+        alert('No active baseline captured yet.')
+        return
+      }
+      const confirmed =
+        typeof window === 'undefined'
+          ? false
+          : window.confirm(
+              `Rollback to ${activeArtifact?.metadata?.baseline_id ?? BASELINE_DEFAULT_ID} now?\n\nRTO target: ${BASELINE_RTO_TARGET_MINUTES} minutes.`,
+            )
+      if (!confirmed) return
+
+      const preRollback = await buildBaselineArtifact({
+        state: latestAppRef.current,
+        baselineId: `restore_point_${new Date().toISOString().replaceAll(':', '-').slice(0, 19)}`,
+        orgId: supabaseStatus?.orgId ?? latestAppRef.current?.sync?.supabase_org_id ?? null,
+        label: 'pre_rollback_snapshot',
+      })
+      await persistRestorePoint(preRollback)
+
+      const restoredState = await applyBaselineArtifactLocally(activeArtifact)
+      if (supabaseUser?.id && isOnline && supabaseStatus.phase === 'ready') {
+        await promoteStateToSupabase(restoredState, { label: 'baseline_rollback' })
+        await setServerBaselineProtection({
+          enabled: true,
+          baselineId: activeArtifact?.metadata?.baseline_id ?? BASELINE_DEFAULT_ID,
+          checksum: activeArtifact?.metadata?.checksum ?? '',
+        })
+        setSupabaseBootstrapVersion((prev) => prev + 1)
+      }
+      alert('Rollback complete.')
+    } catch (err) {
+      const message = String(err?.message ?? 'Baseline rollback failed')
+      setBaselineError(message)
+      alert(message)
+    } finally {
+      setBaselineBusy(false)
+    }
+  }
+
   const resetDemo = () => {
+    if (!ensureDestructiveOverride('reset local demo data')) return
+    const confirmed = typeof window === 'undefined' ? false : window.confirm('Reset local app data to seed defaults on this device?')
+    if (!confirmed) return
     clearAppState()
     setApp(createSeedState())
     setTab('dashboard')
@@ -3479,22 +4146,6 @@ export default function BuildFlow() {
 
   const setAuthField = (field, value) => {
     setAuthDraft((prev) => ({ ...prev, [field]: value }))
-  }
-
-  const ensureGuestOrg = async () => {
-    if (!supabaseUser?.is_anonymous) return null
-    const { data, error } = await supabase.rpc('ensure_guest_org')
-    if (error) {
-      setSupabaseStatus((prev) => ({
-        ...prev,
-        phase: 'error',
-        message: `Guest org provisioning failed: ${error.message}`,
-        loadedAt: new Date().toISOString(),
-      }))
-      return null
-    }
-    const row = Array.isArray(data) ? data[0] ?? null : data
-    return row
   }
 
   const refreshLotAssignments = async (overrideOrgId = null) => {
@@ -3657,19 +4308,28 @@ export default function BuildFlow() {
 
   const resetRemoteSeed = async () => {
     if (!supabaseUser?.id) return
+    if (!ensureDestructiveOverride('reset remote demo seed data')) return
 
     const confirmed = typeof window === 'undefined' ? false : window.confirm('Reset all remote data back to the seed baseline? This will overwrite current Supabase data for this org.')
     if (!confirmed) return
 
+    const forceReset = hasActiveBaselineOverride()
     setResetSeedBusy(true)
-    const { error } = await supabase.rpc('reset_buildflow_seed', { target_org_id: supabaseStatus.orgId ?? null })
+    const { error } = await supabase.rpc('reset_buildflow_seed', {
+      target_org_id: supabaseStatus.orgId ?? null,
+      p_force: forceReset,
+    })
     setResetSeedBusy(false)
 
     if (error) {
+      const msg = String(error?.message ?? '')
+      const protectedMode = msg.toLowerCase().includes('baseline protection')
       setSupabaseStatus((prev) => ({
         ...prev,
         phase: 'error',
-        message: `Seed reset failed: ${error.message}`,
+        message: protectedMode
+          ? `Seed reset blocked: ${msg}`
+          : `Seed reset failed: ${msg}`,
         loadedAt: new Date().toISOString(),
       }))
       return
@@ -3708,7 +4368,7 @@ export default function BuildFlow() {
     scheduleEditLockRef.current = scheduleEditLock
   }, [scheduleEditLock])
 
-  const releaseScheduleEditLock = async (token) => {
+  const releaseScheduleEditLock = useCallback(async (token) => {
     const toRelease = token ?? scheduleEditLockRef.current?.token ?? null
     if (!toRelease) return
     if (!isOnline) return
@@ -3719,7 +4379,7 @@ export default function BuildFlow() {
       void _err
       // Best-effort only.
     }
-  }
+  }, [isOnline, supabaseUser?.id])
 
   useEffect(() => {
     // Be polite: when leaving a lot, release the lock early instead of waiting for TTL expiry.
@@ -3742,14 +4402,14 @@ export default function BuildFlow() {
           : prev,
       )
     }
-  }, [selectedLotId])
+  }, [releaseScheduleEditLock, selectedLotId])
 
   useEffect(() => {
     return () => {
       const current = scheduleEditLockRef.current
       if (current?.token) void releaseScheduleEditLock(current.token)
     }
-  }, [])
+  }, [releaseScheduleEditLock])
 
   const isScheduleLockValidFor = (lock, lotId) => {
     if (!lock?.token || !lock?.expiresAt) return false
@@ -3763,10 +4423,26 @@ export default function BuildFlow() {
   const ensureScheduleEditLock = async (lotId, { ttlSeconds = 300, quiet = false } = {}) => {
     const resolvedLotId = String(lotId ?? '').trim()
     if (!resolvedLotId) return { ok: true, mode: 'noop' }
+    const strictMode = syncV2Required
 
-    // Offline-first: locks are advisory and can't be required offline.
+    // In demo/baseline-protected mode, schedule edits are fail-closed.
     if (!isOnline || !supabaseUser?.id || supabaseStatus.phase !== 'ready') {
-      return { ok: true, mode: 'offline' }
+      if (!strictMode) return { ok: true, mode: 'offline' }
+      const reason = !isOnline
+        ? 'Schedule editing is blocked while offline in baseline-protected mode.'
+        : 'Schedule editing requires an authenticated Supabase session.'
+      setScheduleEditLock((prev) => ({
+        ...prev,
+        lotId: resolvedLotId,
+        token: null,
+        expiresAt: null,
+        lockedBy: null,
+        warning: '',
+        warningUntil: null,
+        error: reason,
+      }))
+      if (!quiet) alert(reason)
+      return { ok: false, mode: 'unavailable', error: reason }
     }
 
     const current = scheduleEditLockRef.current
@@ -3783,9 +4459,6 @@ export default function BuildFlow() {
       return scheduleEditLockAcquireRef.current.promise
     }
 
-    const orgIsDemo = Boolean(app.org?.is_demo)
-    const isDemoLike = orgIsDemo || Boolean(isGuestSession)
-
     const promise = (async () => {
       setScheduleEditLock((prev) => ({ ...prev, warning: '', warningUntil: null, error: '' }))
 
@@ -3794,20 +4467,116 @@ export default function BuildFlow() {
         void releaseScheduleEditLock(current.token)
       }
 
-      const { data, error } = await supabase.rpc('acquire_lot_lock', {
+      const isMissingRpc = (fnName, code, messageLower) => {
+        return String(code ?? '') === '42883' || (String(messageLower ?? '').includes(fnName) && String(messageLower ?? '').includes('does not exist'))
+      }
+
+      let data = null
+      let error = null
+
+      const v2 = await supabase.rpc('acquire_lot_lock_v2', {
         p_lot_id: resolvedLotId,
         p_ttl_seconds: ttlSeconds,
       })
+
+      if (!v2.error) {
+        const row = Array.isArray(v2.data) ? v2.data[0] : v2.data
+        if (row && typeof row === 'object' && Object.prototype.hasOwnProperty.call(row, 'ok')) {
+          if (row.ok === true) {
+            data = row
+          } else {
+            const code = String(row.code ?? '').toLowerCase()
+            const message = String(row.message ?? 'Unable to acquire lock')
+            if (code.includes('locked')) {
+              setScheduleEditLock((prev) => ({
+                ...prev,
+                lotId: resolvedLotId,
+                token: null,
+                expiresAt: null,
+                lockedBy: row.locked_by ?? null,
+                warning: '',
+                warningUntil: null,
+                error: message,
+              }))
+              const now = Date.now()
+              if (!quiet && now - scheduleEditLockLastDenyAtRef.current > 1200) {
+                scheduleEditLockLastDenyAtRef.current = now
+                alert('This lot schedule is currently being edited by another user. Try again in a few minutes.')
+              }
+              return { ok: false, mode: 'blocked', error: message, code: row.code ?? null }
+            }
+
+            if (strictMode) {
+              const strictMessage = `Unable to acquire schedule lock (${row.code || 'unknown'}): ${message}`
+              setScheduleEditLock((prev) => ({
+                ...prev,
+                lotId: resolvedLotId,
+                token: null,
+                expiresAt: null,
+                lockedBy: null,
+                warning: '',
+                warningUntil: null,
+                error: strictMessage,
+              }))
+              if (!quiet) alert(strictMessage)
+              return { ok: false, mode: 'error', error: strictMessage, code: row.code ?? null }
+            }
+
+            setScheduleEditLock((prev) => ({
+              ...prev,
+              lotId: resolvedLotId,
+              token: null,
+              expiresAt: null,
+              lockedBy: null,
+              warning: message,
+              warningUntil: new Date(Date.now() + 60 * 1000).toISOString(),
+              error: '',
+            }))
+            return { ok: true, mode: 'warning', warning: message, code: row.code ?? null }
+          }
+        } else {
+          error = { code: 'P0001', message: 'acquire_lot_lock_v2 contract mismatch' }
+        }
+      } else {
+        const message = String(v2.error?.message ?? '').toLowerCase()
+        const code = String(v2.error?.code ?? '')
+        const missingV2 = isMissingRpc('acquire_lot_lock_v2', code, message)
+        if (missingV2) {
+          if (strictMode) {
+            const strictMessage = 'Schedule locking RPC (acquire_lot_lock_v2) is unavailable. Editing is blocked until lock contracts are deployed.'
+            setScheduleEditLock((prev) => ({
+              ...prev,
+              lotId: resolvedLotId,
+              token: null,
+              expiresAt: null,
+              lockedBy: null,
+              warning: '',
+              warningUntil: null,
+              error: strictMessage,
+            }))
+            if (!quiet) alert(strictMessage)
+            return { ok: false, mode: 'missing_rpc', error: strictMessage }
+          }
+
+          const legacy = await supabase.rpc('acquire_lot_lock', {
+            p_lot_id: resolvedLotId,
+            p_ttl_seconds: ttlSeconds,
+          })
+          data = legacy.data
+          error = legacy.error
+        } else {
+          error = v2.error
+        }
+      }
 
       if (error) {
         const message = String(error?.message ?? 'Unable to acquire lock')
         const code = String(error?.code ?? '')
         const msgLower = message.toLowerCase()
         const looksLikeLockConflict = msgLower.includes('locked by another user') || msgLower.includes('locked')
-        const looksLikeMissingRpc =
-          code === '42883' || (msgLower.includes('acquire_lot_lock') && msgLower.includes('does not exist'))
+        const looksLikeMissingRpc = isMissingRpc('acquire_lot_lock', code, msgLower)
 
-        if (looksLikeLockConflict && !isDemoLike) {
+        if (looksLikeLockConflict) {
           setScheduleEditLock((prev) => ({
             ...prev,
             lotId: resolvedLotId,
@@ -3826,7 +4595,24 @@ export default function BuildFlow() {
           return { ok: false, mode: 'blocked', error: message }
         }
 
-        // Demo orgs keep moving; and in prod we still allow edits if locks aren't configured yet.
+        if (strictMode) {
+          const strictMessage = looksLikeMissingRpc
+            ? 'Schedule locking RPC is unavailable. Editing is blocked until lock contracts are deployed.'
+            : `Unable to acquire schedule lock: ${message}`
+          setScheduleEditLock((prev) => ({
+            ...prev,
+            lotId: resolvedLotId,
+            token: null,
+            expiresAt: null,
+            lockedBy: null,
+            warning: '',
+            warningUntil: null,
+            error: strictMessage,
+          }))
+          if (!quiet) alert(strictMessage)
+          return { ok: false, mode: looksLikeMissingRpc ? 'missing_rpc' : 'error', error: strictMessage }
+        }
+
         const warning = looksLikeMissingRpc
           ? 'Schedule locking is not configured on this server yet. Edits may conflict across devices.'
           : message
@@ -3874,6 +4660,16 @@ export default function BuildFlow() {
     if (!canEditLot(lotId)) {
       alert('Read-only: you are not assigned to this lot. Claim it in Overview to edit the schedule.')
       return false
+    }
+    if (syncV2Required) {
+      if (!syncV2Enabled) {
+        alert('Sync v2 is required for this demo dataset. Enable Sync v2 before editing schedule data.')
+        return false
+      }
+      if (!syncV2RpcHealthy) {
+        alert('Sync v2 RPC health check failed. Schedule edits are blocked until sync contracts are healthy.')
+        return false
+      }
     }
     const lockResult = await ensureScheduleEditLock(lotId)
     if (!lockResult.ok) return false
@@ -7037,6 +7833,7 @@ export default function BuildFlow() {
   const unstartLot = async (lotId) => {
     const lot = lotId ? lotsById.get(lotId) : null
     if (!lot) return
+    if (!ensureDestructiveOverride(`unstart ${lotCode(lot)}`)) return
     if (!isOnline) {
       alert('Unstart requires a connection right now.')
       return
@@ -7306,6 +8103,47 @@ export default function BuildFlow() {
                   ) : null}
                 </div>
               )}
+
+              <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/60 p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-blue-900">Demo Baseline</p>
+                    <p className="text-xs text-blue-800 mt-1">
+                      {baselineMeta?.baseline_id
+                        ? `${baselineMeta.baseline_id} • ${String(baselineMeta.checksum ?? '').slice(0, 12)}...`
+                        : 'No baseline captured yet.'}
+                    </p>
+                    <p className="text-xs text-blue-800 mt-1">
+                      Protection: {baselineProtectionEnabled ? 'Enabled' : 'Disabled'}
+                      {hasDestructiveOverride
+                        ? ` (override until ${new Date(activeOverrideUntilMs).toLocaleTimeString()})`
+                        : ''}
+                    </p>
+                  </div>
+                  {baselineBusy ? <span className="text-xs text-blue-700">Working...</span> : null}
+                </div>
+                {baselineError ? <p className="text-xs text-red-600">{baselineError}</p> : null}
+                <div className="grid grid-cols-2 gap-2">
+                  <SecondaryButton onClick={() => void captureDemoBaseline()} disabled={baselineBusy} className="border-blue-200">
+                    Capture
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => void promoteBaselineToSupabase()} disabled={baselineBusy || !supabaseUser?.id} className="border-blue-200">
+                    Promote
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => void exportActiveBaseline()} disabled={baselineBusy} className="border-blue-200">
+                    Export JSON
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => void importBaselineFromFile()} disabled={baselineBusy} className="border-blue-200">
+                    Import JSON
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => void rollbackToActiveBaseline()} disabled={baselineBusy} className="col-span-2 border-amber-200 text-amber-700">
+                    Rollback to Baseline
+                  </SecondaryButton>
+                </div>
+                <p className="text-[11px] text-blue-800">
+                  Rollback captures a pre-rollback restore point, restores the active baseline locally, and promotes it to Supabase when connected.
+                </p>
+              </div>
             </Card>
 
             <div className="bg-gradient-to-r from-sky-400 to-blue-500 rounded-2xl p-4 text-white">
@@ -10335,9 +11173,15 @@ export default function BuildFlow() {
           cloudLastError={cloudLastError}
           cloudLastErrorAt={cloudLastErrorAt}
           cloudNextRetryAt={cloudNextRetryAt}
+          syncStatus={syncStatus}
           syncV2Enabled={syncV2Enabled}
+          syncV2Required={syncV2Required}
           syncV2Status={syncV2Status}
           onToggleSyncV2={(next) => {
+            if (syncV2Required && !next) {
+              alert('Sync v2 is required for the protected demo dataset.')
+              return
+            }
             setSyncV2Enabled(Boolean(next))
             writeFlag('bf:sync_v2', Boolean(next))
           }}
@@ -12867,7 +13711,9 @@ function OfflineStatusModal({
   cloudLastError,
   cloudLastErrorAt,
   cloudNextRetryAt,
+  syncStatus,
   syncV2Enabled,
+  syncV2Required,
   syncV2Status,
   onToggleSyncV2,
   onClose,
@@ -12875,6 +13721,7 @@ function OfflineStatusModal({
 }) {
   const pendingList = useMemo(() => (Array.isArray(pending) ? pending : []), [pending])
   const pendingCount = pendingList.length
+  const hasAnyPending = pendingCount > 0 || cloudHasPending || Number(syncStatus?.pending_count || 0) > 0
 
   const byType = useMemo(() => {
     const map = new Map()
@@ -12922,7 +13769,7 @@ function OfflineStatusModal({
           <PrimaryButton
             onClick={onSyncNow}
             className="flex-1"
-            disabled={!isOnline || (pendingCount === 0 && !cloudHasPending)}
+            disabled={!isOnline || !hasAnyPending}
           >
             Sync Now
           </PrimaryButton>
@@ -12975,13 +13822,23 @@ function OfflineStatusModal({
               ) : null}
             </div>
             <label className="text-sm font-semibold flex items-center gap-2">
-              <input type="checkbox" checked={Boolean(syncV2Enabled)} onChange={(e) => onToggleSyncV2?.(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={Boolean(syncV2Enabled)}
+                disabled={Boolean(syncV2Required)}
+                onChange={(e) => onToggleSyncV2?.(e.target.checked)}
+              />
               Enabled
             </label>
           </div>
           {syncV2Enabled ? (
             <p className="text-[11px] text-gray-500 mt-2">
               Requires Supabase RPCs `sync_push` and `sync_pull` (see `supabase/sql/009_sync_v2_rpc.sql`).
+            </p>
+          ) : null}
+          {syncV2Required ? (
+            <p className="text-[11px] text-blue-700 mt-2">
+              Sync v2 is required in baseline-protected demo mode.
             </p>
           ) : null}
         </Card>
@@ -13018,6 +13875,18 @@ function OfflineStatusModal({
           Local last synced:{' '}
           <span className="font-semibold">{lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : '—'}</span>
         </div>
+        {syncStatus ? (
+          <div className="text-xs text-gray-600 rounded-xl border border-gray-200 bg-gray-50 p-2">
+            <p>
+              Canonical status: <span className="font-semibold">{syncStatus.phase || 'idle'}</span> • Pending{' '}
+              <span className="font-semibold">{Number(syncStatus.pending_count || 0)}</span>
+            </p>
+            <p className="mt-1">
+              RPC health: <span className="font-semibold">{syncStatus.rpc_health || 'unknown'}</span> • Baseline protection:{' '}
+              <span className="font-semibold">{syncStatus.baseline_protection ? 'on' : 'off'}</span>
+            </p>
+          </div>
+        ) : null}
       </div>
     </Modal>
   )
@@ -13093,7 +13962,6 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
   const [previewGhost, setPreviewGhost] = useState(null)
   const previewGhostPosRef = useRef({ raf: null, x: 0, y: 0 })
   const [previewCollapsedTracks, setPreviewCollapsedTracks] = useState(() => new Set())
-  const previewKey = `${resolvedLotId ?? ''}:${form.start_date ?? ''}:${template?.id ?? ''}`
 
   useEffect(() => {
     if (!resolvedLotId) return
@@ -13110,7 +13978,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       job_number: resolvedLot?.job_number ?? '',
       custom_fields: { ...fieldDefaults, ...(prev.custom_fields ?? {}) },
     }))
-  }, [resolvedLotId])
+  }, [resolvedLot, resolvedLotId, plans, org.custom_fields])
 
   useEffect(() => {
     if (!resolvedLot || !form.start_date) {
@@ -13138,7 +14006,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     setDraftTasks(nextTasks)
     setPreviewCollapsedTracks(new Set(nextTasks.map((t) => t?.track ?? 'misc')))
     setPreviewTouched(false)
-  }, [previewKey])
+  }, [resolvedLot, form.start_date, form.plan_id, form.job_number, form.custom_fields, form.address, form.permit_number, form.hard_deadline, template, org, app.subcontractors])
 
   useEffect(() => {
     return () => {
@@ -13430,6 +14298,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       <Modal
       title="Start Lot"
       onClose={onClose}
+      bodyClassName="max-h-[78vh] pt-1"
       footer={
         <div className="flex gap-2">
           <SecondaryButton onClick={onClose} className="flex-1">
@@ -13448,9 +14317,10 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     >
       <div className="space-y-3">
         {!prefill?.lot_id ? (
-          <>
+          <Card className="bg-gray-50 border border-gray-200">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-600 mb-2">Lot Selection</p>
             <label className="block">
-              <span className="text-sm font-semibold">Community *</span>
+              <span className="text-sm font-semibold text-gray-900">Community *</span>
               <select
                 value={communityId}
                 onChange={(e) => {
@@ -13459,9 +14329,11 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
                   setLotNumber('')
                   setForm((prev) => ({ ...prev, plan_id: '' }))
                 }}
-                className="mt-1 w-full px-3 py-3 border rounded-xl"
+                className="mt-1 w-full px-3 py-3 border rounded-xl bg-white text-base font-medium text-gray-900"
               >
-                <option value="">Select community...</option>
+                <option value="" className="text-gray-500">
+                  Select community...
+                </option>
                 {communities.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
@@ -13470,15 +14342,17 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
               </select>
             </label>
 
-            <label className="block">
-              <span className="text-sm font-semibold">Lot *</span>
+            <label className="block mt-3">
+              <span className="text-sm font-semibold text-gray-900">Lot *</span>
               <select
                 value={lotNumber}
                 onChange={(e) => setLotNumber(e.target.value)}
-                className="mt-1 w-full px-3 py-3 border rounded-xl"
+                className="mt-1 w-full px-3 py-3 border rounded-xl bg-white text-base font-medium text-gray-900"
                 disabled={!communityId}
               >
-                <option value="">Select lot...</option>
+                <option value="" className="text-gray-500">
+                  Select lot...
+                </option>
                 {availableLots.map((l) => (
                   <option key={l.id} value={l.lot_number}>
                     {l.lot_number}
@@ -13486,7 +14360,13 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
                 ))}
               </select>
             </label>
-          </>
+
+            <p className="text-xs text-gray-500 mt-2">
+              {communityId
+                ? `Selected community: ${selectedCommunity?.name ?? '—'}`
+                : 'Select a community first, then choose an available lot.'}
+            </p>
+          </Card>
         ) : (
           <Card className="p-3">
             <p className="text-sm text-gray-500">{selectedCommunity?.name ?? 'Community'}</p>

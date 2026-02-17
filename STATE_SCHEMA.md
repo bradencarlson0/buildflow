@@ -10,6 +10,7 @@ This is a working schema map for the current local-first app state.
 - `templates[]`: schedule templates
 - `product_types[]`, `plans[]`, `agencies[]`
 - `messages[]`, `notifications[]`, `scheduled_reports[]`
+- `sync`: local/cloud sync metadata (queue + baseline protection)
 - `contact_library_realtors[]`, `contact_library_builders[]`
 - `custom_trades[]` (admin-managed)
 
@@ -75,3 +76,24 @@ This is a working schema map for the current local-first app state.
 - localStorage stores app graph + metadata.
 - IndexedDB stores binary blobs for photos/docs.
 - Schema is backward-compatible: code tolerates missing/legacy fields.
+
+## Sync Metadata (`app.sync`)
+- `pending[]`: pending mutation summaries (local)
+- `cloud_queue[]`: snapshot-sync queue entries
+- `cloud_last_synced_at`, `cloud_last_error`, retry metadata
+- `baseline_meta`: `{ baseline_id, created_at, checksum, source_device, org_id, restore_point }`
+- `baseline_protection`: `{ enabled, baseline_id, checksum, mode }`
+
+## Canonical Contracts (Runtime)
+- `SyncStatus`: `{ phase, pending_count, last_ack_at, last_error, rpc_health, baseline_protection }`
+- `MutationOp`: `{ op_id, entity, entity_id, op_type, payload, base_version, actor_id, created_at }`
+- `sync_pull` response: `{ server_time, cursor, versions, lots, tasks, lot_assignments, attachments }`
+- `sync_push` response: `{ server_time, results[], applied[], conflicts[] }` where each result carries `{ id, status, conflict_code, conflict_reason, applied_at }`
+- `acquire_lot_lock_v2` response: `{ ok, code, message, token, expires_at, locked_by }`
+
+## Supabase Org Baseline Fields
+- `organizations.baseline_protection_enabled` (boolean)
+- `organizations.baseline_id` (text)
+- `organizations.baseline_checksum` (text)
+- `organizations.baseline_protected_at` (timestamptz)
+- `organizations.baseline_protected_by` (uuid)

@@ -16,6 +16,7 @@ For onboarding and safe changes, read docs in this order:
 8. `TESTING_GUIDE.md` - smoke checks and release validation
 9. `CONTRIBUTING.md` - coding and review expectations
 10. `DECISIONS.md` - architecture decision context
+11. `DEMO_BASELINE_RUNBOOK.md` - baseline capture/promotion/rollback procedure
 
 ## Development
 
@@ -23,6 +24,7 @@ For onboarding and safe changes, read docs in this order:
 - Lint: `npm run lint`
 - Run dev server: `npm run dev`
 - Run dev server on LAN (phone testing): `npm run dev -- --host`
+- Supabase hardening SQL for demo sync/baseline: `supabase/sql/011_sync_v2_contract_hardening.sql`
 
 ## Core Architecture
 

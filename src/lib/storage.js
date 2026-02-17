@@ -3,7 +3,7 @@ export const STORAGE_KEY = 'buildflow:state:v1'
 // iOS Safari can evict/clear localStorage under memory pressure; IndexedDB is
 // typically more durable. We mirror the snapshot into IndexedDB (best-effort,
 // throttled) and can rehydrate from it if localStorage is missing/corrupt.
-const IDB_SNAPSHOT_META_KEY = 'snapshot:state:v1'
+export const IDB_SNAPSHOT_META_KEY = 'snapshot:state:v1'
 const IDB_MIRROR_MIN_INTERVAL_MS = 2000
 
 let idbMirrorTimer = null
