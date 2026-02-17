@@ -2403,8 +2403,24 @@ export default function BuildFlow() {
           .map((row) => mapSubcontractorToSupabase(row, orgId))
           .filter((row) => row?.id)
 
+    const assignedLotIdsForSource = (() => {
+      if (!isRestrictedSuper) return null
+      const me = String(supabaseUser?.id ?? '').trim()
+      if (!me) return new Set()
+      const assignments = Array.isArray(sourceState?.lot_assignments) ? sourceState.lot_assignments : []
+      const set = new Set()
+      for (const assignment of assignments) {
+        if (!assignment || assignment.deleted_at || assignment.ended_at) continue
+        if (assignment.role && assignment.role !== 'super') continue
+        if (assignment.profile_id !== me) continue
+        if (!assignment.lot_id) continue
+        set.add(assignment.lot_id)
+      }
+      return set
+    })()
+
     const lotsToSync = isRestrictedSuper
-      ? (sourceState?.lots ?? []).filter((l) => myAssignedLotIds.has(l.id))
+      ? (sourceState?.lots ?? []).filter((l) => assignedLotIdsForSource?.has(l.id))
       : sourceState?.lots ?? []
     const lotRows = lotsToSync.map((row) => mapLotToSupabase(row, orgId)).filter((row) => row?.id)
 
@@ -2438,7 +2454,7 @@ export default function BuildFlow() {
       payload: nextPayload,
       hash: nextHash,
     }
-  }, [myAssignedLotIds, supabaseStatus.orgId, supabaseStatus.role, supabaseUser?.id])
+  }, [supabaseStatus.orgId, supabaseStatus.role, supabaseUser?.id])
 
   const buildCloudPayload = useCallback(() => buildCloudPayloadForState(app), [app, buildCloudPayloadForState])
 
