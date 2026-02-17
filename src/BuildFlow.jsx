@@ -532,14 +532,19 @@ function Modal({ title, onClose, children, footer, zIndex = 'z-[70]', panelClass
         paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)',
       }}
     >
-      <div className={`w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200 ${panelClassName}`}>
+      <div
+        className={`w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200 flex max-h-full flex-col ${panelClassName}`}
+        style={{
+          maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 1rem)',
+        }}
+      >
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-lg">{title}</h2>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className={`max-h-[70vh] overflow-auto pb-2 ${bodyClassName}`}>{children}</div>
+        <div className={`min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2 ${bodyClassName}`}>{children}</div>
         {footer ? <div className="pt-3 border-t mt-3">{footer}</div> : null}
       </div>
     </div>
@@ -14339,7 +14344,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
       <Modal
       title="Start Lot"
       onClose={onClose}
-      bodyClassName="max-h-[78vh] pt-1"
+      bodyClassName="pt-1"
       footer={
         <div className="flex gap-2">
           <SecondaryButton onClick={onClose} className="flex-1">
