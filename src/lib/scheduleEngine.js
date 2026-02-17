@@ -1213,6 +1213,7 @@ export const startLotFromTemplate = ({
   const normalizedStart = start_date ? formatISODate(getNextWorkDay(start_date) ?? start_date) : null
   if (!normalizedStart) return lot
 
+  const baseBuildDays = Math.max(1, Number(template?.build_days ?? lot.build_days ?? 1) || 1)
   const overrideBuildDaysRaw = Number(build_days_override)
   const hasBuildDaysOverride = Number.isFinite(overrideBuildDaysRaw) && overrideBuildDaysRaw > 0
   const overrideBuildDays = hasBuildDaysOverride ? Math.max(1, Math.round(overrideBuildDaysRaw)) : null
@@ -1220,14 +1221,15 @@ export const startLotFromTemplate = ({
   const providedTasks = (draftTasks ?? draft_tasks ?? []).map((t) => ({ ...t }))
   const baseTasks =
     providedTasks.length > 0 ? providedTasks : buildLotTasksFromTemplate(lot.id, normalizedStart, template, orgSettings)
-  if (providedTasks.length === 0 && overrideBuildDays) {
+  const shouldRescaleTemplateTasks = providedTasks.length === 0 && overrideBuildDays !== null && overrideBuildDays !== baseBuildDays
+  if (shouldRescaleTemplateTasks) {
     scaleTemplateTaskDurationsToTarget(baseTasks, overrideBuildDays, orgSettings)
     applyTemplateTrackScheduling(baseTasks, normalizedStart, orgSettings)
   }
   const tasksWithSubs = assignSubsToTasks(baseTasks, subcontractors)
   const nextTasks = refreshReadyStatuses(tasksWithSubs)
 
-  const effectiveBuildDays = overrideBuildDays ?? template?.build_days ?? lot.build_days
+  const effectiveBuildDays = overrideBuildDays ?? baseBuildDays
   const target_completion_date = calculateTargetCompletionDate(normalizedStart, effectiveBuildDays, orgSettings)
 
   return {

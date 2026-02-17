@@ -13949,7 +13949,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     ? templates.find((t) => t.id === resolvedProductType.template_id) ?? null
     : null
   const buildDays = resolvedProductType?.build_days ?? template?.build_days ?? org.default_build_days ?? 135
-  const defaultBuildDaysTarget = Math.max(1, Number(resolvedLot?.build_days ?? buildDays ?? org.default_build_days ?? 135) || 1)
+  const defaultBuildDaysTarget = Math.max(1, Number(buildDays ?? org.default_build_days ?? 115) || 1)
   const availablePlans = resolvedProductType ? plans.filter((p) => p.product_type_id === resolvedProductType.id) : []
 
   const [form, setForm] = useState(() => ({
@@ -14009,7 +14009,19 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     setForm((prev) => ({ ...prev, build_days_target: defaultBuildDaysTarget }))
   }, [defaultBuildDaysTarget, resolvedLotId])
 
-  const buildDaysTarget = Math.max(1, Number(form.build_days_target ?? defaultBuildDaysTarget) || defaultBuildDaysTarget)
+  const normalizeBuildDaysTarget = useCallback(
+    (value) => Math.max(1, Math.round(Number(value) || defaultBuildDaysTarget || 1)),
+    [defaultBuildDaysTarget],
+  )
+
+  const buildDaysTarget = normalizeBuildDaysTarget(form.build_days_target)
+
+  const bumpBuildDaysTarget = (delta) => {
+    setForm((prev) => ({
+      ...prev,
+      build_days_target: normalizeBuildDaysTarget(Number(prev?.build_days_target ?? defaultBuildDaysTarget) + Number(delta || 0)),
+    }))
+  }
 
   useEffect(() => {
     if (!resolvedLot || !form.start_date) {
@@ -14468,20 +14480,38 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
 
         <label className="block">
           <span className="text-sm font-semibold">Build Days Target</span>
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={buildDaysTarget}
-            onChange={(e) =>
-              setForm((prev) => ({
-                ...prev,
-                build_days_target: Math.max(1, Number(e.target.value) || 1),
-              }))
-            }
-            className="mt-1 w-full px-3 py-3 border rounded-xl"
-          />
-          <p className="text-xs text-gray-500 mt-1">Override to condense or expand the auto-generated schedule.</p>
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => bumpBuildDaysTarget(-1)}
+              className="h-12 w-12 shrink-0 rounded-xl border border-gray-200 bg-white text-2xl leading-none font-semibold text-gray-700"
+              aria-label="Decrease build days target"
+            >
+              -
+            </button>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={buildDaysTarget}
+              onChange={(e) =>
+                setForm((prev) => ({
+                  ...prev,
+                  build_days_target: normalizeBuildDaysTarget(e.target.value),
+                }))
+              }
+              className="h-12 w-full px-3 border rounded-xl text-center"
+            />
+            <button
+              type="button"
+              onClick={() => bumpBuildDaysTarget(1)}
+              className="h-12 w-12 shrink-0 rounded-xl border border-gray-200 bg-white text-2xl leading-none font-semibold text-gray-700"
+              aria-label="Increase build days target"
+            >
+              +
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">Defaults to the selected plan type baseline. Adjust to condense or expand schedule.</p>
         </label>
 
         <label className="block">
