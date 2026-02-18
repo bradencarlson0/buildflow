@@ -1513,19 +1513,12 @@ const buildReferenceSnapshotPayload = (state, orgId) => {
       .filter((row) => row?.id),
   )
 
-  // Reference snapshot intentionally excludes started lots/tasks to avoid clobbering
-  // schedule-critical edits. It only carries non-started lot metadata (including new
-  // lots created during community setup) that should replicate across devices.
+  // Reference snapshot carries full lot rows so lot-level edits (sales fields,
+  // inspections, punch/daily logs, files metadata, etc.) replicate across devices.
+  // Task-level scheduling still uses tasks_batch optimistic concurrency.
   const lots = sortRowsById(
     coerceArray(state?.lots)
-      .filter((lot) => {
-        if (!lot?.id) return false
-        if (lot?.deleted_at) return true
-        const status = String(lot?.status ?? 'not_started')
-        const hasStartDate = Boolean(lot?.start_date)
-        const hasTasks = Array.isArray(lot?.tasks) && lot.tasks.length > 0
-        return status === 'not_started' && !hasStartDate && !hasTasks
-      })
+      .filter((lot) => lot?.id)
       .map((row) => mapLotToSupabase(row, orgId))
       .filter((row) => row?.id),
   )
@@ -2437,6 +2430,16 @@ export default function BuildFlow() {
       const mappedAgencies = coerceArray(agenciesRead.rows)
       const mappedAssignments = coerceArray(assignmentsRead.rows)
       const shouldSetAssignments = !assignmentsRead.missing
+      let pendingV2OpsCount = 0
+      if (syncV2Enabled) {
+        try {
+          const ops = await outboxList()
+          pendingV2OpsCount = ops.filter((op) => op && op.v2 === true).length
+        } catch {
+          pendingV2OpsCount = 0
+        }
+      }
+      const preserveLocalCoreWhilePending = syncV2Enabled && pendingV2OpsCount > 0
 
       const hasRemoteCoreData = mappedCommunities.length > 0 || mappedLots.length > 0 || mappedSubs.length > 0
 
@@ -2501,6 +2504,14 @@ export default function BuildFlow() {
             : prevSync.baseline_protection ?? { enabled: false },
         }
 
+        if (preserveLocalCoreWhilePending) {
+          return {
+            ...prev,
+            org: nextOrg,
+            sync: nextSync,
+          }
+        }
+
         if (!hasRemoteCoreData) {
           return {
             ...prev,
@@ -2534,6 +2545,9 @@ export default function BuildFlow() {
       if (missingTables.length > 0) {
         warningParts.push(`Missing tables: ${Array.from(new Set(missingTables)).join(', ')}`)
       }
+      if (preserveLocalCoreWhilePending) {
+        warningParts.push(`Pending local sync ops: ${pendingV2OpsCount} (preserving local edits on this device until sync flushes)`)
+      }
 
       if (cancelled) return
       const activeCommunities = mappedCommunities.filter((c) => isActiveCommunityRecord(c))
@@ -2541,7 +2555,9 @@ export default function BuildFlow() {
       const visibleLots = mappedLots.filter((l) => !l?.deleted_at && activeCommunityIds.has(l?.community_id))
       setSupabaseStatus({
         phase: 'ready',
-        message: hasRemoteCoreData
+        message: preserveLocalCoreWhilePending
+          ? 'Supabase connected. Pending local edits detected; preserving local state until sync completes.'
+          : hasRemoteCoreData
           ? 'Supabase connected. Remote data is loaded.'
           : 'Supabase connected. No remote core rows yet; local seed data remains active.',
         orgId,
@@ -2567,7 +2583,7 @@ export default function BuildFlow() {
     return () => {
       cancelled = true
     }
-  }, [ensureGuestOrg, supabaseBootstrapVersion, supabaseUser?.id, supabaseUser?.is_anonymous])
+  }, [ensureGuestOrg, supabaseBootstrapVersion, supabaseUser?.id, supabaseUser?.is_anonymous, syncV2Enabled])
 
   const syncPayloadToSupabase = async (pendingPayload) => {
     const {
