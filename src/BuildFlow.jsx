@@ -2896,7 +2896,13 @@ export default function BuildFlow() {
     if (!syncV2Enabled) return
     if (!supabaseUser?.id || supabaseStatus.phase !== 'ready') return
     if (syncV2Status.rpc_health && syncV2Status.rpc_health !== 'healthy') return
-    if (!syncV2Status.last_pulled_at) return
+    const hasSyncAnchor = Boolean(
+      syncV2Status.last_pulled_at ||
+      app?.sync?.v2_last_pulled_at ||
+      app?.sync?.last_synced_at ||
+      supabaseStatus.loadedAt,
+    )
+    if (!hasSyncAnchor) return
 
     const sourceState = latestAppRef.current
     const op = buildV2ReferenceSnapshotOp(sourceState)
@@ -2925,7 +2931,9 @@ export default function BuildFlow() {
         setSyncV2Status((prev) => ({
           ...prev,
           phase: prev.phase === 'syncing' ? 'syncing' : 'pending',
+          pending_ops: Math.max(1, Number(prev?.pending_ops || 0)),
         }))
+        setSyncV2Kick((prev) => prev + 1)
       })
       .catch((err) => {
         setSyncV2Status((prev) => ({
@@ -2943,7 +2951,10 @@ export default function BuildFlow() {
     app?.product_types,
     app?.plans,
     app?.agencies,
+    app?.sync?.last_synced_at,
+    app?.sync?.v2_last_pulled_at,
     supabaseStatus.phase,
+    supabaseStatus.loadedAt,
     supabaseUser?.id,
     syncV2Enabled,
     syncV2Status.last_pulled_at,
@@ -14672,6 +14683,7 @@ function OfflineStatusModal({
   const conflictPolicyText = syncV2Enabled
     ? 'Automatic sync is enabled. If the same item is edited on two devices at the same time, server-side conflict checks prevent silent overwrite and retry safely.'
     : 'Snapshot sync: Last write wins. If the same item is edited on two devices, the most recent sync overwrites earlier edits.'
+  const syncV2LastPullAt = syncV2Status?.last_pulled_at ?? lastSyncedAt ?? null
 
   return (
     <Modal
@@ -14737,8 +14749,8 @@ function OfflineStatusModal({
               {syncV2Status?.warning ? <p className="text-xs text-amber-700 mt-1">{syncV2Status.warning}</p> : null}
               <p className="text-xs text-gray-600 mt-1">
                 Last pull:{' '}
-                {syncV2Enabled && syncV2Status?.last_pulled_at
-                  ? formatSyncTimestamp(syncV2Status.last_pulled_at)
+                {syncV2Enabled && syncV2LastPullAt
+                  ? formatSyncTimestamp(syncV2LastPullAt)
                   : ' awaiting first pull'}
               </p>
               {syncV2Enabled && syncV2Status?.last_pushed_at ? (
