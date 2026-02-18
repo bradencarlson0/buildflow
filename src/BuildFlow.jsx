@@ -2952,6 +2952,17 @@ export default function BuildFlow() {
         setSyncV2Kick((prev) => prev + 1)
       })
       .catch((err) => {
+        setApp((prev) => {
+          const sync = prev.sync ?? {}
+          if (String(sync.v2_reference_last_queued_hash ?? '') !== String(op.reference_hash ?? '')) return prev
+          return {
+            ...prev,
+            sync: {
+              ...sync,
+              v2_reference_last_queued_hash: '',
+            },
+          }
+        })
         setSyncV2Status((prev) => ({
           ...prev,
           phase: 'error',
