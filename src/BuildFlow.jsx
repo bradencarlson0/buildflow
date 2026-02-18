@@ -2439,7 +2439,15 @@ export default function BuildFlow() {
           pendingV2OpsCount = 0
         }
       }
-      const preserveLocalCoreWhilePending = syncV2Enabled && pendingV2OpsCount > 0
+      const localReferenceHash = syncV2Enabled ? stableStringify(buildReferenceSnapshotPayload(latestAppRef.current, orgId)) : ''
+      const localAckedReferenceHash = String(latestAppRef.current?.sync?.v2_reference_last_acked_hash ?? '')
+      const hasUnsyncedLocalReferenceChanges =
+        syncV2Enabled &&
+        Boolean(localReferenceHash) &&
+        localReferenceHash !== localAckedReferenceHash
+
+      const preserveLocalCoreWhilePending =
+        syncV2Enabled && (pendingV2OpsCount > 0 || hasUnsyncedLocalReferenceChanges)
 
       const hasRemoteCoreData = mappedCommunities.length > 0 || mappedLots.length > 0 || mappedSubs.length > 0
 
@@ -2546,7 +2554,8 @@ export default function BuildFlow() {
         warningParts.push(`Missing tables: ${Array.from(new Set(missingTables)).join(', ')}`)
       }
       if (preserveLocalCoreWhilePending) {
-        warningParts.push(`Pending local sync ops: ${pendingV2OpsCount} (preserving local edits on this device until sync flushes)`)
+        const reason = pendingV2OpsCount > 0 ? `Pending local sync ops: ${pendingV2OpsCount}` : 'Unsynced local edits detected'
+        warningParts.push(`${reason} (preserving local edits on this device until sync flushes)`)
       }
 
       if (cancelled) return
@@ -2924,52 +2933,78 @@ export default function BuildFlow() {
     const op = buildV2ReferenceSnapshotOp(sourceState)
     if (!op?.reference_hash) return
 
-    let shouldEnqueue = false
-    setApp((prev) => {
-      const sync = prev.sync ?? {}
-      const hash = String(op.reference_hash ?? '')
-      const lastAckedHash = String(sync.v2_reference_last_acked_hash ?? '')
-      const lastQueuedHash = String(sync.v2_reference_last_queued_hash ?? '')
-      if (!hash || hash === lastAckedHash || hash === lastQueuedHash) return prev
-      shouldEnqueue = true
-      return {
-        ...prev,
-        sync: {
-          ...sync,
-          v2_reference_last_queued_hash: hash,
-        },
-      }
-    })
-    if (!shouldEnqueue) return
+    const hash = String(op.reference_hash ?? '')
+    const syncState = sourceState?.sync ?? {}
+    const lastAckedHash = String(syncState.v2_reference_last_acked_hash ?? '')
+    const lastQueuedHash = String(syncState.v2_reference_last_queued_hash ?? '')
+    if (!hash || hash === lastAckedHash) return
 
-    void outboxEnqueue(op)
-      .then(() => {
-        setSyncV2Status((prev) => ({
+    const shouldEnqueue = hash !== lastQueuedHash
+    const requeueIfMissing = hash === lastQueuedHash
+    if (shouldEnqueue) {
+      setApp((prev) => {
+        const sync = prev.sync ?? {}
+        if (String(sync.v2_reference_last_queued_hash ?? '') === hash) return prev
+        return {
           ...prev,
-          phase: prev.phase === 'syncing' ? 'syncing' : 'pending',
-          pending_ops: Math.max(1, Number(prev?.pending_ops || 0)),
-        }))
-        setSyncV2Kick((prev) => prev + 1)
+          sync: {
+            ...sync,
+            v2_reference_last_queued_hash: hash,
+          },
+        }
       })
-      .catch((err) => {
-        setApp((prev) => {
-          const sync = prev.sync ?? {}
-          if (String(sync.v2_reference_last_queued_hash ?? '') !== String(op.reference_hash ?? '')) return prev
-          return {
+    }
+    if (!shouldEnqueue && !requeueIfMissing) return
+
+    const enqueueReferenceOp = () =>
+      outboxEnqueue(op)
+        .then(() => {
+          setSyncV2Status((prev) => ({
             ...prev,
-            sync: {
-              ...sync,
-              v2_reference_last_queued_hash: '',
-            },
-          }
+            phase: prev.phase === 'syncing' ? 'syncing' : 'pending',
+            pending_ops: Math.max(1, Number(prev?.pending_ops || 0)),
+          }))
+          setSyncV2Kick((prev) => prev + 1)
         })
-        setSyncV2Status((prev) => ({
-          ...prev,
-          phase: 'error',
-          rpc_health: prev.rpc_health ?? 'degraded',
-          error: String(err?.message ?? 'Failed to enqueue reference sync op'),
-        }))
+        .catch((err) => {
+          setApp((prev) => {
+            const sync = prev.sync ?? {}
+            if (String(sync.v2_reference_last_queued_hash ?? '') !== String(op.reference_hash ?? '')) return prev
+            return {
+              ...prev,
+              sync: {
+                ...sync,
+                v2_reference_last_queued_hash: '',
+              },
+            }
+          })
+          setSyncV2Status((prev) => ({
+            ...prev,
+            phase: 'error',
+            rpc_health: prev.rpc_health ?? 'degraded',
+            error: String(err?.message ?? 'Failed to enqueue reference sync op'),
+          }))
+        })
+
+    if (shouldEnqueue) {
+      void enqueueReferenceOp()
+      return
+    }
+
+    // Recovery path: if queued hash points at no existing outbox row (e.g. interrupted write),
+    // re-enqueue the current reference snapshot so edits can flush to Supabase.
+    void outboxList()
+      .then((ops) => {
+        const existing = (ops ?? []).some((entry) =>
+          entry &&
+          entry.v2 === true &&
+          entry.kind === 'reference_snapshot' &&
+          String(entry.reference_hash ?? '') === String(op.reference_hash ?? ''),
+        )
+        if (existing) return
+        return enqueueReferenceOp()
       })
+      .catch(() => {})
   }, [
     app?.communities,
     app?.lots,
