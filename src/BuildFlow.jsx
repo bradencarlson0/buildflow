@@ -119,6 +119,7 @@ import {
   verifyBaselineArtifact,
   withBaselineMetadata,
 } from './lib/baseline.js'
+import { stableStringify } from './lib/checksum.js'
 import { isSyncV2Enabled, writeFlag } from './lib/flags.js'
 import { syncV2HealthCheck, syncV2Pull, syncV2Push } from './lib/syncV2.js'
 import { uuid } from './lib/uuid.js'
@@ -526,7 +527,7 @@ function Modal({ title, onClose, children, footer, zIndex = 'z-[70]', panelClass
 
   return (
     <div
-      className={`fixed inset-0 bg-black/40 ${zIndex} flex items-end sm:items-center justify-center p-2 sm:p-4`}
+      className={`fixed inset-0 bg-black/40 ${zIndex} flex items-end sm:items-center justify-center overflow-hidden p-2 sm:p-4`}
       style={{
         paddingTop: 'calc(env(safe-area-inset-top, 0px) + 0.5rem)',
         paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)',
@@ -535,7 +536,7 @@ function Modal({ title, onClose, children, footer, zIndex = 'z-[70]', panelClass
       <div
         className={`w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4 border border-gray-200 flex max-h-full flex-col ${panelClassName}`}
         style={{
-          maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 1rem)',
+          maxHeight: 'calc(min(100svh, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 1rem)',
         }}
       >
         <div className="flex items-center justify-between mb-3">
@@ -545,7 +546,14 @@ function Modal({ title, onClose, children, footer, zIndex = 'z-[70]', panelClass
           </button>
         </div>
         <div className={`min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2 ${bodyClassName}`}>{children}</div>
-        {footer ? <div className="pt-3 border-t mt-3">{footer}</div> : null}
+        {footer ? (
+          <div
+            className="pt-3 border-t mt-3 shrink-0 bg-white"
+            style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.25rem)' }}
+          >
+            {footer}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -823,6 +831,7 @@ const normalizeImageBlob = async (file) => {
 }
 
 const PHOTO_ANNOTATION_TOOLS = [
+  { id: 'select', label: 'Select', icon: GripVertical },
   { id: 'pen', label: 'Draw', icon: PenLine },
   { id: 'arrow', label: 'Arrow', icon: ArrowUpRight },
   { id: 'rect', label: 'Rectangle', icon: Square },
@@ -902,6 +911,149 @@ const drawSelectedTextAnnotationOutline = (ctx, annotation) => {
   ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)'
   ctx.strokeRect(layout.x - 4, layout.y - 4, layout.textWidth + 8, layout.fontSize + 8)
   ctx.restore()
+}
+
+const getPhotoAnnotationBounds = (ctx, annotation) => {
+  if (!ctx || !annotation) return null
+  if (annotation.type === 'text') {
+    const layout = getPhotoAnnotationTextLayout(ctx, annotation)
+    if (!layout) return null
+    return { x: layout.x, y: layout.y, width: layout.textWidth, height: layout.fontSize }
+  }
+  if (annotation.type === 'pen') {
+    const points = Array.isArray(annotation.points) ? annotation.points : []
+    if (!points.length) return null
+    let minX = points[0].x
+    let minY = points[0].y
+    let maxX = points[0].x
+    let maxY = points[0].y
+    for (const pt of points) {
+      minX = Math.min(minX, pt.x)
+      minY = Math.min(minY, pt.y)
+      maxX = Math.max(maxX, pt.x)
+      maxY = Math.max(maxY, pt.y)
+    }
+    return {
+      x: minX,
+      y: minY,
+      width: Math.max(1, maxX - minX),
+      height: Math.max(1, maxY - minY),
+    }
+  }
+  if (annotation.type === 'arrow' || annotation.type === 'rect' || annotation.type === 'ellipse') {
+    const x1 = Number(annotation.x1 ?? 0)
+    const y1 = Number(annotation.y1 ?? 0)
+    const x2 = Number(annotation.x2 ?? 0)
+    const y2 = Number(annotation.y2 ?? 0)
+    return {
+      x: Math.min(x1, x2),
+      y: Math.min(y1, y2),
+      width: Math.max(1, Math.abs(x2 - x1)),
+      height: Math.max(1, Math.abs(y2 - y1)),
+    }
+  }
+  return null
+}
+
+const drawSelectedAnnotationOutline = (ctx, annotation) => {
+  if (!ctx || !annotation) return
+  if (annotation.type === 'text') {
+    drawSelectedTextAnnotationOutline(ctx, annotation)
+    return
+  }
+  const bounds = getPhotoAnnotationBounds(ctx, annotation)
+  if (!bounds) return
+  const pad = 8
+  ctx.save()
+  ctx.lineWidth = 2
+  ctx.setLineDash([6, 4])
+  ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)'
+  ctx.strokeRect(bounds.x - pad, bounds.y - pad, bounds.width + pad * 2, bounds.height + pad * 2)
+  ctx.restore()
+}
+
+const distancePointToSegment = (pt, a, b) => {
+  const abx = Number(b.x ?? 0) - Number(a.x ?? 0)
+  const aby = Number(b.y ?? 0) - Number(a.y ?? 0)
+  const apx = Number(pt.x ?? 0) - Number(a.x ?? 0)
+  const apy = Number(pt.y ?? 0) - Number(a.y ?? 0)
+  const denom = abx * abx + aby * aby
+  if (!denom) return annotationDistance(pt, a)
+  const t = clampNumber((apx * abx + apy * aby) / denom, 0, 1)
+  const proj = { x: Number(a.x ?? 0) + abx * t, y: Number(a.y ?? 0) + aby * t }
+  return annotationDistance(pt, proj)
+}
+
+const isPointNearAnnotation = (ctx, annotation, pt) => {
+  if (!ctx || !annotation || !pt) return false
+  const width = Math.max(2, Number(annotation.size ?? 4))
+  const pad = Math.max(10, width * 2)
+  if (annotation.type === 'text') {
+    const box = getPhotoAnnotationTextLayout(ctx, annotation)
+    if (!box) return false
+    return pt.x >= box.x - pad && pt.x <= box.x + box.textWidth + pad && pt.y >= box.y - pad && pt.y <= box.y + box.fontSize + pad
+  }
+  if (annotation.type === 'pen') {
+    const points = Array.isArray(annotation.points) ? annotation.points : []
+    if (points.length < 2) return false
+    for (let i = 1; i < points.length; i += 1) {
+      if (distancePointToSegment(pt, points[i - 1], points[i]) <= pad) return true
+    }
+    return false
+  }
+  if (annotation.type === 'arrow') {
+    const a = { x: annotation.x1, y: annotation.y1 }
+    const b = { x: annotation.x2, y: annotation.y2 }
+    return (
+      distancePointToSegment(pt, a, b) <= pad || annotationDistance(pt, a) <= pad * 1.4 || annotationDistance(pt, b) <= pad * 1.4
+    )
+  }
+  if (annotation.type === 'rect') {
+    const x = Math.min(annotation.x1, annotation.x2)
+    const y = Math.min(annotation.y1, annotation.y2)
+    const w = Math.abs(annotation.x2 - annotation.x1)
+    const h = Math.abs(annotation.y2 - annotation.y1)
+    return pt.x >= x - pad && pt.x <= x + w + pad && pt.y >= y - pad && pt.y <= y + h + pad
+  }
+  if (annotation.type === 'ellipse') {
+    const cx = (Number(annotation.x1 ?? 0) + Number(annotation.x2 ?? 0)) / 2
+    const cy = (Number(annotation.y1 ?? 0) + Number(annotation.y2 ?? 0)) / 2
+    const rx = Math.max(1, Math.abs(Number(annotation.x2 ?? 0) - Number(annotation.x1 ?? 0)) / 2)
+    const ry = Math.max(1, Math.abs(Number(annotation.y2 ?? 0) - Number(annotation.y1 ?? 0)) / 2)
+    const nx = (pt.x - cx) / (rx + pad)
+    const ny = (pt.y - cy) / (ry + pad)
+    return nx * nx + ny * ny <= 1.05
+  }
+  return false
+}
+
+const shiftAnnotation = (annotation, dx, dy, maxWidth, maxHeight) => {
+  if (!annotation || (!dx && !dy)) return annotation
+  const shiftPoint = (pt) => ({
+    x: clampNumber(Number(pt.x ?? 0) + dx, 0, Math.max(1, Number(maxWidth) || 1)),
+    y: clampNumber(Number(pt.y ?? 0) + dy, 0, Math.max(1, Number(maxHeight) || 1)),
+  })
+  if (annotation.type === 'pen') {
+    const points = Array.isArray(annotation.points) ? annotation.points : []
+    return { ...annotation, points: points.map((pt) => shiftPoint(pt)) }
+  }
+  if (annotation.type === 'text') {
+    return {
+      ...annotation,
+      x: clampNumber(Number(annotation.x ?? 0) + dx, 0, Math.max(1, Number(maxWidth) || 1)),
+      y: clampNumber(Number(annotation.y ?? 0) + dy, 0, Math.max(1, Number(maxHeight) || 1)),
+    }
+  }
+  if (annotation.type === 'arrow' || annotation.type === 'rect' || annotation.type === 'ellipse') {
+    return {
+      ...annotation,
+      x1: clampNumber(Number(annotation.x1 ?? 0) + dx, 0, Math.max(1, Number(maxWidth) || 1)),
+      y1: clampNumber(Number(annotation.y1 ?? 0) + dy, 0, Math.max(1, Number(maxHeight) || 1)),
+      x2: clampNumber(Number(annotation.x2 ?? 0) + dx, 0, Math.max(1, Number(maxWidth) || 1)),
+      y2: clampNumber(Number(annotation.y2 ?? 0) + dy, 0, Math.max(1, Number(maxHeight) || 1)),
+    }
+  }
+  return annotation
 }
 
 const drawPhotoAnnotation = (ctx, annotation) => {
@@ -1112,6 +1264,39 @@ const mapSubcontractorFromSupabase = (subRow) => ({
   office_phone: subRow?.office_phone ?? subRow?.phone ?? subRow?.primary_contact?.phone ?? '',
 })
 
+const mapProductTypeFromSupabase = (row) => ({
+  ...row,
+  name: row?.name ?? 'Product Type',
+  build_days: Math.max(1, Number(row?.build_days ?? 1) || 1),
+  sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : 0,
+  is_active: row?.is_active !== false,
+})
+
+const mapPlanFromSupabase = (row) => ({
+  ...row,
+  name: row?.name ?? 'Plan',
+  sq_ft: Number.isFinite(Number(row?.sq_ft)) ? Number(row.sq_ft) : null,
+  bedrooms: Number.isFinite(Number(row?.bedrooms)) ? Number(row.bedrooms) : null,
+  bathrooms: Number.isFinite(Number(row?.bathrooms)) ? Number(row.bathrooms) : null,
+  is_active: row?.is_active !== false,
+})
+
+const mapAgencyFromSupabase = (row) => ({
+  ...row,
+  name: row?.name ?? 'Agency',
+  type: row?.type ?? 'municipality',
+  inspection_types: coerceArray(row?.inspection_types),
+  is_org_level: row?.is_org_level !== false,
+  is_active: row?.is_active !== false,
+})
+
+const mapLotAssignmentFromSupabase = (row) => ({
+  ...row,
+  role: row?.role ?? 'super',
+})
+
+const isActiveCommunityRecord = (row) => row?.is_active !== false && !row?.deleted_at
+
 const toIsoDateOrNull = (value) => {
   if (!value) return null
   if (typeof value === 'string') return value
@@ -1227,6 +1412,86 @@ const mapLotToSupabase = (row, orgId) => ({
   documents: coerceArray(row?.documents),
   photos: coerceArray(row?.photos),
 })
+
+const mapLotAssignmentToSupabase = (row, orgId) => ({
+  id: row?.id,
+  org_id: orgId,
+  lot_id: row?.lot_id ?? null,
+  profile_id: row?.profile_id ?? null,
+  role: row?.role ?? 'super',
+  ended_at: row?.ended_at ?? null,
+  deleted_at: row?.deleted_at ?? null,
+})
+
+const sortRowsById = (rows) =>
+  coerceArray(rows)
+    .slice()
+    .sort((a, b) => String(a?.id ?? '').localeCompare(String(b?.id ?? '')))
+
+const buildReferenceSnapshotPayload = (state, orgId) => {
+  const product_types = sortRowsById(
+    coerceArray(state?.product_types)
+      .map((row) => mapProductTypeToSupabase(row, orgId))
+      .filter((row) => row?.id),
+  )
+
+  const plans = sortRowsById(
+    coerceArray(state?.plans)
+      .map((row) => mapPlanToSupabase(row, orgId))
+      .filter((row) => row?.id),
+  )
+
+  const agencies = sortRowsById(
+    coerceArray(state?.agencies)
+      .map((row) => mapAgencyToSupabase(row, orgId))
+      .filter((row) => row?.id),
+  )
+
+  const communities = sortRowsById(
+    coerceArray(state?.communities)
+      .map((row) => mapCommunityToSupabase(row, orgId))
+      .filter((row) => row?.id),
+  )
+
+  const subcontractors = sortRowsById(
+    coerceArray(state?.subcontractors)
+      .map((row) => mapSubcontractorToSupabase(row, orgId))
+      .filter((row) => row?.id),
+  )
+
+  // Reference snapshot intentionally excludes started lots/tasks to avoid clobbering
+  // schedule-critical edits. It only carries non-started lot metadata (including new
+  // lots created during community setup) that should replicate across devices.
+  const lots = sortRowsById(
+    coerceArray(state?.lots)
+      .filter((lot) => {
+        if (!lot?.id) return false
+        if (lot?.deleted_at) return true
+        const status = String(lot?.status ?? 'not_started')
+        const hasStartDate = Boolean(lot?.start_date)
+        const hasTasks = Array.isArray(lot?.tasks) && lot.tasks.length > 0
+        return status === 'not_started' && !hasStartDate && !hasTasks
+      })
+      .map((row) => mapLotToSupabase(row, orgId))
+      .filter((row) => row?.id),
+  )
+
+  const lot_assignments = sortRowsById(
+    coerceArray(state?.lot_assignments)
+      .map((row) => mapLotAssignmentToSupabase(row, orgId))
+      .filter((row) => row?.id && row?.lot_id && row?.profile_id),
+  )
+
+  return {
+    product_types,
+    plans,
+    agencies,
+    communities,
+    subcontractors,
+    lots,
+    lot_assignments,
+  }
+}
 
 const mapTaskToSupabase = (row, lotId, orgId) => ({
   id: row?.id,
@@ -1891,6 +2156,9 @@ export default function BuildFlow() {
         const session = data?.session ?? null
         setSupabaseSession(session)
         setSupabaseUser(session?.user ?? null)
+        if (session?.user?.id) {
+          setShowAuthLanding(false)
+        }
         if (session?.user?.email) {
           setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
         }
@@ -1907,7 +2175,11 @@ export default function BuildFlow() {
       if (!active) return
       setSupabaseSession(session ?? null)
       setSupabaseUser(session?.user ?? null)
-      if (!session?.user?.id) setShowAuthLanding(true)
+      if (session?.user?.id) {
+        setShowAuthLanding(false)
+      } else {
+        setShowAuthLanding(true)
+      }
       if (session?.user?.email) {
         setAuthDraft((prev) => ({ ...prev, email: prev.email || session.user.email, password: '' }))
       } else {
@@ -2208,6 +2480,9 @@ export default function BuildFlow() {
       }
 
       if (cancelled) return
+      const activeCommunities = mappedCommunities.filter((c) => isActiveCommunityRecord(c))
+      const activeCommunityIds = new Set(activeCommunities.map((c) => c.id))
+      const visibleLots = mappedLots.filter((l) => !l?.deleted_at && activeCommunityIds.has(l?.community_id))
       setSupabaseStatus({
         phase: 'ready',
         message: hasRemoteCoreData
@@ -2217,10 +2492,13 @@ export default function BuildFlow() {
         role: profile?.role ?? null,
         loadedAt: new Date().toISOString(),
         counts: {
-          communities: mappedCommunities.length,
-          lots: mappedLots.length,
+          communities: activeCommunities.length,
+          communities_total: mappedCommunities.length,
+          lots: visibleLots.length,
+          lots_total: mappedLots.length,
           tasks: (tasksRead.rows ?? []).length,
           subcontractors: mappedSubs.length,
+          subcontractors_total: mappedSubs.length,
           product_types: mappedProductTypes.length,
           lot_assignments: mappedAssignments.length,
         },
@@ -2327,14 +2605,19 @@ export default function BuildFlow() {
     await upsertRows('tasks', taskRows ?? [], 'id')
 
     const syncedAt = new Date().toISOString()
+    const activeCommunities = coerceArray(communitiesRows).filter((c) => isActiveCommunityRecord(c))
+    const activeCommunityIds = new Set(activeCommunities.map((c) => c?.id).filter(Boolean))
+    const visibleLots = coerceArray(lotRows).filter((l) => !l?.deleted_at && activeCommunityIds.has(l?.community_id))
     setSupabaseStatus((prev) => ({
       ...prev,
       phase: 'ready',
       message: 'Supabase connected. Remote data is loaded.',
       loadedAt: syncedAt,
       counts: {
-        communities: coerceArray(communitiesRows).length,
-        lots: coerceArray(lotRows).length,
+        communities: activeCommunities.length,
+        communities_total: coerceArray(communitiesRows).length,
+        lots: visibleLots.length,
+        lots_total: coerceArray(lotRows).length,
         tasks: coerceArray(taskRows).length,
         subcontractors: coerceArray(subcontractorRows).length,
         product_types: coerceArray(productTypes).length,
@@ -2557,6 +2840,64 @@ export default function BuildFlow() {
     if (!syncV2Enabled) return
     if (!supabaseUser?.id || supabaseStatus.phase !== 'ready') return
     if (syncV2Status.rpc_health && syncV2Status.rpc_health !== 'healthy') return
+    if (!syncV2Status.last_pulled_at) return
+
+    const sourceState = latestAppRef.current
+    const op = buildV2ReferenceSnapshotOp(sourceState)
+    if (!op?.reference_hash) return
+
+    let shouldEnqueue = false
+    setApp((prev) => {
+      const sync = prev.sync ?? {}
+      const hash = String(op.reference_hash ?? '')
+      const lastAckedHash = String(sync.v2_reference_last_acked_hash ?? '')
+      const lastQueuedHash = String(sync.v2_reference_last_queued_hash ?? '')
+      if (!hash || hash === lastAckedHash || hash === lastQueuedHash) return prev
+      shouldEnqueue = true
+      return {
+        ...prev,
+        sync: {
+          ...sync,
+          v2_reference_last_queued_hash: hash,
+        },
+      }
+    })
+    if (!shouldEnqueue) return
+
+    void outboxEnqueue(op)
+      .then(() => {
+        setSyncV2Status((prev) => ({
+          ...prev,
+          phase: prev.phase === 'syncing' ? 'syncing' : 'pending',
+        }))
+      })
+      .catch((err) => {
+        setSyncV2Status((prev) => ({
+          ...prev,
+          phase: 'error',
+          rpc_health: prev.rpc_health ?? 'degraded',
+          error: String(err?.message ?? 'Failed to enqueue reference sync op'),
+        }))
+      })
+  }, [
+    app?.communities,
+    app?.lots,
+    app?.lot_assignments,
+    app?.subcontractors,
+    app?.product_types,
+    app?.plans,
+    app?.agencies,
+    supabaseStatus.phase,
+    supabaseUser?.id,
+    syncV2Enabled,
+    syncV2Status.last_pulled_at,
+    syncV2Status.rpc_health,
+  ])
+
+  useEffect(() => {
+    if (!syncV2Enabled) return
+    if (!supabaseUser?.id || supabaseStatus.phase !== 'ready') return
+    if (syncV2Status.rpc_health && syncV2Status.rpc_health !== 'healthy') return
 
     let cancelled = false
     let timer = null
@@ -2732,6 +3073,7 @@ export default function BuildFlow() {
           const retryStatuses = new Set(['unknown', 'unavailable', 'retry'])
 
           const idsToAck = []
+          const ackedReferenceHashes = []
           const retryRows = []
           const conflictRows = []
           for (const op of ready) {
@@ -2741,6 +3083,9 @@ export default function BuildFlow() {
             const status = String(row?.status ?? 'unknown').toLowerCase()
             if (appliedStatuses.has(status)) {
               idsToAck.push(id)
+              if (op?.kind === 'reference_snapshot' && op?.reference_hash) {
+                ackedReferenceHashes.push(String(op.reference_hash))
+              }
             } else if (terminalStatuses.has(status)) {
               conflictRows.push(row ?? { id, status, conflict_reason: 'Conflict' })
             } else if (retryStatuses.has(status) || !row) {
@@ -2825,12 +3170,16 @@ export default function BuildFlow() {
             rpc_health: 'healthy',
             last_pushed_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.last_pushed_at ?? null,
           }))
+          const lastAckedReferenceHash =
+            ackedReferenceHashes.length > 0 ? ackedReferenceHashes[ackedReferenceHashes.length - 1] : ''
           setApp((prev) => ({
             ...prev,
             sync: {
               ...(prev.sync ?? {}),
               pending: idsToAck.length > 0 ? (prev.sync?.pending ?? []).filter((op) => !idsToAck.includes(String(op?.id ?? ''))) : prev.sync?.pending ?? [],
               last_synced_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.sync?.last_synced_at ?? null,
+              v2_reference_last_acked_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_acked_hash || '',
+              v2_reference_last_queued_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_queued_hash || '',
             },
           }))
 
@@ -2906,6 +3255,27 @@ export default function BuildFlow() {
             const list = attachmentsByLotId.get(lotId) ?? []
             list.push(attachmentRow)
             attachmentsByLotId.set(lotId, list)
+          }
+
+          const mergeRowsById = (currentRows, incomingRows, mapper = null) => {
+            const incoming = Array.isArray(incomingRows) ? incomingRows : []
+            if (incoming.length === 0) return currentRows
+            const byId = new Map(
+              coerceArray(currentRows)
+                .map((row) => [String(row?.id ?? ''), row])
+                .filter(([id]) => id),
+            )
+            for (const rawRow of incoming) {
+              const row = mapper ? mapper(rawRow) : rawRow
+              const id = String(row?.id ?? '')
+              if (!id) continue
+              if (row?.deleted_at) {
+                byId.delete(id)
+              } else {
+                byId.set(id, row)
+              }
+            }
+            return Array.from(byId.values())
           }
 
           const nextLots = lots.map((lot) => {
@@ -3069,7 +3439,12 @@ export default function BuildFlow() {
             nextLots.push({ ...base, tasks: tasksWithPhotos, photos: mergedPhotos })
           }
 
-          const nextAssignments = pullRes.lot_assignments ?? null
+          const nextProductTypes = mergeRowsById(prev.product_types, pullRes.product_types, mapProductTypeFromSupabase)
+          const nextPlans = mergeRowsById(prev.plans, pullRes.plans, mapPlanFromSupabase)
+          const nextAgencies = mergeRowsById(prev.agencies, pullRes.agencies, mapAgencyFromSupabase)
+          const nextCommunities = mergeRowsById(prev.communities, pullRes.communities, mapCommunityFromSupabase)
+          const nextSubcontractors = mergeRowsById(prev.subcontractors, pullRes.subcontractors, mapSubcontractorFromSupabase)
+          const nextAssignments = mergeRowsById(prev.lot_assignments, pullRes.lot_assignments, mapLotAssignmentFromSupabase)
           const nextSync = {
             ...(prev.sync ?? {}),
             v2_last_pulled_at: serverTime,
@@ -3077,13 +3452,18 @@ export default function BuildFlow() {
 
           return {
             ...prev,
+            product_types: nextProductTypes,
+            plans: nextPlans,
+            agencies: nextAgencies,
+            communities: nextCommunities,
+            subcontractors: nextSubcontractors,
             lots: nextLots,
-            lot_assignments: Array.isArray(nextAssignments) ? nextAssignments : prev.lot_assignments,
+            lot_assignments: nextAssignments,
             sync: nextSync,
           }
         })
 
-        await setSyncV2Cursor(serverTime)
+        await setSyncV2Cursor(pullRes.cursor ?? serverTime)
         const outboxAfterPullCount = await setPendingOpsCount()
         setSyncV2Status((prev) => ({
           ...prev,
@@ -3443,14 +3823,14 @@ export default function BuildFlow() {
   const org = app.org
   const communities = app.communities ?? []
   const activeCommunities = useMemo(
-    () => (communities ?? []).filter((c) => c?.is_active !== false && !c?.deleted_at),
+    () => (communities ?? []).filter((c) => isActiveCommunityRecord(c)),
     [communities],
   )
   const communityIsActiveById = useMemo(() => {
     const map = new Map()
     for (const c of communities ?? []) {
       if (!c?.id) continue
-      map.set(c.id, c?.is_active !== false && !c?.deleted_at)
+      map.set(c.id, isActiveCommunityRecord(c))
     }
     return map
   }, [communities])
@@ -3471,6 +3851,47 @@ export default function BuildFlow() {
 
   const communitiesById = useMemo(() => new Map(app.communities.map((c) => [c.id, c])), [app.communities])
   const lotsById = useMemo(() => new Map(visibleLots.map((l) => [l.id, l])), [visibleLots])
+
+  useEffect(() => {
+    if (!supabaseUser?.id) return
+    const allLots = app?.lots ?? []
+    const nextCounts = {
+      communities: activeCommunities.length,
+      communities_total: communities.length,
+      lots: visibleLots.length,
+      lots_total: allLots.length,
+      tasks: allLots.reduce((count, lot) => count + (Array.isArray(lot?.tasks) ? lot.tasks.length : 0), 0),
+      subcontractors: (app?.subcontractors ?? []).length,
+      subcontractors_total: (app?.subcontractors ?? []).length,
+      product_types: (app?.product_types ?? []).length,
+      lot_assignments: (app?.lot_assignments ?? []).length,
+    }
+    setSupabaseStatus((prev) => {
+      if (!prev?.counts) return prev
+      const current = prev.counts
+      const same =
+        Number(current.communities ?? 0) === Number(nextCounts.communities) &&
+        Number(current.communities_total ?? 0) === Number(nextCounts.communities_total) &&
+        Number(current.lots ?? 0) === Number(nextCounts.lots) &&
+        Number(current.lots_total ?? 0) === Number(nextCounts.lots_total) &&
+        Number(current.tasks ?? 0) === Number(nextCounts.tasks) &&
+        Number(current.subcontractors ?? 0) === Number(nextCounts.subcontractors) &&
+        Number(current.subcontractors_total ?? 0) === Number(nextCounts.subcontractors_total) &&
+        Number(current.product_types ?? 0) === Number(nextCounts.product_types) &&
+        Number(current.lot_assignments ?? 0) === Number(nextCounts.lot_assignments)
+      if (same) return prev
+      return { ...prev, counts: { ...current, ...nextCounts } }
+    })
+  }, [
+    app?.lot_assignments,
+    app?.lots,
+    app?.product_types,
+    app?.subcontractors,
+    communities,
+    activeCommunities,
+    visibleLots,
+    supabaseUser?.id,
+  ])
 
   const activeSuperAssignments = useMemo(() => {
     if (!Array.isArray(lotAssignments) || lotAssignments.length === 0) return []
@@ -3851,6 +4272,47 @@ export default function BuildFlow() {
       payload,
     }
   }
+
+  const buildV2ReferenceSnapshotOp = useCallback((sourceState) => {
+    if (!syncV2Enabled) return null
+    const userId = supabaseUser?.id ?? sourceState?.sync?.supabase_user_id ?? null
+    const orgId = supabaseStatus?.orgId ?? sourceState?.sync?.supabase_org_id ?? sourceState?.org?.id ?? null
+    if (!userId || !orgId) return null
+
+    const snapshot = buildReferenceSnapshotPayload(sourceState, orgId)
+    const hash = stableStringify(snapshot)
+    if (!hash) return null
+
+    const opId = uuid()
+    const now = new Date().toISOString()
+    const payload = {
+      id: opId,
+      kind: 'reference_snapshot',
+      hash,
+      snapshot,
+    }
+
+    return {
+      id: opId,
+      op_id: opId,
+      v2: true,
+      kind: 'reference_snapshot',
+      entity: 'reference',
+      entity_id: hash,
+      op_type: 'reference_snapshot',
+      base_version: null,
+      actor_id: userId,
+      lot_id: null,
+      entity_ids: [],
+      reference_hash: hash,
+      created_at: now,
+      attempts: 0,
+      next_retry_at: null,
+      last_error: '',
+      last_error_at: null,
+      payload,
+    }
+  }, [supabaseStatus?.orgId, supabaseUser?.id, syncV2Enabled])
 
   const syncNow = () => {
     if (!isOnline) return
@@ -8046,7 +8508,17 @@ export default function BuildFlow() {
                   ) : null}
                   {supabaseStatus.counts ? (
                     <p className="text-xs text-gray-700 mt-2">
-                      Rows - Communities {supabaseStatus.counts.communities}, Lots {supabaseStatus.counts.lots}, Tasks {supabaseStatus.counts.tasks}, Subs {supabaseStatus.counts.subcontractors}
+                      Rows - Communities (active) {supabaseStatus.counts.communities}
+                      {Number.isFinite(Number(supabaseStatus.counts.communities_total)) &&
+                      Number(supabaseStatus.counts.communities_total) !== Number(supabaseStatus.counts.communities)
+                        ? ` (${supabaseStatus.counts.communities_total} total)`
+                        : ''}
+                      , Lots {supabaseStatus.counts.lots}
+                      {Number.isFinite(Number(supabaseStatus.counts.lots_total)) &&
+                      Number(supabaseStatus.counts.lots_total) !== Number(supabaseStatus.counts.lots)
+                        ? ` (${supabaseStatus.counts.lots_total} total)`
+                        : ''}
+                      , Tasks {supabaseStatus.counts.tasks}, Subs {supabaseStatus.counts.subcontractors}
                     </p>
                   ) : null}
                 </div>
@@ -13743,7 +14215,9 @@ function OfflineStatusModal({
 }) {
   const pendingList = useMemo(() => (Array.isArray(pending) ? pending : []), [pending])
   const pendingCount = pendingList.length
-  const hasAnyPending = pendingCount > 0 || cloudHasPending || Number(syncStatus?.pending_count || 0) > 0
+  const canonicalPendingCount = Number(syncStatus?.pending_count || 0)
+  const effectivePendingCount = Math.max(pendingCount, canonicalPendingCount)
+  const hasAnyPending = effectivePendingCount > 0 || cloudHasPending
 
   const byType = useMemo(() => {
     const map = new Map()
@@ -13873,11 +14347,16 @@ function OfflineStatusModal({
         </Card>
 
         <Card>
-          <p className="font-semibold mb-2">{pendingCount} changes pending</p>
-          {pendingCount === 0 ? (
+          <p className="font-semibold mb-2">{effectivePendingCount} changes pending</p>
+          {effectivePendingCount === 0 ? (
             <p className="text-sm text-gray-600">All caught up.</p>
           ) : (
             <div className="space-y-2">
+              <div className="text-xs text-gray-600 rounded-xl border border-gray-200 bg-gray-50 p-2">
+                <p>Legacy local queue: <span className="font-semibold">{pendingCount}</span></p>
+                <p className="mt-1">Snapshot queue: <span className="font-semibold">{Number(cloudQueueCount || 0)}</span></p>
+                <p className="mt-1">Sync v2 outbox: <span className="font-semibold">{Number(syncV2Status?.pending_ops || 0)}</span></p>
+              </div>
               {byType.map(([type, count]) => (
                 <div key={type} className="flex items-center justify-between text-sm bg-gray-50 border border-gray-200 rounded-xl p-3">
                   <span className="font-semibold text-gray-900">{type}</span>
@@ -13915,6 +14394,13 @@ function OfflineStatusModal({
 }
 
 function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
+  const MIN_BUILD_DAYS_TARGET = 90
+  const MAX_BUILD_DAYS_TARGET = 180
+  const clampBuildDaysTarget = (value, fallback = 115) => {
+    const numeric = Math.round(Number(value))
+    const safe = Number.isFinite(numeric) ? numeric : Math.round(Number(fallback) || 115)
+    return Math.max(MIN_BUILD_DAYS_TARGET, Math.min(MAX_BUILD_DAYS_TARGET, safe))
+  }
   const communitiesAll = app.communities ?? []
   const communities = communitiesAll.filter((c) => c?.is_active !== false && !c?.deleted_at)
   const activeCommunityIds = new Set(communities.map((c) => c.id))
@@ -13949,7 +14435,8 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     ? templates.find((t) => t.id === resolvedProductType.template_id) ?? null
     : null
   const buildDays = resolvedProductType?.build_days ?? template?.build_days ?? org.default_build_days ?? 135
-  const defaultBuildDaysTarget = Math.max(1, Number(buildDays ?? org.default_build_days ?? 115) || 1)
+  const rawDefaultBuildDaysTarget = Math.round(Number(buildDays ?? org.default_build_days ?? 115) || 115)
+  const defaultBuildDaysTarget = clampBuildDaysTarget(rawDefaultBuildDaysTarget)
   const availablePlans = resolvedProductType ? plans.filter((p) => p.product_type_id === resolvedProductType.id) : []
 
   const [form, setForm] = useState(() => ({
@@ -14010,11 +14497,12 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
   }, [defaultBuildDaysTarget, resolvedLotId])
 
   const normalizeBuildDaysTarget = useCallback(
-    (value) => Math.max(1, Math.round(Number(value) || defaultBuildDaysTarget || 1)),
+    (value) => clampBuildDaysTarget(value, defaultBuildDaysTarget),
     [defaultBuildDaysTarget],
   )
 
   const buildDaysTarget = normalizeBuildDaysTarget(form.build_days_target)
+  const isBuildDaysOverride = buildDaysTarget !== defaultBuildDaysTarget
 
   const bumpBuildDaysTarget = (delta) => {
     setForm((prev) => ({
@@ -14484,14 +14972,16 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
             <button
               type="button"
               onClick={() => bumpBuildDaysTarget(-1)}
-              className="h-12 w-12 shrink-0 rounded-xl border border-gray-200 bg-white text-2xl leading-none font-semibold text-gray-700"
+              disabled={buildDaysTarget <= MIN_BUILD_DAYS_TARGET}
+              className="h-12 w-12 shrink-0 rounded-xl border border-gray-200 bg-white text-2xl leading-none font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Decrease build days target"
             >
               -
             </button>
             <input
               type="number"
-              min={1}
+              min={MIN_BUILD_DAYS_TARGET}
+              max={MAX_BUILD_DAYS_TARGET}
               step={1}
               value={buildDaysTarget}
               onChange={(e) =>
@@ -14505,13 +14995,22 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
             <button
               type="button"
               onClick={() => bumpBuildDaysTarget(1)}
-              className="h-12 w-12 shrink-0 rounded-xl border border-gray-200 bg-white text-2xl leading-none font-semibold text-gray-700"
+              disabled={buildDaysTarget >= MAX_BUILD_DAYS_TARGET}
+              className="h-12 w-12 shrink-0 rounded-xl border border-gray-200 bg-white text-2xl leading-none font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Increase build days target"
             >
               +
             </button>
           </div>
-          <p className="text-xs text-gray-500 mt-1">Defaults to the selected plan type baseline. Adjust to condense or expand schedule.</p>
+          <p className="text-xs text-gray-500 mt-1">
+            Baseline {defaultBuildDaysTarget} days{isBuildDaysOverride ? ` • Override ${buildDaysTarget} days` : ' • No override'}.
+            Allowed range {MIN_BUILD_DAYS_TARGET}-{MAX_BUILD_DAYS_TARGET} days.
+          </p>
+          {rawDefaultBuildDaysTarget !== defaultBuildDaysTarget ? (
+            <p className="text-[11px] text-amber-700 mt-1">
+              Plan baseline ({rawDefaultBuildDaysTarget}) is outside guardrails and was clamped to {defaultBuildDaysTarget}.
+            </p>
+          ) : null}
         </label>
 
         <label className="block">
@@ -17000,7 +17499,7 @@ function InspectionNoteModal({ lot, community, tasks, inspection, isOnline, onCl
 function PhotoAnnotateModal({ file, onClose, onApply }) {
   const canvasRef = useRef(null)
   const [imageState, setImageState] = useState(null)
-  const [tool, setTool] = useState('pen')
+  const [tool, setTool] = useState('select')
   const [color, setColor] = useState(PHOTO_ANNOTATION_COLORS[0])
   const [lineWidth, setLineWidth] = useState(4)
   const [annotations, setAnnotations] = useState([])
@@ -17014,9 +17513,25 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const [shapeLabelDraft, setShapeLabelDraft] = useState('')
   const [textMode, setTextMode] = useState('text')
   const [description, setDescription] = useState('')
-  const [selectedTextId, setSelectedTextId] = useState(null)
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState(null)
   const activePointersRef = useRef(new Map())
   const pinchRef = useRef({ active: false, targetId: null, startDistance: 0, baseSize: 0 })
+  const selectionDragRef = useRef({ active: false, pointerId: null, targetId: null, lastPoint: null, moved: false })
+
+  const selectedAnnotation = useMemo(
+    () => (selectedAnnotationId ? annotations.find((item) => item.id === selectedAnnotationId) ?? null : null),
+    [annotations, selectedAnnotationId],
+  )
+  const selectedTextAnnotation = selectedAnnotation?.type === 'text' ? selectedAnnotation : null
+  const selectedAnnotationIsLabelable = Boolean(selectedAnnotation && selectedAnnotation.type !== 'text')
+
+  const triggerHaptic = useCallback((ms = 10) => {
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') navigator.vibrate(ms)
+    } catch (_err) {
+      void _err
+    }
+  }, [])
 
   useEffect(() => {
     if (!file) {
@@ -17061,15 +17576,16 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   }, [annotations, shapeLabelTargetId])
 
   useEffect(() => {
-    if (selectedTextId && !annotations.some((item) => item.id === selectedTextId && item.type === 'text')) {
-      setSelectedTextId(null)
+    if (selectedAnnotationId && !annotations.some((item) => item.id === selectedAnnotationId)) {
+      setSelectedAnnotationId(null)
     }
-  }, [annotations, selectedTextId])
+  }, [annotations, selectedAnnotationId])
 
   useEffect(
     () => () => {
       activePointersRef.current.clear()
       pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
+      selectionDragRef.current = { active: false, pointerId: null, targetId: null, lastPoint: null, moved: false }
     },
     [],
   )
@@ -17085,11 +17601,11 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     for (const annotation of annotations) drawPhotoAnnotation(ctx, annotation)
     if (draftPath) drawPhotoAnnotation(ctx, draftPath)
     if (draftShape) drawPhotoAnnotation(ctx, draftShape)
-    if (selectedTextId) {
-      const selectedText = annotations.find((item) => item.id === selectedTextId && item.type === 'text')
-      if (selectedText) drawSelectedTextAnnotationOutline(ctx, selectedText)
+    if (selectedAnnotationId) {
+      const selected = annotations.find((item) => item.id === selectedAnnotationId)
+      if (selected) drawSelectedAnnotationOutline(ctx, selected)
     }
-  }, [annotations, draftPath, draftShape, imageState, selectedTextId])
+  }, [annotations, draftPath, draftShape, imageState, selectedAnnotationId])
 
   const getPointerPoint = useCallback((e) => {
     const canvas = canvasRef.current
@@ -17102,24 +17618,34 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     }
   }, [])
 
-  const findTextAnnotationAtPoint = useCallback(
+  const findAnnotationAtPoint = useCallback(
     (pt) => {
       const canvas = canvasRef.current
       const ctx = canvas?.getContext?.('2d')
       if (!canvas || !ctx || !pt) return null
       for (let i = annotations.length - 1; i >= 0; i -= 1) {
         const annotation = annotations[i]
-        if (!annotation || annotation.type !== 'text') continue
-        const box = getPhotoAnnotationTextLayout(ctx, annotation)
-        if (!box) continue
-        if (pt.x >= box.x - 12 && pt.x <= box.x + box.textWidth + 12 && pt.y >= box.y - 12 && pt.y <= box.y + box.fontSize + 12) {
-          return annotation.id
-        }
+        if (!annotation) continue
+        if (isPointNearAnnotation(ctx, annotation, pt)) return annotation.id
       }
       return null
     },
     [annotations],
   )
+
+  const clearSelectionDrag = useCallback(() => {
+    selectionDragRef.current = { active: false, pointerId: null, targetId: null, lastPoint: null, moved: false }
+  }, [])
+
+  const beginSelectionDrag = useCallback((pointerId, targetId, pt) => {
+    selectionDragRef.current = {
+      active: true,
+      pointerId,
+      targetId,
+      lastPoint: pt,
+      moved: false,
+    }
+  }, [])
 
   const cycleColor = useCallback(() => {
     setColor((prev) => {
@@ -17132,11 +17658,10 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     if (!imageState || saving) return
     const pt = getPointerPoint(e)
     if (!pt) return
-    e.preventDefault()
     activePointersRef.current.set(e.pointerId, pt)
 
-    if (tool === 'text' && activePointersRef.current.size >= 2) {
-      const targetId = selectedTextId
+    if ((tool === 'text' || tool === 'select') && activePointersRef.current.size >= 2) {
+      const targetId = selectedTextAnnotation?.id ?? null
       const target = targetId ? annotations.find((item) => item.id === targetId && item.type === 'text') : null
       const points = Array.from(activePointersRef.current.values())
       if (target && points.length >= 2) {
@@ -17150,27 +17675,57 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           }
           setPendingTextPoint(null)
           setTextDraft('')
+          clearSelectionDrag()
           return
         }
       }
     }
 
+    const hitId = findAnnotationAtPoint(pt)
+    const hitItem = hitId ? annotations.find((item) => item.id === hitId) ?? null : null
+
+    if (tool === 'select') {
+      setPendingTextPoint(null)
+      setTextDraft('')
+      setShapeLabelTargetId(null)
+      setShapeLabelDraft('')
+      setDraftPath(null)
+      setDraftShape(null)
+      if (hitId) {
+        e.preventDefault()
+        setSelectedAnnotationId(hitId)
+        beginSelectionDrag(e.pointerId, hitId, pt)
+        triggerHaptic(7)
+        canvasRef.current?.setPointerCapture?.(e.pointerId)
+      } else {
+        setSelectedAnnotationId(null)
+      }
+      return
+    }
+
     if (tool === 'text') {
-      const hitTextId = findTextAnnotationAtPoint(pt)
-      if (hitTextId) {
-        setSelectedTextId(hitTextId)
+      e.preventDefault()
+      if (hitItem?.type === 'text') {
+        setSelectedAnnotationId(hitItem.id)
         setPendingTextPoint(null)
         setTextDraft('')
+        beginSelectionDrag(e.pointerId, hitItem.id, pt)
+        canvasRef.current?.setPointerCapture?.(e.pointerId)
         return
       }
-      setSelectedTextId(null)
+      setSelectedAnnotationId(null)
       setPendingTextPoint(pt)
       setTextDraft('')
       return
     }
 
+    e.preventDefault()
+    setSelectedAnnotationId(null)
     setPendingTextPoint(null)
     setTextDraft('')
+    setShapeLabelTargetId(null)
+    setShapeLabelDraft('')
+    clearSelectionDrag()
 
     if (tool === 'pen') {
       setDraftPath({
@@ -17217,6 +17772,24 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       }
       return
     }
+    const dragState = selectionDragRef.current
+    if (dragState.active && dragState.pointerId === e.pointerId && dragState.targetId) {
+      const prevPoint = dragState.lastPoint ?? pt
+      const dx = pt.x - prevPoint.x
+      const dy = pt.y - prevPoint.y
+      if (dx || dy) {
+        e.preventDefault()
+        const canvas = canvasRef.current
+        const maxWidth = Number(canvas?.width || imageState?.width || 1)
+        const maxHeight = Number(canvas?.height || imageState?.height || 1)
+        setAnnotations((prev) =>
+          prev.map((item) => (item.id === dragState.targetId ? shiftAnnotation(item, dx, dy, maxWidth, maxHeight) : item)),
+        )
+        dragState.lastPoint = pt
+        dragState.moved = true
+      }
+      return
+    }
     if (draftPath) {
       e.preventDefault()
       setDraftPath((prev) => (prev ? { ...prev, points: [...prev.points, pt] } : prev))
@@ -17232,6 +17805,19 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     if (saving) return
     const pt = getPointerPoint(e)
     activePointersRef.current.delete(e.pointerId)
+    const dragState = selectionDragRef.current
+    if (dragState.active && dragState.pointerId === e.pointerId) {
+      if (e.currentTarget?.releasePointerCapture) {
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId)
+        } catch (_err) {
+          void _err
+        }
+      }
+      if (dragState.moved) triggerHaptic(6)
+      clearSelectionDrag()
+      return
+    }
     if (pinchRef.current.active) {
       if (activePointersRef.current.size < 2) {
         pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
@@ -17243,6 +17829,8 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       const finalized = pt ? { ...draftPath, points: [...draftPath.points, pt] } : draftPath
       if ((finalized.points ?? []).length >= 2) {
         setAnnotations((prev) => [...prev, finalized])
+        setSelectedAnnotationId(finalized.id)
+        triggerHaptic(8)
       }
       setDraftPath(null)
       return
@@ -17253,9 +17841,8 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       const movement = annotationDistance({ x: finalized.x1, y: finalized.y1 }, { x: finalized.x2, y: finalized.y2 })
       if (movement >= 6) {
         setAnnotations((prev) => [...prev, finalized])
-        setShapeLabelTargetId(finalized.id)
-        setShapeLabelDraft('')
-        setSelectedTextId(null)
+        setSelectedAnnotationId(finalized.id)
+        triggerHaptic(8)
       }
       setDraftShape(null)
     }
@@ -17264,6 +17851,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const undo = () => {
     pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
     activePointersRef.current.clear()
+    clearSelectionDrag()
     if (draftPath || draftShape) {
       setDraftPath(null)
       setDraftShape(null)
@@ -17280,6 +17868,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const clearAll = () => {
     pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
     activePointersRef.current.clear()
+    clearSelectionDrag()
     setAnnotations([])
     setDraftPath(null)
     setDraftShape(null)
@@ -17287,7 +17876,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     setTextDraft('')
     setShapeLabelTargetId(null)
     setShapeLabelDraft('')
-    setSelectedTextId(null)
+    setSelectedAnnotationId(null)
   }
 
   const applyAnnotations = async () => {
@@ -17316,8 +17905,8 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const setPromptValue = pendingTextPoint ? setTextDraft : setShapeLabelDraft
   const savePrompt = () => {
     const value = String(promptValue ?? '').trim()
-    if (!value) return
     if (pendingTextPoint) {
+      if (!value) return
       const nextId = uuid()
       setAnnotations((prev) => [
         ...prev,
@@ -17331,7 +17920,8 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           size: lineWidth,
         },
       ])
-      setSelectedTextId(nextId)
+      setSelectedAnnotationId(nextId)
+      triggerHaptic(7)
       setPendingTextPoint(null)
       setTextDraft('')
       return
@@ -17340,6 +17930,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       setAnnotations((prev) => prev.map((item) => (item.id === shapeLabelTargetId ? { ...item, label: value } : item)))
       setShapeLabelTargetId(null)
       setShapeLabelDraft('')
+      triggerHaptic(6)
     }
   }
 
@@ -17355,6 +17946,18 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     }
   }
 
+  const adjustSelectedTextSize = (delta) => {
+    if (!selectedTextAnnotation) return
+    const nextSize = clampNumber(Math.round(Number(selectedTextAnnotation.size ?? lineWidth) + Number(delta || 0)), 2, 20)
+    setAnnotations((prev) => prev.map((item) => (item.id === selectedTextAnnotation.id ? { ...item, size: nextSize } : item)))
+  }
+
+  const openLabelPromptForSelection = () => {
+    if (!selectedAnnotation || selectedAnnotation.type === 'text') return
+    setShapeLabelTargetId(selectedAnnotation.id)
+    setShapeLabelDraft(String(selectedAnnotation.label ?? ''))
+  }
+
   return (
     <div className="fixed inset-0 z-[95] bg-[#0A0A0D] text-white flex flex-col">
       <div className="safe-area-pt px-3 py-2 border-b border-white/10">
@@ -17367,7 +17970,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
             <button
               type="button"
               onClick={undo}
-              disabled={saving || (!hasPendingEdits && !pendingTextPoint)}
+              disabled={saving || (!hasPendingEdits && !pendingTextPoint && !shapeLabelTargetId)}
               className="h-10 w-10 rounded-xl bg-white/10 hover:bg-white/15 disabled:opacity-40 flex items-center justify-center"
               aria-label="Undo"
             >
@@ -17401,7 +18004,8 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           ) : (
             <canvas
               ref={canvasRef}
-              className="w-auto h-auto max-w-full max-h-full rounded-xl bg-black touch-none border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"
+              className={`w-auto h-auto max-w-full max-h-full rounded-xl bg-black border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] ${tool === 'select' ? 'touch-auto' : 'touch-none'}`}
+              style={{ touchAction: tool === 'select' ? 'pan-x pan-y pinch-zoom' : 'none' }}
               onPointerDown={beginDraw}
               onPointerMove={moveDraw}
               onPointerUp={endDraw}
@@ -17424,6 +18028,16 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                   setTool(entry.id)
                   setDraftPath(null)
                   setDraftShape(null)
+                  clearSelectionDrag()
+                  if (entry.id !== 'text' && pendingTextPoint) {
+                    setPendingTextPoint(null)
+                    setTextDraft('')
+                  }
+                  if (entry.id !== 'select') {
+                    setShapeLabelTargetId(null)
+                    setShapeLabelDraft('')
+                  }
+                  triggerHaptic(5)
                 }}
                 className={`h-11 w-11 rounded-xl flex items-center justify-center border ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-white/5 border-white/10 text-white/80 hover:bg-white/10'}`}
                 title={entry.label}
@@ -17466,7 +18080,52 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                 />
                 <span className="w-6 text-right tabular-nums">{lineWidth}</span>
               </label>
-              {tool === 'text' && selectedTextId ? <p className="text-[11px] text-white/60">Pinch on selected text to resize</p> : null}
+              {selectedAnnotationId ? (
+                <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedAnnotationId(null)
+                      clearSelectionDrag()
+                    }}
+                    className="h-7 px-2 rounded-lg border border-white/20 bg-white/10 text-[11px] font-semibold"
+                  >
+                    Unselect
+                  </button>
+                  {selectedAnnotationIsLabelable ? (
+                    <button
+                      type="button"
+                      onClick={openLabelPromptForSelection}
+                      className="h-7 px-2 rounded-lg border border-white/20 bg-white/10 text-[11px] font-semibold"
+                    >
+                      Label
+                    </button>
+                  ) : null}
+                  {selectedTextAnnotation ? (
+                    <div className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-white/10 px-1 py-0.5">
+                      <button
+                        type="button"
+                        onClick={() => adjustSelectedTextSize(-1)}
+                        className="h-6 w-6 rounded-md text-xs font-bold hover:bg-white/10"
+                        aria-label="Decrease text size"
+                      >
+                        A-
+                      </button>
+                      <span className="text-[11px] tabular-nums w-6 text-center">{Math.max(2, Number(selectedTextAnnotation.size ?? 4))}</span>
+                      <button
+                        type="button"
+                        onClick={() => adjustSelectedTextSize(1)}
+                        className="h-6 w-6 rounded-md text-xs font-bold hover:bg-white/10"
+                        aria-label="Increase text size"
+                      >
+                        A+
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {selectedTextAnnotation ? <p className="text-[11px] text-white/60">Pinch or use A-/A+ to resize selected text.</p> : null}
+              {tool === 'select' ? <p className="text-[11px] text-white/60">Select tool: tap shape/text to move, tap blank area to unselect.</p> : null}
             </div>
           </div>
         </div>

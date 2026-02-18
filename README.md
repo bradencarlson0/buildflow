@@ -25,6 +25,7 @@ For onboarding and safe changes, read docs in this order:
 - Run dev server: `npm run dev`
 - Run dev server on LAN (phone testing): `npm run dev -- --host`
 - Supabase hardening SQL for demo sync/baseline: `supabase/sql/011_sync_v2_contract_hardening.sql`
+- Supabase reference-sync lane (required for cross-device communities/reference data): `supabase/sql/012_sync_v2_reference_snapshot.sql`
 
 ## Core Architecture
 

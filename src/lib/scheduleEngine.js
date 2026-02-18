@@ -1209,14 +1209,21 @@ export const startLotFromTemplate = ({
   draft_tasks,
   build_days_override,
 }) => {
+  const MIN_BUILD_DAYS_TARGET = 90
+  const MAX_BUILD_DAYS_TARGET = 180
+  const clampBuildDaysTarget = (value, fallback) => {
+    const numeric = Math.round(Number(value))
+    const safe = Number.isFinite(numeric) ? numeric : Math.round(Number(fallback) || 115)
+    return Math.max(MIN_BUILD_DAYS_TARGET, Math.min(MAX_BUILD_DAYS_TARGET, safe))
+  }
   const { getNextWorkDay } = makeWorkdayHelpers(orgSettings)
   const normalizedStart = start_date ? formatISODate(getNextWorkDay(start_date) ?? start_date) : null
   if (!normalizedStart) return lot
 
-  const baseBuildDays = Math.max(1, Number(template?.build_days ?? lot.build_days ?? 1) || 1)
+  const baseBuildDays = clampBuildDaysTarget(template?.build_days ?? lot.build_days ?? 115, 115)
   const overrideBuildDaysRaw = Number(build_days_override)
   const hasBuildDaysOverride = Number.isFinite(overrideBuildDaysRaw) && overrideBuildDaysRaw > 0
-  const overrideBuildDays = hasBuildDaysOverride ? Math.max(1, Math.round(overrideBuildDaysRaw)) : null
+  const overrideBuildDays = hasBuildDaysOverride ? clampBuildDaysTarget(overrideBuildDaysRaw, baseBuildDays) : null
 
   const providedTasks = (draftTasks ?? draft_tasks ?? []).map((t) => ({ ...t }))
   const baseTasks =

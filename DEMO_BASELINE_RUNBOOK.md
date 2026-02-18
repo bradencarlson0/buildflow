@@ -5,7 +5,8 @@ Preserve the currently tested dataset as canonical demo state (`demo_baseline_v1
 
 ## Prerequisite SQL
 1. Apply `supabase/sql/011_sync_v2_contract_hardening.sql` after existing sync v2 SQL files.
-2. Confirm RPCs exist: `sync_pull`, `sync_push`, `acquire_lot_lock_v2`, `set_demo_baseline_protection`.
+2. Apply `supabase/sql/012_sync_v2_reference_snapshot.sql` to enable cross-device reference sync (`communities`, `subs`, `product types`, etc.).
+3. Confirm RPCs exist: `sync_pull`, `sync_push`, `sync_apply_reference_snapshot`, `acquire_lot_lock_v2`, `set_demo_baseline_protection`.
 
 ## Baseline Capture
 1. Open BuildFlow, go to `More` tab.
