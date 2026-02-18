@@ -1131,53 +1131,61 @@ export const refreshReadyStatuses = (tasks) => {
   return list
 }
 
+const LEGACY_MILESTONE_KEY_ALIASES = {
+  forms_up: ['permit_issued'],
+  slab_poured: ['foundation_complete'],
+  roof_rough: ['rough_complete', 'dried_in'],
+  brick_sheetrock: ['drywall_complete'],
+  carpet_sod: ['final_inspection', 'complete'],
+}
+
+const readManualMilestoneValue = (manual, milestoneId) => {
+  if (!manual || !milestoneId) return false
+  if (Object.prototype.hasOwnProperty.call(manual, milestoneId)) return Boolean(manual[milestoneId])
+  for (const legacyId of LEGACY_MILESTONE_KEY_ALIASES[milestoneId] ?? []) {
+    if (Object.prototype.hasOwnProperty.call(manual, legacyId)) return Boolean(manual[legacyId])
+  }
+  return false
+}
+
+export const isMilestoneAchieved = (lot, milestone) => {
+  if (!lot || !milestone) return false
+  const manual = lot?.manual_milestones ?? {}
+  const manualAchieved = readManualMilestoneValue(manual, milestone.id)
+  if (milestone.manual) return manualAchieved
+  if (manualAchieved) return true
+
+  const tasks = lot?.tasks ?? []
+  const triggerList = Array.isArray(milestone.trigger)
+    ? milestone.trigger
+    : milestone.trigger
+      ? [milestone.trigger]
+      : []
+  if (triggerList.length === 0) return false
+
+  const mode = String(milestone.trigger_mode ?? 'all').toLowerCase() === 'any' ? 'any' : 'all'
+  if (mode === 'any') {
+    return triggerList.some((triggerTaskName) => tasks.some((t) => t.name === triggerTaskName && t.status === 'complete'))
+  }
+  return triggerList.every((triggerTaskName) => tasks.some((t) => t.name === triggerTaskName && t.status === 'complete'))
+}
+
 export const calculateLotProgress = (lot) => {
   const tasks = lot?.tasks ?? []
   const completed = tasks.filter((t) => t.status === 'complete')
 
-  const manual = lot?.manual_milestones ?? {}
-
-  const isAchieved = (m) => {
-    if (!m) return false
-    if (m.manual) return Boolean(manual?.[m.id])
-    if (m.id === 'rough_complete') {
-      const roughTasks = tasks.filter((t) => t.phase === 'mechanical' && String(t.name).startsWith('Rough '))
-      if (roughTasks.length === 0) return false
-      return roughTasks.every((t) => t.status === 'complete')
-    }
-    if (!m.trigger) return false
-    const triggerTask = tasks.find((t) => t.name === m.trigger)
-    return triggerTask?.status === 'complete'
-  }
-
-  const achievedPct = Math.max(0, ...MILESTONES.filter(isAchieved).map((m) => Number(m.pct) || 0))
+  const achievedPct = Math.max(0, ...MILESTONES.filter((m) => isMilestoneAchieved(lot, m)).map((m) => Number(m.pct) || 0))
   if (achievedPct > 0) return achievedPct
 
-  const first = MILESTONES.slice().sort((a, b) => (a.pct ?? 0) - (b.pct ?? 0)).find((m) => (m.pct ?? 0) > 0) ?? { pct: 8 }
+  const first = MILESTONES.slice().sort((a, b) => (a.pct ?? 0) - (b.pct ?? 0)).find((m) => (m.pct ?? 0) > 0) ?? { pct: 10 }
   if (completed.length > 0 && tasks.length > 0) {
-    return Math.round((completed.length / tasks.length) * Number(first.pct ?? 8))
+    return Math.round((completed.length / tasks.length) * Number(first.pct ?? 10))
   }
   return 0
 }
 
 export const getCurrentMilestone = (lot) => {
-  const tasks = lot?.tasks ?? []
-  const manual = lot?.manual_milestones ?? {}
-
-  const isAchieved = (m) => {
-    if (!m) return false
-    if (m.manual) return Boolean(manual?.[m.id])
-    if (m.id === 'rough_complete') {
-      const roughTasks = tasks.filter((t) => t.phase === 'mechanical' && String(t.name).startsWith('Rough '))
-      if (roughTasks.length === 0) return false
-      return roughTasks.every((t) => t.status === 'complete')
-    }
-    if (!m.trigger) return false
-    const triggerTask = tasks.find((t) => t.name === m.trigger)
-    return triggerTask?.status === 'complete'
-  }
-
-  const achieved = MILESTONES.filter(isAchieved).sort((a, b) => (b.pct ?? 0) - (a.pct ?? 0))
+  const achieved = MILESTONES.filter((m) => isMilestoneAchieved(lot, m)).sort((a, b) => (b.pct ?? 0) - (a.pct ?? 0))
   return achieved[0] ?? MILESTONES.slice().sort((a, b) => (a.pct ?? 0) - (b.pct ?? 0))[0]
 }
 

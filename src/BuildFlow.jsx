@@ -86,6 +86,7 @@ import {
   deriveTaskStatus,
   getCurrentMilestone,
   getPredictedCompletionDate,
+  isMilestoneAchieved,
   previewDelayImpact,
   normalizeTrackSortOrderBySchedule,
   rebuildTrackSchedule,
@@ -597,23 +598,6 @@ const DASHBOARD_STATUS_META = {
 const TaskStatusBadge = ({ status }) => {
   const entry = STATUS_BADGE[status === 'ready' ? 'pending' : status] ?? STATUS_BADGE.pending
   return <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-lg border ${entry.cls}`}>{entry.label}</span>
-}
-
-const isMilestoneAchieved = (lot, milestone) => {
-  if (!lot || !milestone) return false
-  const manual = lot.manual_milestones ?? {}
-
-  if (milestone.id === 'permit_issued') return Boolean(manual.permit_issued)
-  if (milestone.id === 'co') return Boolean(manual.co)
-  if (milestone.id === 'rough_complete') {
-    const rough = (lot.tasks ?? []).filter((t) => ['Rough Electrical', 'Rough Plumbing', 'Rough HVAC'].includes(t.name))
-    return rough.length > 0 && rough.every((t) => t.status === 'complete')
-  }
-
-  const trigger = milestone.trigger
-  if (!trigger) return false
-  const t = (lot.tasks ?? []).find((x) => x.name === trigger)
-  return t?.status === 'complete'
 }
 
 const MilestoneDots = ({ lot, className = '' }) => {
@@ -1968,6 +1952,7 @@ export default function BuildFlow() {
     error: '',
   })
   const [cloudRetryTick, setCloudRetryTick] = useState(0)
+  const [syncV2Kick, setSyncV2Kick] = useState(0)
   const [resetSeedBusy, setResetSeedBusy] = useState(false)
   const [baselineBusy, setBaselineBusy] = useState(false)
   const [baselineError, setBaselineError] = useState('')
@@ -2932,13 +2917,14 @@ export default function BuildFlow() {
 
       try {
         await setPendingOpsCount()
+        let pushHadIssues = false
+        let nextDelayMs = 4500
 
         // Push due ops (durable outbox)
         const due = await outboxListV2Due({ limit: 5 })
         if (cancelled) return
 
         if (due.length > 0) {
-          let pushHadIssues = false
           // Mark attempt + exponential backoff on errors.
           for (const op of due) {
             const attempts = (Number(op?.attempts ?? 0) || 0) + 1
@@ -3028,165 +3014,166 @@ export default function BuildFlow() {
           }
 
           if (ready.length === 0) {
-            scheduleNext(6500)
-            return
+            pushHadIssues = true
+            nextDelayMs = Math.max(nextDelayMs, 6500)
           }
+          if (ready.length > 0) {
+            const pushRes = await syncV2Push({ supabase, ops: ready })
+            if (cancelled) return
 
-          const pushRes = await syncV2Push({ supabase, ops: ready })
-          if (cancelled) return
+            if (!pushRes.ok) {
+              const msg = String(pushRes.error?.message ?? 'sync_push failed')
+              const missing = Boolean(pushRes.missing)
+              pushHadIssues = true
+              nextDelayMs = Math.max(nextDelayMs, missing ? 60000 : 10000)
+              setSyncV2Status((prev) => ({
+                ...prev,
+                phase: 'error',
+                rpc_health: missing ? 'missing' : 'degraded',
+                warning: missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
+                error: msg,
+              }))
 
-          if (!pushRes.ok) {
-            const msg = String(pushRes.error?.message ?? 'sync_push failed')
-            const missing = Boolean(pushRes.missing)
-            setSyncV2Status((prev) => ({
-              ...prev,
-              phase: 'error',
-              rpc_health: missing ? 'missing' : 'degraded',
-              warning: missing ? 'Sync v2 RPCs are not deployed on this Supabase project yet (sync_push/sync_pull).' : prev.warning,
-              error: msg,
-            }))
+              if (!missing && looksLikeNetworkError(pushRes.error)) setIsOnline(false)
 
-            if (!missing && looksLikeNetworkError(pushRes.error)) setIsOnline(false)
-
-            // Retry later (unless missing RPCs; then back off longer).
-            const delayMs = missing ? 60000 : 8000
-            for (const op of ready) {
-              const attempts = Number(op?.attempts ?? 0) || 0
-              const backoff = Math.min(300000, delayMs * Math.pow(2, Math.max(0, attempts - 1)))
-              const nextRetryAt = new Date(Date.now() + backoff).toISOString()
-              await outboxUpdate(op.id, { last_error: msg, last_error_at: new Date().toISOString(), next_retry_at: nextRetryAt })
-            }
-
-            scheduleNext(missing ? 60000 : 10000)
-            return
-          }
-
-          const resultRows = Array.isArray(pushRes.results) ? pushRes.results : []
-          const resultById = new Map(
-            resultRows
-              .map((row) => [String(row?.id ?? ''), row])
-              .filter(([id]) => id),
-          )
-
-          const appliedStatuses = new Set(['applied', 'ack', 'accepted'])
-          const terminalStatuses = new Set(['conflict', 'rejected', 'denied'])
-          const retryStatuses = new Set(['unknown', 'unavailable', 'retry'])
-
-          const idsToAck = []
-          const ackedReferenceHashes = []
-          const retryRows = []
-          const conflictRows = []
-          for (const op of ready) {
-            const id = String(op?.id ?? '')
-            if (!id) continue
-            const row = resultById.get(id) ?? null
-            const status = String(row?.status ?? 'unknown').toLowerCase()
-            if (appliedStatuses.has(status)) {
-              idsToAck.push(id)
-              if (op?.kind === 'reference_snapshot' && op?.reference_hash) {
-                ackedReferenceHashes.push(String(op.reference_hash))
+              // Retry later (unless missing RPCs; then back off longer).
+              const delayMs = missing ? 60000 : 8000
+              for (const op of ready) {
+                const attempts = Number(op?.attempts ?? 0) || 0
+                const backoff = Math.min(300000, delayMs * Math.pow(2, Math.max(0, attempts - 1)))
+                const nextRetryAt = new Date(Date.now() + backoff).toISOString()
+                await outboxUpdate(op.id, { last_error: msg, last_error_at: new Date().toISOString(), next_retry_at: nextRetryAt })
               }
-            } else if (terminalStatuses.has(status)) {
-              conflictRows.push(row ?? { id, status, conflict_reason: 'Conflict' })
-            } else if (retryStatuses.has(status) || !row) {
-              retryRows.push({ id, row, op, status })
             } else {
-              retryRows.push({ id, row, op, status: 'unknown' })
-            }
-          }
+              const resultRows = Array.isArray(pushRes.results) ? pushRes.results : []
+              const resultById = new Map(
+                resultRows
+                  .map((row) => [String(row?.id ?? ''), row])
+                  .filter(([id]) => id),
+              )
 
-          if (conflictRows.length > 0) {
-            pushHadIssues = true
-            for (const row of conflictRows) {
-              const msg = String(row?.conflict_reason ?? row?.conflict_code ?? 'Conflict')
-              await outboxUpdate(row.id, {
-                last_error: msg,
-                last_error_at: new Date().toISOString(),
-                next_retry_at: null,
-              })
-            }
-            setSyncV2Status((prev) => ({
-              ...prev,
-              phase: 'error',
-              error: `${conflictRows.length} sync conflict${conflictRows.length === 1 ? '' : 's'} require resolution`,
-            }))
-          }
+              const appliedStatuses = new Set(['applied', 'ack', 'accepted'])
+              const terminalStatuses = new Set(['conflict', 'rejected', 'denied'])
+              const retryStatuses = new Set(['unknown', 'unavailable', 'retry'])
 
-          if (retryRows.length > 0) {
-            pushHadIssues = true
-            for (const entry of retryRows) {
-              const msg = String(entry?.row?.conflict_reason ?? entry?.row?.conflict_code ?? `Sync op not acknowledged (${entry.status})`)
-              const attempts = Number(entry?.op?.attempts ?? 0) || 0
-              const backoff = Math.min(300000, 8000 * Math.pow(2, Math.max(0, attempts)))
-              await outboxUpdate(entry.id, {
-                last_error: msg,
-                last_error_at: new Date().toISOString(),
-                next_retry_at: new Date(Date.now() + backoff).toISOString(),
-              })
-            }
-            setSyncV2Status((prev) => ({
-              ...prev,
-              phase: 'error',
-              warning: prev.warning || 'One or more sync ops were not acknowledged by the server contract.',
-              error: `${retryRows.length} op${retryRows.length === 1 ? '' : 's'} pending server acknowledgement`,
-            }))
-          }
-
-          // Mark local photos as synced when their attachment metadata is pushed.
-          if (uploadedAttachmentRefs.length > 0 && idsToAck.length > 0) {
-            const ackedSet = new Set(idsToAck)
-            const byId = new Map(uploadedAttachmentRefs.map((r) => [r.id, r]))
-            setApp((prev) => ({
-              ...prev,
-              lots: (prev.lots ?? []).map((lot) => {
-                const photos = Array.isArray(lot.photos) ? lot.photos : []
-                let changed = false
-                const nextPhotos = photos.map((p) => {
-                  const ref = p?.id ? byId.get(p.id) : null
-                  if (ref?.op_id && !ackedSet.has(String(ref.op_id))) return p
-                  if (!ref) return p
-                  changed = true
-                  return {
-                    ...p,
-                    synced: true,
-                    sync_error: null,
-                    storage_bucket: ref.storage_bucket ?? p.storage_bucket ?? 'photos',
-                    storage_path: ref.storage_path ?? p.storage_path ?? null,
-                    thumb_storage_path: ref.thumb_storage_path ?? p.thumb_storage_path ?? null,
-                    uploaded_at: p.uploaded_at ?? new Date().toISOString(),
+              const idsToAck = []
+              const ackedReferenceHashes = []
+              const retryRows = []
+              const conflictRows = []
+              for (const op of ready) {
+                const id = String(op?.id ?? '')
+                if (!id) continue
+                const row = resultById.get(id) ?? null
+                const status = String(row?.status ?? 'unknown').toLowerCase()
+                if (appliedStatuses.has(status)) {
+                  idsToAck.push(id)
+                  if (op?.kind === 'reference_snapshot' && op?.reference_hash) {
+                    ackedReferenceHashes.push(String(op.reference_hash))
                   }
-                })
-                return changed ? { ...lot, photos: nextPhotos } : lot
-              }),
-            }))
-          }
+                } else if (terminalStatuses.has(status)) {
+                  conflictRows.push(row ?? { id, status, conflict_reason: 'Conflict' })
+                } else if (retryStatuses.has(status) || !row) {
+                  retryRows.push({ id, row, op, status })
+                } else {
+                  retryRows.push({ id, row, op, status: 'unknown' })
+                }
+              }
 
-          if (idsToAck.length > 0) {
-            await outboxAck(idsToAck)
-          }
-          setIsOnline(true)
-          setSyncV2Status((prev) => ({
-            ...prev,
-            rpc_health: 'healthy',
-            last_pushed_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.last_pushed_at ?? null,
-          }))
-          const lastAckedReferenceHash =
-            ackedReferenceHashes.length > 0 ? ackedReferenceHashes[ackedReferenceHashes.length - 1] : ''
-          setApp((prev) => ({
-            ...prev,
-            sync: {
-              ...(prev.sync ?? {}),
-              pending: idsToAck.length > 0 ? (prev.sync?.pending ?? []).filter((op) => !idsToAck.includes(String(op?.id ?? ''))) : prev.sync?.pending ?? [],
-              last_synced_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.sync?.last_synced_at ?? null,
-              v2_reference_last_acked_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_acked_hash || '',
-              v2_reference_last_queued_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_queued_hash || '',
-            },
-          }))
+              if (conflictRows.length > 0) {
+                pushHadIssues = true
+                nextDelayMs = Math.max(nextDelayMs, 7000)
+                for (const row of conflictRows) {
+                  const msg = String(row?.conflict_reason ?? row?.conflict_code ?? 'Conflict')
+                  await outboxUpdate(row.id, {
+                    last_error: msg,
+                    last_error_at: new Date().toISOString(),
+                    next_retry_at: null,
+                  })
+                }
+                setSyncV2Status((prev) => ({
+                  ...prev,
+                  phase: 'error',
+                  error: `${conflictRows.length} sync conflict${conflictRows.length === 1 ? '' : 's'} require resolution`,
+                }))
+              }
 
-          await setPendingOpsCount()
-          if (pushHadIssues) {
-            scheduleNext(7000)
-            return
+              if (retryRows.length > 0) {
+                pushHadIssues = true
+                nextDelayMs = Math.max(nextDelayMs, 7000)
+                for (const entry of retryRows) {
+                  const msg = String(entry?.row?.conflict_reason ?? entry?.row?.conflict_code ?? `Sync op not acknowledged (${entry.status})`)
+                  const attempts = Number(entry?.op?.attempts ?? 0) || 0
+                  const backoff = Math.min(300000, 8000 * Math.pow(2, Math.max(0, attempts)))
+                  await outboxUpdate(entry.id, {
+                    last_error: msg,
+                    last_error_at: new Date().toISOString(),
+                    next_retry_at: new Date(Date.now() + backoff).toISOString(),
+                  })
+                }
+                setSyncV2Status((prev) => ({
+                  ...prev,
+                  phase: 'error',
+                  warning: prev.warning || 'One or more sync ops were not acknowledged by the server contract.',
+                  error: `${retryRows.length} op${retryRows.length === 1 ? '' : 's'} pending server acknowledgement`,
+                }))
+              }
+
+              // Mark local photos as synced when their attachment metadata is pushed.
+              if (uploadedAttachmentRefs.length > 0 && idsToAck.length > 0) {
+                const ackedSet = new Set(idsToAck)
+                const byId = new Map(uploadedAttachmentRefs.map((r) => [r.id, r]))
+                setApp((prev) => ({
+                  ...prev,
+                  lots: (prev.lots ?? []).map((lot) => {
+                    const photos = Array.isArray(lot.photos) ? lot.photos : []
+                    let changed = false
+                    const nextPhotos = photos.map((p) => {
+                      const ref = p?.id ? byId.get(p.id) : null
+                      if (ref?.op_id && !ackedSet.has(String(ref.op_id))) return p
+                      if (!ref) return p
+                      changed = true
+                      return {
+                        ...p,
+                        synced: true,
+                        sync_error: null,
+                        storage_bucket: ref.storage_bucket ?? p.storage_bucket ?? 'photos',
+                        storage_path: ref.storage_path ?? p.storage_path ?? null,
+                        thumb_storage_path: ref.thumb_storage_path ?? p.thumb_storage_path ?? null,
+                        uploaded_at: p.uploaded_at ?? new Date().toISOString(),
+                      }
+                    })
+                    return changed ? { ...lot, photos: nextPhotos } : lot
+                  }),
+                }))
+              }
+
+              if (idsToAck.length > 0) {
+                await outboxAck(idsToAck)
+              }
+              setIsOnline(true)
+              setSyncV2Status((prev) => ({
+                ...prev,
+                rpc_health: 'healthy',
+                last_pushed_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.last_pushed_at ?? null,
+              }))
+              const lastAckedReferenceHash =
+                ackedReferenceHashes.length > 0 ? ackedReferenceHashes[ackedReferenceHashes.length - 1] : ''
+              setApp((prev) => ({
+                ...prev,
+                sync: {
+                  ...(prev.sync ?? {}),
+                  pending: idsToAck.length > 0 ? (prev.sync?.pending ?? []).filter((op) => !idsToAck.includes(String(op?.id ?? ''))) : prev.sync?.pending ?? [],
+                  last_synced_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.sync?.last_synced_at ?? null,
+                  v2_reference_last_acked_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_acked_hash || '',
+                  v2_reference_last_queued_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_queued_hash || '',
+                },
+              }))
+
+              await setPendingOpsCount()
+              if (pushHadIssues) {
+                nextDelayMs = Math.max(nextDelayMs, 7000)
+              }
+            }
           }
         }
 
@@ -3205,7 +3192,7 @@ export default function BuildFlow() {
             error: msg,
           }))
           if (!pullRes.missing && looksLikeNetworkError(pullRes.error)) setIsOnline(false)
-          scheduleNext(pullRes.missing ? 60000 : 12000)
+          scheduleNext(Math.max(nextDelayMs, pullRes.missing ? 60000 : 12000))
           return
         }
 
@@ -3448,6 +3435,7 @@ export default function BuildFlow() {
           const nextSync = {
             ...(prev.sync ?? {}),
             v2_last_pulled_at: serverTime,
+            last_synced_at: serverTime,
           }
 
           return {
@@ -3475,7 +3463,7 @@ export default function BuildFlow() {
           warning: '',
         }))
 
-        scheduleNext(4500)
+        scheduleNext(nextDelayMs)
       } catch (err) {
         const msg = String(err?.message ?? 'Sync v2 failed')
         setSyncV2Status((prev) => ({ ...prev, phase: 'error', rpc_health: 'degraded', error: msg }))
@@ -3492,19 +3480,16 @@ export default function BuildFlow() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase, syncV2Status.rpc_health])
+  }, [syncV2Enabled, supabaseUser?.id, supabaseStatus.phase, syncV2Status.rpc_health, syncV2Kick])
 
-  const pendingSyncOps = app.sync?.pending ?? []
+  const pendingSyncOpsRaw = app.sync?.pending ?? []
+  const pendingSyncOps = syncV2Enabled ? [] : pendingSyncOpsRaw
   const pendingSyncCount = pendingSyncOps.length
   const lastSyncedAt = app.sync?.last_synced_at ?? null
   const isGuestSession = Boolean(supabaseUser?.is_anonymous)
-  const cloudQueue = useMemo(() => (Array.isArray(app.sync?.cloud_queue) ? app.sync.cloud_queue : []), [app.sync?.cloud_queue])
+  const cloudQueueRaw = useMemo(() => (Array.isArray(app.sync?.cloud_queue) ? app.sync.cloud_queue : []), [app.sync?.cloud_queue])
+  const cloudQueue = syncV2Enabled ? [] : cloudQueueRaw
   const cloudQueueCount = cloudQueue.length
-  const cloudHasPending =
-    cloudQueueCount > 0 ||
-    writeSyncState.phase === 'pending' ||
-    writeSyncState.phase === 'syncing' ||
-    writeSyncState.phase === 'error'
   const cloudLastSyncedAt = app.sync?.cloud_last_synced_at ?? writeSyncState.lastSyncedAt ?? null
   const uiLastSyncedAt = cloudLastSyncedAt ?? writeSyncState.lastSyncedAt ?? null
   const uiLastCheckAt = supabaseStatus.loadedAt ?? uiLastSyncedAt ?? null
@@ -3518,14 +3503,21 @@ export default function BuildFlow() {
     if (times.length === 0) return null
     return new Date(Math.min(...times)).toISOString()
   }, [cloudQueue])
-  const showSyncPill = !isOnline || pendingSyncCount > 0 || Boolean(supabaseUser?.id)
+  const syncErrorState = syncV2Enabled
+    ? (syncV2Status.phase === 'error' || (syncV2Status.rpc_health && syncV2Status.rpc_health !== 'healthy' && syncV2Status.rpc_health !== 'checking'))
+    : writeSyncState.phase === 'error'
+  const syncInFlightState = syncV2Enabled ? syncV2Status.phase === 'syncing' : writeSyncState.phase === 'syncing'
+  const syncPendingCount = syncV2Enabled
+    ? Number(syncV2Status?.pending_ops || 0)
+    : Number(pendingSyncCount || 0) + Number(cloudQueueCount || 0)
+  const showSyncPill = !isOnline || syncPendingCount > 0 || Boolean(supabaseUser?.id)
   const syncPillLabel = (() => {
     if (!isOnline) return 'Offline'
-    if (!supabaseUser?.id) return pendingSyncCount > 0 ? 'Sync' : 'Local'
+    if (!supabaseUser?.id) return syncPendingCount > 0 ? 'Sync' : 'Local'
     if (supabaseStatus.phase !== 'ready') return 'Connecting'
-    if (writeSyncState.phase === 'error') return 'Sync error'
-    if (writeSyncState.phase === 'syncing') return 'Syncing'
-    if (cloudQueueCount > 0 || writeSyncState.phase === 'pending') return 'Pending'
+    if (syncErrorState) return 'Sync issue'
+    if (syncInFlightState) return 'Syncing'
+    if (syncPendingCount > 0 || (!syncV2Enabled && writeSyncState.phase === 'pending')) return 'Pending'
     return 'Synced'
   })()
   const baselineMeta = app?.sync?.baseline_meta ?? null
@@ -3542,7 +3534,9 @@ export default function BuildFlow() {
   const syncStatus = useMemo(
     () => ({
       phase: syncV2Enabled ? syncV2Status?.phase ?? 'idle' : writeSyncState?.phase ?? 'idle',
-      pending_count: Number(pendingSyncCount || 0) + Number(cloudQueueCount || 0) + Number(syncV2Status?.pending_ops || 0),
+      pending_count: syncV2Enabled
+        ? Number(syncV2Status?.pending_ops || 0)
+        : Number(pendingSyncCount || 0) + Number(cloudQueueCount || 0),
       last_ack_at: syncV2Status?.last_pushed_at ?? cloudLastSyncedAt ?? lastSyncedAt ?? null,
       last_error: syncV2Status?.error || cloudLastError || writeSyncState?.error || '',
       rpc_health: syncV2Enabled ? syncV2Status?.rpc_health ?? 'unknown' : 'legacy',
@@ -3565,6 +3559,46 @@ export default function BuildFlow() {
       baselineProtectionEnabled,
     ],
   )
+
+  const requestImmediateSync = useCallback(({ includeLegacy = true } = {}) => {
+    if (!supabaseUser?.id) return
+    if (!isOnline) return
+    if (includeLegacy && !syncV2Enabled) {
+      setCloudRetryTick((prev) => prev + 1)
+    }
+    setSyncV2Kick((prev) => prev + 1)
+  }, [isOnline, supabaseUser?.id, syncV2Enabled])
+
+  useEffect(() => {
+    if (!syncV2Enabled) return
+    const hasLegacyPending = Array.isArray(app?.sync?.pending) && app.sync.pending.length > 0
+    const hasLegacyQueue = Array.isArray(app?.sync?.cloud_queue) && app.sync.cloud_queue.length > 0
+    const hasLegacyError = Boolean(app?.sync?.cloud_last_error)
+    if (!hasLegacyPending && !hasLegacyQueue && !hasLegacyError) return
+
+    setApp((prev) => {
+      const sync = prev.sync ?? {}
+      const pending = Array.isArray(sync.pending) ? sync.pending : []
+      const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
+      if (pending.length === 0 && queue.length === 0 && !sync.cloud_last_error) return prev
+      return {
+        ...prev,
+        sync: {
+          ...sync,
+          pending: [],
+          cloud_queue: [],
+          cloud_last_error: '',
+          cloud_last_error_at: null,
+          cloud_last_queued_hash: sync.cloud_last_synced_hash ?? sync.cloud_last_queued_hash ?? '',
+        },
+      }
+    })
+    setWriteSyncState((prev) => ({
+      ...prev,
+      phase: prev.phase === 'syncing' ? 'syncing' : 'synced',
+      error: '',
+    }))
+  }, [app?.sync?.cloud_last_error, app?.sync?.cloud_queue, app?.sync?.pending, syncV2Enabled])
 
   useEffect(() => {
     if (!supabaseUser?.id) {
@@ -3593,6 +3627,34 @@ export default function BuildFlow() {
     setSyncV2Enabled(true)
     writeFlag('bf:sync_v2', true)
   }, [syncV2Required, syncV2Enabled])
+
+  useEffect(() => {
+    if (!supabaseUser?.id || !isOnline) return
+    requestImmediateSync()
+  }, [isOnline, lotDetailTab, requestImmediateSync, selectedCommunityId, selectedLotId, tab, supabaseUser?.id])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+
+    const triggerSync = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      requestImmediateSync()
+    }
+
+    const onVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      triggerSync()
+    }
+
+    window.addEventListener('focus', triggerSync)
+    window.addEventListener('pageshow', triggerSync)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', triggerSync)
+      window.removeEventListener('pageshow', triggerSync)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [requestImmediateSync])
 
   useEffect(() => {
     if (cloudQueue.length === 0) return
@@ -3700,7 +3762,7 @@ export default function BuildFlow() {
   useEffect(() => {
     const onOnline = () => {
       setIsOnline(true)
-      setCloudRetryTick((prev) => prev + 1)
+      requestImmediateSync()
       setWriteSyncState((prev) => (prev.phase === 'error' ? { ...prev, phase: 'pending' } : prev))
     }
     const onOffline = () => setIsOnline(false)
@@ -3710,7 +3772,7 @@ export default function BuildFlow() {
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
     }
-  }, [])
+  }, [requestImmediateSync])
 
   const communityWeatherLocation = useMemo(() => {
     const activeCommunities = (app.communities ?? []).filter((c) => c?.is_active !== false && !c?.deleted_at)
@@ -3957,9 +4019,32 @@ export default function BuildFlow() {
     const lot = lotsById.get(lotId) ?? null
     const community = lot ? communitiesById.get(lot.community_id) ?? null : null
 
+    const ordered = (MILESTONES ?? []).slice().sort((a, b) => (Number(a?.pct ?? 0) || 0) - (Number(b?.pct ?? 0) || 0))
+    const targetIndex = ordered.findIndex((m) => m.id === milestoneId)
+
     updateLot(lotId, (l) => ({
       ...l,
-      manual_milestones: { ...(l.manual_milestones ?? {}), [milestoneId]: Boolean(nextValue) },
+      manual_milestones: (() => {
+        const current = { ...(l.manual_milestones ?? {}) }
+        if (targetIndex < 0) {
+          current[milestoneId] = Boolean(nextValue)
+          return current
+        }
+        if (nextValue) {
+          for (let i = 0; i <= targetIndex; i += 1) {
+            const m = ordered[i]
+            if (m?.manual === false) continue
+            current[m.id] = true
+          }
+        } else {
+          for (let i = targetIndex; i < ordered.length; i += 1) {
+            const m = ordered[i]
+            if (m?.manual === false) continue
+            current[m.id] = false
+          }
+        }
+        return current
+      })(),
     }))
 
     if (nextValue) {
@@ -3987,6 +4072,7 @@ export default function BuildFlow() {
   )
 
   const enqueueSyncOp = ({ type, lot_id, entity_type, entity_id, summary }) => {
+    if (syncV2Enabled) return null
     const now = new Date().toISOString()
     const opId = uuid()
     const actorId = supabaseUser?.id ?? app?.sync?.supabase_user_id ?? 'local'
@@ -4316,24 +4402,26 @@ export default function BuildFlow() {
 
   const syncNow = () => {
     if (!isOnline) return
-    setApp((prev) => {
-      const sync = prev.sync ?? {}
-      const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
-      const refreshedQueue = queue.map((item) => ({ ...item, next_retry_at: null }))
-      return {
-        ...prev,
-        sync: {
-          ...sync,
-          cloud_queue: refreshedQueue,
-          cloud_last_error: '',
-          cloud_last_error_at: null,
-        },
+    if (!syncV2Enabled) {
+      setApp((prev) => {
+        const sync = prev.sync ?? {}
+        const queue = Array.isArray(sync.cloud_queue) ? sync.cloud_queue : []
+        const refreshedQueue = queue.map((item) => ({ ...item, next_retry_at: null }))
+        return {
+          ...prev,
+          sync: {
+            ...sync,
+            cloud_queue: refreshedQueue,
+            cloud_last_error: '',
+            cloud_last_error_at: null,
+          },
+        }
+      })
+      if (supabaseUser?.id) {
+        setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
       }
-    })
-    if (supabaseUser?.id) {
-      setWriteSyncState((prev) => ({ ...prev, phase: prev.phase === 'syncing' ? 'syncing' : 'pending', error: '' }))
-      setCloudRetryTick((prev) => prev + 1)
     }
+    requestImmediateSync()
   }
 
   const ensureDestructiveOverride = (actionLabel) => {
@@ -8440,13 +8528,13 @@ export default function BuildFlow() {
             <button
               onClick={() => setShowOfflineStatus(true)}
               className={`px-2 py-1 rounded-lg text-xs flex items-center gap-1 ${
-                !isOnline || writeSyncState.phase === 'error' ? 'bg-red-500/20' : writeSyncState.phase === 'syncing' ? 'bg-yellow-500/20' : 'bg-white/15'
+                !isOnline || syncErrorState ? 'bg-red-500/20' : syncInFlightState ? 'bg-yellow-500/20' : 'bg-white/15'
               }`}
               title={!isOnline ? 'Offline mode' : 'Sync status'}
             >
               {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
               {syncPillLabel}
-              {pendingSyncCount > 0 ? ` • ${pendingSyncCount}` : ''}
+              {syncPendingCount > 0 ? ` • ${syncPendingCount}` : ''}
             </button>
           )}
           <IconButton onClick={() => setShowNotifications(true)} title="Notifications">
@@ -8485,20 +8573,20 @@ export default function BuildFlow() {
                   {supabaseUser?.id ? (
                     <p
                       className={`text-xs mt-1 ${
-                        writeSyncState.phase === 'error'
+                        syncErrorState
                           ? 'text-red-600'
-                          : writeSyncState.phase === 'synced'
+                          : syncPillLabel === 'Synced'
                             ? 'text-green-700'
                             : 'text-amber-700'
                       }`}
                     >
-                      {writeSyncState.phase === 'error'
-                        ? `Sync error: ${writeSyncState.error || 'write failed'}`
-                        : writeSyncState.phase === 'syncing'
+                      {syncErrorState
+                        ? `Sync error: ${syncV2Enabled ? (syncV2Status.error || syncV2Status.warning || 'sync issue') : (writeSyncState.error || 'write failed')}`
+                        : syncInFlightState
                           ? `Syncing changes...${uiLastSyncedAt ? ` Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}` : ''}`
                           : uiLastSyncedAt && formatSyncTimestamp(uiLastSyncedAt)
                             ? `Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}`
-                            : writeSyncState.phase === 'idle'
+                            : syncPillLabel === 'Local'
                               ? 'Sync idle'
                               : 'Sync pending (not yet synced)'}
                     </p>
@@ -10153,23 +10241,26 @@ export default function BuildFlow() {
                     <Card className="bg-gray-50">
                       <p className="font-semibold mb-2">Milestones</p>
                       <div className="space-y-2 text-sm">
-                        <label className="flex items-center justify-between gap-3">
-                          <span>Permit Issued</span>
-                          <input
-                            type="checkbox"
-                            checked={Boolean((selectedLot.manual_milestones ?? {}).permit_issued)}
-                            onChange={(e) => toggleManualMilestone(selectedLot.id, 'permit_issued', e.target.checked)}
-                          />
-                        </label>
-                        <label className="flex items-center justify-between gap-3">
-                          <span>CO Received</span>
-                          <input
-                            type="checkbox"
-                            checked={Boolean((selectedLot.manual_milestones ?? {}).co)}
-                            onChange={(e) => toggleManualMilestone(selectedLot.id, 'co', e.target.checked)}
-                          />
-                        </label>
+                        {(MILESTONES ?? []).map((milestone) => {
+                          const checked = isMilestoneAchieved(selectedLot, milestone)
+                          const canToggle = milestone?.manual !== false
+                          return (
+                            <label key={milestone.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-2 py-1.5">
+                              <span className="flex items-center gap-2">
+                                <span>{milestone.label}</span>
+                                <span className="text-[11px] text-gray-500">{milestone.pct}%</span>
+                              </span>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(checked)}
+                                disabled={!canToggle}
+                                onChange={(e) => toggleManualMilestone(selectedLot.id, milestone.id, e.target.checked)}
+                              />
+                            </label>
+                          )
+                        })}
                       </div>
+                      <p className="mt-2 text-xs text-gray-500">Milestones complete in order. Checking a later milestone fills earlier steps.</p>
                     </Card>
                   </div>
                 ) : lotDetailTab === 'photos' ? (
@@ -11660,7 +11751,6 @@ export default function BuildFlow() {
           writeSyncState={writeSyncState}
           supabaseUser={supabaseUser}
           isGuestSession={isGuestSession}
-          cloudHasPending={cloudHasPending}
           cloudQueueCount={cloudQueueCount}
           cloudLastSyncedAt={cloudLastSyncedAt}
           cloudLastError={cloudLastError}
@@ -14199,7 +14289,6 @@ function OfflineStatusModal({
   writeSyncState,
   supabaseUser,
   isGuestSession,
-  cloudHasPending,
   cloudQueueCount,
   cloudLastSyncedAt,
   cloudLastError,
@@ -14217,7 +14306,6 @@ function OfflineStatusModal({
   const pendingCount = pendingList.length
   const canonicalPendingCount = Number(syncStatus?.pending_count || 0)
   const effectivePendingCount = Math.max(pendingCount, canonicalPendingCount)
-  const hasAnyPending = effectivePendingCount > 0 || cloudHasPending
 
   const byType = useMemo(() => {
     const map = new Map()
@@ -14250,7 +14338,7 @@ function OfflineStatusModal({
   })()
 
   const conflictPolicyText = syncV2Enabled
-    ? 'Sync v2: Conflicts are detected. Server rejects edits when the item changed on another device (no silent overwrite). Your edit stays queued locally until you refresh/retry.'
+    ? 'Automatic sync is enabled. If the same item is edited on two devices at the same time, server-side conflict checks prevent silent overwrite and retry safely.'
     : 'Snapshot sync: Last write wins. If the same item is edited on two devices, the most recent sync overwrites earlier edits.'
 
   return (
@@ -14265,7 +14353,7 @@ function OfflineStatusModal({
           <PrimaryButton
             onClick={onSyncNow}
             className="flex-1"
-            disabled={!isOnline || !hasAnyPending}
+            disabled={!isOnline}
           >
             Sync Now
           </PrimaryButton>
@@ -14276,7 +14364,7 @@ function OfflineStatusModal({
         <Card className="bg-gray-50">
           <p className="text-sm font-semibold">{isOnline ? 'Online' : 'Offline'}</p>
           <p className="text-sm text-gray-700 mt-1">
-            {isOnline ? 'Pending changes will sync now.' : 'Changes save locally and sync when connected.'}
+            {isOnline ? 'Changes sync automatically in the background.' : 'Changes save locally and sync when connected.'}
           </p>
         </Card>
 
@@ -14310,9 +14398,12 @@ function OfflineStatusModal({
               <p className="text-sm font-semibold">Sync v2 (Beta)</p>
               <p className="text-sm text-gray-700 mt-1">{syncV2PhaseLabel}</p>
               {syncV2Status?.warning ? <p className="text-xs text-amber-700 mt-1">{syncV2Status.warning}</p> : null}
-              {syncV2Enabled && syncV2Status?.last_pulled_at ? (
-                <p className="text-xs text-gray-600 mt-1">Last pull: {formatSyncTimestamp(syncV2Status.last_pulled_at)}</p>
-              ) : null}
+              <p className="text-xs text-gray-600 mt-1">
+                Last pull:{' '}
+                {syncV2Enabled && syncV2Status?.last_pulled_at
+                  ? formatSyncTimestamp(syncV2Status.last_pulled_at)
+                  : ' awaiting first pull'}
+              </p>
               {syncV2Enabled && syncV2Status?.last_pushed_at ? (
                 <p className="text-xs text-gray-600 mt-1">Last push: {formatSyncTimestamp(syncV2Status.last_pushed_at)}</p>
               ) : null}
@@ -14352,22 +14443,29 @@ function OfflineStatusModal({
             <p className="text-sm text-gray-600">All caught up.</p>
           ) : (
             <div className="space-y-2">
-              <div className="text-xs text-gray-600 rounded-xl border border-gray-200 bg-gray-50 p-2">
-                <p>Legacy local queue: <span className="font-semibold">{pendingCount}</span></p>
-                <p className="mt-1">Snapshot queue: <span className="font-semibold">{Number(cloudQueueCount || 0)}</span></p>
-                <p className="mt-1">Sync v2 outbox: <span className="font-semibold">{Number(syncV2Status?.pending_ops || 0)}</span></p>
-              </div>
-              {byType.map(([type, count]) => (
-                <div key={type} className="flex items-center justify-between text-sm bg-gray-50 border border-gray-200 rounded-xl p-3">
-                  <span className="font-semibold text-gray-900">{type}</span>
-                  <span className="text-gray-700">{count}</span>
+              {syncV2Enabled ? (
+                <div className="text-xs text-gray-600 rounded-xl border border-gray-200 bg-gray-50 p-2">
+                  <p>Sync v2 outbox: <span className="font-semibold">{Number(syncV2Status?.pending_ops || 0)}</span></p>
                 </div>
-              ))}
-              <div className="text-xs text-gray-500">
-                {pendingList.slice(0, 3).map((op) => (
-                  <div key={op.id}>• {op.summary || op.type}</div>
-                ))}
-              </div>
+              ) : (
+                <>
+                  <div className="text-xs text-gray-600 rounded-xl border border-gray-200 bg-gray-50 p-2">
+                    <p>Legacy local queue: <span className="font-semibold">{pendingCount}</span></p>
+                    <p className="mt-1">Snapshot queue: <span className="font-semibold">{Number(cloudQueueCount || 0)}</span></p>
+                  </div>
+                  {byType.map(([type, count]) => (
+                    <div key={type} className="flex items-center justify-between text-sm bg-gray-50 border border-gray-200 rounded-xl p-3">
+                      <span className="font-semibold text-gray-900">{type}</span>
+                      <span className="text-gray-700">{count}</span>
+                    </div>
+                  ))}
+                  <div className="text-xs text-gray-500">
+                    {pendingList.slice(0, 3).map((op) => (
+                      <div key={op.id}>• {op.summary || op.type}</div>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
           )}
         </Card>

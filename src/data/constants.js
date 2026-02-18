@@ -213,16 +213,13 @@ export const OUTDOOR_TASK_NAMES = [
 ]
 
 export const MILESTONES = [
-  { id: 'permit_issued', label: 'Permit Issued', trigger: null, pct: 0, short: 'PER', manual: true },
-  { id: 'foundation_complete', label: 'Foundation Complete', trigger: 'Slab Grade', pct: 8, short: 'FND' },
-  { id: 'framing_complete', label: 'Framing Complete', trigger: 'Framing', pct: 20, short: 'FRM' },
-  { id: 'dried_in', label: 'Dried-In', trigger: 'Roofing', pct: 27, short: 'DRY' },
-  { id: 'rough_complete', label: 'Rough Complete', trigger: 'Rough Inspection (Final)', pct: 45, short: 'RGH' },
-  { id: 'drywall_complete', label: 'Drywall Complete', trigger: 'Drywall Hang', pct: 55, short: 'DRW' },
-  { id: 'trim_complete', label: 'Trim Complete', trigger: 'Final Trim Install / Countertop Install', pct: 75, short: 'TRM' },
-  { id: 'final_inspection', label: 'Final Inspection', trigger: 'Final Inspection', pct: 95, short: 'FIN' },
-  { id: 'co', label: 'Certificate of Occupancy', trigger: null, pct: 98, short: 'CO', manual: true },
-  { id: 'complete', label: 'Complete', trigger: 'Punch Complete', pct: 100, short: 'CMP' },
+  { id: 'forms_up', label: 'Forms Up', trigger: null, pct: 10, short: 'FUP', manual: true },
+  { id: 'slab_poured', label: 'Slab Poured', trigger: null, pct: 20, short: 'SLB', manual: true },
+  { id: 'roof_rough', label: 'Roof / Rough', trigger: null, pct: 45, short: 'RGH', manual: true },
+  { id: 'brick_sheetrock', label: 'Brick / Sheet Rock', trigger: null, pct: 70, short: 'BRK', manual: true },
+  { id: 'cabinets', label: 'Cabinets', trigger: null, pct: 80, short: 'CAB', manual: true },
+  { id: 'carpet_sod', label: 'Carpet / Sod', trigger: null, pct: 90, short: 'CSD', manual: true },
+  { id: 'co', label: 'Certificate of Occupancy (CO)', trigger: null, pct: 100, short: 'CO', manual: true },
 ]
 
 export const MESSAGE_TEMPLATES = {

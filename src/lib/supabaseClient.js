@@ -29,6 +29,17 @@ const writeCookie = (name, value, maxAgeSeconds = 60 * 60 * 24 * 30) => {
   document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; Path=/; Max-Age=${Math.max(0, Number(maxAgeSeconds) || 0)}; SameSite=Lax${secure}`
 }
 
+const cookieByteLength = (value) => {
+  try {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(String(value ?? '')).length
+  } catch {
+    // ignore
+  }
+  return String(value ?? '').length
+}
+
+const MAX_COOKIE_VALUE_BYTES = 3500
+
 const removeCookie = (name) => {
   if (typeof document === 'undefined') return
   const secure = typeof window !== 'undefined' && window.location?.protocol === 'https:' ? '; Secure' : ''
@@ -68,7 +79,11 @@ const createResilientStorage = () => ({
       // ignore
     }
     try {
-      writeCookie(key, next)
+      if (cookieByteLength(next) <= MAX_COOKIE_VALUE_BYTES) {
+        writeCookie(key, next)
+      } else {
+        removeCookie(key)
+      }
     } catch {
       // ignore
     }
