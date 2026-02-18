@@ -13,6 +13,33 @@ let idbMirrorInFlight = false
 
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value)
 
+const REQUIRED_ORG_CUSTOM_FIELDS = [
+  { id: 'cf-elevation', label: 'Elevation' },
+  { id: 'cf-lot-cost', label: 'Lot Cost' },
+  { id: 'cf-construction-cost', label: 'Construction Cost' },
+  { id: 'cf-purchase-price', label: 'Purchase Price' },
+  { id: 'cf-sqft-heated', label: 'Sq Ft Heated (Override)' },
+  { id: 'cf-sqft-total', label: 'Sq Ft Total (Override)' },
+]
+
+const LOT_TYPE_VALUES = new Set(['vacant', 'spec', 'model', 'sold'])
+
+const normalizeLotType = (value) => {
+  const next = String(value ?? '').trim().toLowerCase()
+  if (LOT_TYPE_VALUES.has(next)) return next
+  return 'vacant'
+}
+
+const ensureOrgCustomFields = (fields) => {
+  const out = Array.isArray(fields) ? fields.map((x) => ({ ...x })) : []
+  const existingIds = new Set(out.map((f) => String(f?.id ?? '').trim()).filter(Boolean))
+  for (const required of REQUIRED_ORG_CUSTOM_FIELDS) {
+    if (existingIds.has(required.id)) continue
+    out.push({ ...required })
+  }
+  return out
+}
+
 export const loadStoredAppStateRaw = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -64,6 +91,9 @@ const migrateAppState = (state) => {
       productTypes.find((pt) => pt.id === productTypeId)?.build_days ??
       state.org?.default_build_days ??
       135
+    const customFields = isPlainObject(lot.custom_fields) ? { ...lot.custom_fields } : {}
+    const lotType = normalizeLotType(lot.lot_type ?? customFields.inventory_type)
+    customFields.inventory_type = lotType
 
     return {
       ...lot,
@@ -74,14 +104,16 @@ const migrateAppState = (state) => {
       job_number: lot.job_number ?? '',
       sold_status: lot.sold_status ?? 'available',
       sold_date: lot.sold_date ?? null,
-      custom_fields: lot.custom_fields ?? {},
       build_days: buildDays,
+      lot_type: lotType,
+      custom_fields: customFields,
     }
   })
 
   const org = {
     ...(state.org ?? {}),
-    custom_fields: state.org?.custom_fields ?? [],
+    custom_fields: ensureOrgCustomFields(state.org?.custom_fields),
+    plan_sq_ft_total: isPlainObject(state.org?.plan_sq_ft_total) ? state.org.plan_sq_ft_total : {},
   }
 
   const contactLibrary = {

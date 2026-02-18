@@ -148,6 +148,13 @@ export const SOLD_STATUSES = [
   { id: 'sold', label: 'Sold' },
 ]
 
+export const LOT_TYPES = [
+  { id: 'vacant', label: 'Vacant Lot' },
+  { id: 'spec', label: 'Spec' },
+  { id: 'model', label: 'Model' },
+  { id: 'sold', label: 'Sold' },
+]
+
 export const PUNCH_CATEGORIES = [
   { id: 'exterior', label: 'Exterior', items: ['Paint/Stain', 'Siding/Trim', 'Concrete/Flatwork', 'Roofing/Gutters', 'Landscaping'] },
   { id: 'interior', label: 'Interior', items: ['Drywall', 'Paint', 'Flooring', 'Trim/Baseboards', 'Doors', 'Cabinets', 'Countertops'] },

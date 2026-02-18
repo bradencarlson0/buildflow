@@ -49,6 +49,7 @@ import {
   DELAY_REASONS,
   INSPECTION_CHECKLISTS,
   INSPECTION_TYPES,
+  LOT_TYPES,
   MATERIAL_CATEGORIES,
   MATERIAL_STATUSES,
   MILESTONES,
@@ -1150,6 +1151,67 @@ const getSubEmail = (sub) => sub?.email || sub?.primary_contact?.email || ''
 
 const coerceArray = (value) => (Array.isArray(value) ? value : [])
 
+const LOT_CUSTOM_FIELD_KEYS = {
+  lot_type: 'inventory_type',
+  elevation: 'cf-elevation',
+  lot_cost: 'cf-lot-cost',
+  construction_cost: 'cf-construction-cost',
+  purchase_price: 'cf-purchase-price',
+  sqft_heated: 'cf-sqft-heated',
+  sqft_total: 'cf-sqft-total',
+}
+
+const PLAN_SQFT_TOTAL_MAP_KEY = 'plan_sq_ft_total'
+const LOT_TYPE_FALLBACK = 'vacant'
+const LOT_TYPE_VALUES = new Set(coerceArray(LOT_TYPES).map((x) => String(x?.id ?? '').toLowerCase()).filter(Boolean))
+LOT_TYPE_VALUES.add(LOT_TYPE_FALLBACK)
+
+const normalizeLotType = (value) => {
+  const next = String(value ?? '').trim().toLowerCase()
+  if (LOT_TYPE_VALUES.has(next)) return next
+  return LOT_TYPE_FALLBACK
+}
+
+const readPlanSqFtTotalMap = (org) => (org && typeof org === 'object' && org[PLAN_SQFT_TOTAL_MAP_KEY] && typeof org[PLAN_SQFT_TOTAL_MAP_KEY] === 'object'
+  ? org[PLAN_SQFT_TOTAL_MAP_KEY]
+  : {})
+
+const parseNumericValue = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const normalized = String(value).replace(/[^\d.-]/g, '')
+  if (!normalized) return null
+  const next = Number(normalized)
+  return Number.isFinite(next) ? next : null
+}
+
+const getPlanHeatedSqFt = (plan) => parseNumericValue(plan?.sq_ft)
+
+const getPlanTotalSqFt = (plan, org) => {
+  if (!plan?.id) return null
+  const map = readPlanSqFtTotalMap(org)
+  const mapped = parseNumericValue(map?.[plan.id])
+  if (mapped !== null) return mapped
+  return getPlanHeatedSqFt(plan)
+}
+
+const getLotType = (lot) => normalizeLotType(lot?.lot_type ?? lot?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.lot_type])
+
+const ensureLotTypeCustomField = (customFields, lotType) => ({
+  ...(customFields ?? {}),
+  [LOT_CUSTOM_FIELD_KEYS.lot_type]: normalizeLotType(lotType),
+})
+
+const getLotCustomField = (lot, key) => {
+  if (!key) return ''
+  const fields = lot?.custom_fields ?? {}
+  const value = fields[key]
+  if (value === null || value === undefined) return ''
+  return value
+}
+
+const getLotNumericCustomField = (lot, key) => parseNumericValue(getLotCustomField(lot, key))
+
 const normalizeHolidayObjects = (nextLike, prevLike) => {
   const prev = Array.isArray(prevLike) ? prevLike : []
   const prevNameByDate = new Map(
@@ -1213,18 +1275,23 @@ const mapTaskFromSupabase = (taskRow) => {
   }
 }
 
-const mapLotFromSupabase = (lotRow, lotTasks = []) => ({
-  ...lotRow,
-  custom_fields: lotRow?.custom_fields ?? {},
-  tasks: coerceArray(lotTasks),
-  inspections: coerceArray(lotRow?.inspections),
-  punch_list: lotRow?.punch_list ?? null,
-  daily_logs: coerceArray(lotRow?.daily_logs),
-  change_orders: coerceArray(lotRow?.change_orders),
-  material_orders: coerceArray(lotRow?.material_orders),
-  documents: coerceArray(lotRow?.documents),
-  photos: coerceArray(lotRow?.photos),
-})
+const mapLotFromSupabase = (lotRow, lotTasks = []) => {
+  const lotType = normalizeLotType(lotRow?.lot_type ?? lotRow?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.lot_type])
+  const customFields = ensureLotTypeCustomField(lotRow?.custom_fields, lotType)
+  return {
+    ...lotRow,
+    lot_type: lotType,
+    custom_fields: customFields,
+    tasks: coerceArray(lotTasks),
+    inspections: coerceArray(lotRow?.inspections),
+    punch_list: lotRow?.punch_list ?? null,
+    daily_logs: coerceArray(lotRow?.daily_logs),
+    change_orders: coerceArray(lotRow?.change_orders),
+    material_orders: coerceArray(lotRow?.material_orders),
+    documents: coerceArray(lotRow?.documents),
+    photos: coerceArray(lotRow?.photos),
+  }
+}
 
 const mapCommunityFromSupabase = (communityRow) => ({
   ...communityRow,
@@ -1366,36 +1433,39 @@ const mapSubcontractorToSupabase = (row, orgId) => ({
   custom_fields: row?.custom_fields ?? {},
 })
 
-const mapLotToSupabase = (row, orgId) => ({
-  id: row?.id,
-  org_id: orgId,
-  community_id: row?.community_id,
-  block: row?.block ?? '',
-  lot_number: String(row?.lot_number ?? ''),
-  product_type_id: row?.product_type_id ?? null,
-  plan_id: row?.plan_id ?? null,
-  builder_id: row?.builder_id ?? null,
-  address: row?.address ?? '',
-  job_number: row?.job_number ?? '',
-  permit_number: row?.permit_number ?? null,
-  model_type: row?.model_type ?? '',
-  status: row?.status ?? 'not_started',
-  start_date: toIsoDateOrNull(row?.start_date),
-  hard_deadline: toIsoDateOrNull(row?.hard_deadline),
-  build_days: Math.max(1, Number(row?.build_days ?? 1) || 1),
-  target_completion_date: toIsoDateOrNull(row?.target_completion_date),
-  actual_completion_date: toIsoDateOrNull(row?.actual_completion_date),
-  sold_status: row?.sold_status ?? 'available',
-  sold_date: toIsoDateOrNull(row?.sold_date),
-  custom_fields: row?.custom_fields ?? {},
-  inspections: coerceArray(row?.inspections),
-  punch_list: row?.punch_list ?? null,
-  daily_logs: coerceArray(row?.daily_logs),
-  change_orders: coerceArray(row?.change_orders),
-  material_orders: coerceArray(row?.material_orders),
-  documents: coerceArray(row?.documents),
-  photos: coerceArray(row?.photos),
-})
+const mapLotToSupabase = (row, orgId) => {
+  const lotType = normalizeLotType(row?.lot_type ?? row?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.lot_type])
+  return {
+    id: row?.id,
+    org_id: orgId,
+    community_id: row?.community_id,
+    block: row?.block ?? '',
+    lot_number: String(row?.lot_number ?? ''),
+    product_type_id: row?.product_type_id ?? null,
+    plan_id: row?.plan_id ?? null,
+    builder_id: row?.builder_id ?? null,
+    address: row?.address ?? '',
+    job_number: row?.job_number ?? '',
+    permit_number: row?.permit_number ?? null,
+    model_type: row?.model_type ?? '',
+    status: row?.status ?? 'not_started',
+    start_date: toIsoDateOrNull(row?.start_date),
+    hard_deadline: toIsoDateOrNull(row?.hard_deadline),
+    build_days: Math.max(1, Number(row?.build_days ?? 1) || 1),
+    target_completion_date: toIsoDateOrNull(row?.target_completion_date),
+    actual_completion_date: toIsoDateOrNull(row?.actual_completion_date),
+    sold_status: row?.sold_status ?? 'available',
+    sold_date: toIsoDateOrNull(row?.sold_date),
+    custom_fields: ensureLotTypeCustomField(row?.custom_fields, lotType),
+    inspections: coerceArray(row?.inspections),
+    punch_list: row?.punch_list ?? null,
+    daily_logs: coerceArray(row?.daily_logs),
+    change_orders: coerceArray(row?.change_orders),
+    material_orders: coerceArray(row?.material_orders),
+    documents: coerceArray(row?.documents),
+    photos: coerceArray(row?.photos),
+  }
+}
 
 const mapLotAssignmentToSupabase = (row, orgId) => ({
   id: row?.id,
@@ -1853,6 +1923,7 @@ export default function BuildFlow() {
     communityId: 'all',
     productTypeId: 'all',
     planId: 'all',
+    lotType: 'all',
     soldStatus: 'all',
     completionBy: '',
   })
@@ -2913,12 +2984,21 @@ export default function BuildFlow() {
       inFlight = true
 
       const startedAt = new Date().toISOString()
-      setSyncV2Status((prev) => ({ ...prev, phase: 'syncing', error: '', warning: prev.warning, rpc_health: 'healthy' }))
+      setSyncV2Status((prev) => ({
+        ...prev,
+        phase: prev.phase === 'error' ? 'error' : prev.phase === 'idle' ? 'ready' : prev.phase,
+        error: prev.phase === 'error' ? prev.error : '',
+        warning: prev.warning,
+        rpc_health: 'healthy',
+      }))
 
       try {
-        await setPendingOpsCount()
+        const pendingBefore = await setPendingOpsCount()
+        if (pendingBefore > 0) {
+          setSyncV2Status((prev) => ({ ...prev, phase: 'syncing', error: '' }))
+        }
         let pushHadIssues = false
-        let nextDelayMs = 4500
+        let nextDelayMs = 12000
 
         // Push due ops (durable outbox)
         const due = await outboxListV2Due({ limit: 5 })
@@ -5882,11 +5962,45 @@ export default function BuildFlow() {
     clearListDrag()
   }
 
+  const updateLotCustomField = (lotId, key, value) => {
+    if (!key) return
+    updateLot(lotId, (lot) => ({
+      ...lot,
+      custom_fields: {
+        ...(lot.custom_fields ?? {}),
+        [key]: value,
+      },
+    }))
+  }
+
+  const updateLotType = (lotId, lotType) => {
+    updateLot(lotId, (lot) => {
+      const nextLotType = normalizeLotType(lotType)
+      const nextStatus = nextLotType === 'sold' ? 'sold' : lot.sold_status ?? 'available'
+      const nextSoldDate = nextLotType === 'sold' ? lot.sold_date ?? todayIso : lot.sold_date ?? null
+      return {
+        ...lot,
+        lot_type: nextLotType,
+        sold_status: nextStatus,
+        sold_date: nextSoldDate,
+        custom_fields: ensureLotTypeCustomField(lot.custom_fields, nextLotType),
+      }
+    })
+  }
+
   const updateLotSoldStatus = (lotId, soldStatus) => {
     updateLot(lotId, (lot) => {
       const nextStatus = soldStatus || 'available'
-      const nextSoldDate = nextStatus === 'sold' ? (lot.sold_date ?? todayIso) : nextStatus === 'pending' ? lot.sold_date ?? null : null
-      return { ...lot, sold_status: nextStatus, sold_date: nextSoldDate }
+      const currentLotType = getLotType(lot)
+      const nextLotType = nextStatus === 'sold' ? 'sold' : currentLotType === 'sold' ? LOT_TYPE_FALLBACK : currentLotType
+      const nextSoldDate = nextStatus === 'sold' ? lot.sold_date ?? todayIso : nextStatus === 'pending' ? lot.sold_date ?? null : null
+      return {
+        ...lot,
+        sold_status: nextStatus,
+        sold_date: nextSoldDate,
+        lot_type: nextLotType,
+        custom_fields: ensureLotTypeCustomField(lot.custom_fields, nextLotType),
+      }
     })
   }
 
@@ -6987,6 +7101,86 @@ export default function BuildFlow() {
       return { title: 'Schedule Forecast', sheets: [{ name: 'Forecast', rows }] }
     }
 
+    if (reportType === 'inventory_sales') {
+      const rows = [
+        [
+          'Community',
+          'Lot',
+          'Inventory Type',
+          'Sales Status',
+          'Build Status',
+          'Product Type',
+          'Plan',
+          'Elevation',
+          'Sq Ft Heated',
+          'Sq Ft Total',
+          'Lot Cost',
+          'Construction Cost',
+          'Purchase Price',
+          'Address',
+          'Job Number',
+          'Permit Number',
+          'Start Date',
+          'Target Completion',
+          'Actual Completion',
+        ],
+      ]
+
+      const sortedLots = lots
+        .slice()
+        .sort(
+          (a, b) =>
+            String(communitiesById.get(a.community_id)?.name ?? '').localeCompare(String(communitiesById.get(b.community_id)?.name ?? '')) ||
+            Number(a.lot_number ?? 0) - Number(b.lot_number ?? 0),
+        )
+
+      for (const lot of sortedLots) {
+        const community = communitiesById.get(lot.community_id) ?? null
+        const plan = plans.find((p) => p.id === lot.plan_id) ?? null
+        const productType = productTypes.find((pt) => pt.id === lot.product_type_id) ?? null
+
+        const planHeated = getPlanHeatedSqFt(plan)
+        const planTotal = getPlanTotalSqFt(plan, org)
+        const heatedSqFt = getLotNumericCustomField(lot, LOT_CUSTOM_FIELD_KEYS.sqft_heated) ?? planHeated
+        const totalSqFt = getLotNumericCustomField(lot, LOT_CUSTOM_FIELD_KEYS.sqft_total) ?? planTotal ?? heatedSqFt
+
+        const lotCost = getLotNumericCustomField(lot, LOT_CUSTOM_FIELD_KEYS.lot_cost)
+        const constructionCost =
+          getLotNumericCustomField(lot, LOT_CUSTOM_FIELD_KEYS.construction_cost) ??
+          (heatedSqFt !== null ? Math.round(heatedSqFt * 132) : null)
+        const purchasePrice =
+          getLotNumericCustomField(lot, LOT_CUSTOM_FIELD_KEYS.purchase_price) ??
+          (lotCost !== null || constructionCost !== null
+            ? Math.round(((lotCost ?? 52000) + (constructionCost ?? 245000)) * 1.18)
+            : null)
+        const elevation = String(getLotCustomField(lot, LOT_CUSTOM_FIELD_KEYS.elevation) ?? '').trim()
+
+        rows.push([
+          community?.name ?? '',
+          lotCode(lot),
+          getLotType(lot),
+          lot.sold_status ?? 'available',
+          lot.status ?? '',
+          productType?.name ?? '',
+          plan?.name ?? '',
+          elevation,
+          heatedSqFt ?? '',
+          totalSqFt ?? '',
+          lotCost ?? '',
+          constructionCost ?? '',
+          purchasePrice ?? '',
+          lot.address ?? '',
+          lot.job_number ?? '',
+          lot.permit_number ?? '',
+          lot.start_date ?? '',
+          lot.target_completion_date ?? '',
+          lot.actual_completion_date ?? '',
+        ])
+      }
+
+      return { title: 'Inventory & Sales Report', sheets: [{ name: 'Inventory & Sales', rows }] }
+    }
+
     return { title: 'Report', sheets: [{ name: 'Report', rows: [['Unsupported report type']] }] }
   }
 
@@ -7351,6 +7545,7 @@ export default function BuildFlow() {
     if (ignoreKey !== 'communityId' && filters.communityId !== 'all' && lot.community_id !== filters.communityId) return false
     if (ignoreKey !== 'productTypeId' && filters.productTypeId !== 'all' && lot.product_type_id !== filters.productTypeId) return false
     if (ignoreKey !== 'planId' && filters.planId !== 'all' && lot.plan_id !== filters.planId) return false
+    if (ignoreKey !== 'lotType' && filters.lotType !== 'all' && getLotType(lot) !== filters.lotType) return false
     if (ignoreKey !== 'soldStatus' && filters.soldStatus !== 'all' && (lot.sold_status ?? 'available') !== filters.soldStatus) return false
     if (ignoreKey !== 'completionBy' && filters.completionBy && lot.target_completion_date && lot.target_completion_date > filters.completionBy) return false
     return true
@@ -7369,11 +7564,13 @@ export default function BuildFlow() {
       lots.filter((lot) => matchesSalesFilters(lot, filters, 'productTypeId')).map((lot) => lot.product_type_id),
     )
     const planIds = new Set(lots.filter((lot) => matchesSalesFilters(lot, filters, 'planId')).map((lot) => lot.plan_id))
+    const lotTypes = new Set(lots.filter((lot) => matchesSalesFilters(lot, filters, 'lotType')).map((lot) => getLotType(lot)))
 
     return {
       communities: communities.filter((c) => communityIds.has(c.id)),
       productTypes: productTypes.filter((pt) => productTypeIds.has(pt.id)),
       plans: plans.filter((p) => planIds.has(p.id)),
+      lotTypes: LOT_TYPES.filter((type) => lotTypes.has(type.id)),
     }
   }, [visibleLots, salesFilters, communities, productTypes, plans])
 
@@ -7391,6 +7588,10 @@ export default function BuildFlow() {
       }
       if (prev.planId !== 'all' && !salesFilterOptions.plans.some((p) => p.id === prev.planId)) {
         next.planId = 'all'
+        changed = true
+      }
+      if (prev.lotType !== 'all' && !salesFilterOptions.lotTypes.some((type) => type.id === prev.lotType)) {
+        next.lotType = 'all'
         changed = true
       }
       return changed ? next : prev
@@ -8372,7 +8573,8 @@ export default function BuildFlow() {
           actual_completion_date: null,
           sold_status: 'available',
           sold_date: null,
-          custom_fields: {},
+          lot_type: LOT_TYPE_FALLBACK,
+          custom_fields: ensureLotTypeCustomField({}, LOT_TYPE_FALLBACK),
           tasks: [],
           inspections: [],
           punch_list: null,
@@ -8582,13 +8784,17 @@ export default function BuildFlow() {
                     >
                       {syncErrorState
                         ? `Sync error: ${syncV2Enabled ? (syncV2Status.error || syncV2Status.warning || 'sync issue') : (writeSyncState.error || 'write failed')}`
-                        : syncInFlightState
-                          ? `Syncing changes...${uiLastSyncedAt ? ` Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}` : ''}`
-                          : uiLastSyncedAt && formatSyncTimestamp(uiLastSyncedAt)
-                            ? `Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}`
-                            : syncPillLabel === 'Local'
-                              ? 'Sync idle'
-                              : 'Sync pending (not yet synced)'}
+                          : syncPillLabel === 'Syncing'
+                            ? `Syncing changes...${uiLastSyncedAt ? ` Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}` : ''}`
+                            : syncPillLabel === 'Pending'
+                              ? 'Pending sync'
+                            : uiLastSyncedAt && formatSyncTimestamp(uiLastSyncedAt)
+                              ? `Last synced: ${formatSyncTimestamp(uiLastSyncedAt)}`
+                              : syncPillLabel === 'Synced'
+                                ? 'Synced'
+                              : syncPillLabel === 'Local'
+                                ? 'Sync idle'
+                                : 'Sync pending (not yet synced)'}
                     </p>
                   ) : null}
                   {supabaseStatus.warning ? (
@@ -10718,7 +10924,7 @@ export default function BuildFlow() {
           <div className="space-y-4">
             <Card>
               <h3 className="font-semibold mb-2">Reporting & Analytics</h3>
-              <p className="text-sm text-gray-600">Generate Progress, Community Summary, Delay Analysis, Sub Performance, and Forecast exports.</p>
+              <p className="text-sm text-gray-600">Generate Progress, Community Summary, Delay Analysis, Sub Performance, Forecast, and Inventory/Sales exports.</p>
               <div className="mt-3 flex gap-2">
                 <PrimaryButton onClick={() => setReportModal(true)} className="flex-1" disabled={!isOnline} title={!isOnline ? 'Export requires connection' : ''}>
                   Generate Report
@@ -10791,10 +10997,19 @@ export default function BuildFlow() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="font-semibold">Filters</p>
-                  <p className="text-xs text-gray-500 mt-1">Narrow inventory by community, product type, plan, and status.</p>
+                  <p className="text-xs text-gray-500 mt-1">Narrow inventory by community, product type, plan, lot type, and status.</p>
                 </div>
                 <button
-                  onClick={() => setSalesFilters({ communityId: 'all', productTypeId: 'all', planId: 'all', soldStatus: 'all', completionBy: '' })}
+                  onClick={() =>
+                    setSalesFilters({
+                      communityId: 'all',
+                      productTypeId: 'all',
+                      planId: 'all',
+                      lotType: 'all',
+                      soldStatus: 'all',
+                      completionBy: '',
+                    })
+                  }
                   className="text-xs font-semibold px-3 py-2 rounded-xl border border-gray-200 bg-white"
                 >
                   Reset
@@ -10844,6 +11059,18 @@ export default function BuildFlow() {
                   ))}
                 </select>
                 <select
+                  value={salesFilters.lotType}
+                  onChange={(e) => setSalesFilters((p) => ({ ...p, lotType: e.target.value }))}
+                  className="px-3 py-2 border rounded-xl"
+                >
+                  <option value="all">All Lot Types</option>
+                  {(salesFilterOptions.lotTypes?.length ? salesFilterOptions.lotTypes : LOT_TYPES).map((type) => (
+                    <option key={type.id} value={type.id}>
+                      {type.label}
+                    </option>
+                  ))}
+                </select>
+                <select
                   value={salesFilters.soldStatus}
                   onChange={(e) => setSalesFilters((p) => ({ ...p, soldStatus: e.target.value }))}
                   className="px-3 py-2 border rounded-xl"
@@ -10873,6 +11100,12 @@ export default function BuildFlow() {
                   const community = communitiesById.get(lot.community_id) ?? null
                   const productType = productTypes.find((pt) => pt.id === lot.product_type_id) ?? null
                   const plan = plans.find((p) => p.id === lot.plan_id) ?? null
+                  const lotType = getLotType(lot)
+                  const planHeatedSqFt = getPlanHeatedSqFt(plan)
+                  const planTotalSqFt = getPlanTotalSqFt(plan, org)
+                  const lotCost = getLotCustomField(lot, LOT_CUSTOM_FIELD_KEYS.lot_cost)
+                  const constructionCost = getLotCustomField(lot, LOT_CUSTOM_FIELD_KEYS.construction_cost)
+                  const purchasePrice = getLotCustomField(lot, LOT_CUSTOM_FIELD_KEYS.purchase_price)
                   return (
                     <Card key={lot.id}>
                       <div className="flex items-start justify-between gap-3">
@@ -10881,11 +11114,16 @@ export default function BuildFlow() {
                           <p className="text-xs text-gray-600 mt-1">
                             {productType?.name ?? 'Product'}{plan ? ` • ${plan.name}` : ''}{lot.address ? ` • ${lot.address}` : ''}
                           </p>
+                          {plan ? (
+                            <p className="text-xs text-gray-500 mt-1">
+                              Sq Ft: {planHeatedSqFt ?? '—'} heated / {planTotalSqFt ?? planHeatedSqFt ?? '—'} total
+                            </p>
+                          ) : null}
                           {lot.target_completion_date ? (
                             <p className="text-xs text-blue-600 mt-1">Est. completion: {formatShortDate(lot.target_completion_date)}</p>
                           ) : null}
                         </div>
-                        <div className="text-right">
+                        <div className="text-right min-w-[132px]">
                           <span
                             className={`px-3 py-1 rounded-full text-xs font-semibold ${
                               (lot.sold_status ?? 'available') === 'available'
@@ -10897,11 +11135,22 @@ export default function BuildFlow() {
                           >
                             {(lot.sold_status ?? 'available').toUpperCase()}
                           </span>
-                          <div className="mt-2">
+                          <div className="mt-2 space-y-2">
+                            <select
+                              value={lotType}
+                              onChange={(e) => updateLotType(lot.id, e.target.value)}
+                              className="text-xs px-2 py-1 border rounded-lg w-full"
+                            >
+                              {LOT_TYPES.map((type) => (
+                                <option key={type.id} value={type.id}>
+                                  {type.label}
+                                </option>
+                              ))}
+                            </select>
                             <select
                               value={lot.sold_status ?? 'available'}
                               onChange={(e) => updateLotSoldStatus(lot.id, e.target.value)}
-                              className="text-xs px-2 py-1 border rounded-lg"
+                              className="text-xs px-2 py-1 border rounded-lg w-full"
                             >
                               <option value="available">Available</option>
                               <option value="pending">Pending</option>
@@ -10909,6 +11158,41 @@ export default function BuildFlow() {
                             </select>
                           </div>
                         </div>
+                      </div>
+                      <div className="mt-3 grid gap-2 md:grid-cols-3">
+                        <label className="block">
+                          <span className="text-[11px] text-gray-600">Lot Cost (office)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            value={lotCost}
+                            onChange={(e) => updateLotCustomField(lot.id, LOT_CUSTOM_FIELD_KEYS.lot_cost, e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 border rounded-lg text-xs"
+                            placeholder="52500"
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-[11px] text-gray-600">Construction Cost (office)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            value={constructionCost}
+                            onChange={(e) => updateLotCustomField(lot.id, LOT_CUSTOM_FIELD_KEYS.construction_cost, e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 border rounded-lg text-xs"
+                            placeholder="248500"
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-[11px] text-gray-600">Purchase Price (office)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            value={purchasePrice}
+                            onChange={(e) => updateLotCustomField(lot.id, LOT_CUSTOM_FIELD_KEYS.purchase_price, e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 border rounded-lg text-xs"
+                            placeholder="359900"
+                          />
+                        </label>
                       </div>
                     </Card>
                   )
@@ -11235,15 +11519,23 @@ export default function BuildFlow() {
                         <p className="text-xs text-gray-500 mt-1">Plans define model options tied to a product type.</p>
                       </div>
                       <SecondaryButton
-                        onClick={() =>
+                        onClick={() => {
+                          const nextId = uuid()
                           setApp((prev) => ({
                             ...prev,
                             plans: [
                               ...(prev.plans ?? []),
-                              { id: uuid(), name: 'New Plan', product_type_id: prev.product_types?.[0]?.id ?? '', sq_ft: 0 },
+                              { id: nextId, name: 'New Plan', product_type_id: prev.product_types?.[0]?.id ?? '', sq_ft: 0 },
                             ],
+                            org: {
+                              ...(prev.org ?? {}),
+                              [PLAN_SQFT_TOTAL_MAP_KEY]: {
+                                ...readPlanSqFtTotalMap(prev.org),
+                                [nextId]: 0,
+                              },
+                            },
                           }))
-                        }
+                        }}
                         className="h-10"
                       >
                         + Add Plan
@@ -11272,10 +11564,18 @@ export default function BuildFlow() {
                               </label>
                               <button
                                 onClick={() =>
-                                  setApp((prev) => ({
-                                    ...prev,
-                                    plans: (prev.plans ?? []).filter((x) => x.id !== plan.id),
-                                  }))
+                                  setApp((prev) => {
+                                    const nextTotals = { ...readPlanSqFtTotalMap(prev.org) }
+                                    delete nextTotals[plan.id]
+                                    return {
+                                      ...prev,
+                                      plans: (prev.plans ?? []).filter((x) => x.id !== plan.id),
+                                      org: {
+                                        ...(prev.org ?? {}),
+                                        [PLAN_SQFT_TOTAL_MAP_KEY]: nextTotals,
+                                      },
+                                    }
+                                  })
                                 }
                                 className="text-xs text-red-600"
                               >
@@ -11304,7 +11604,7 @@ export default function BuildFlow() {
                                 </select>
                               </label>
                               <label className="block">
-                                <span className="text-xs text-gray-500">Square feet</span>
+                                <span className="text-xs text-gray-500">Heated sq ft</span>
                                 <input
                                   type="number"
                                   min="0"
@@ -11316,7 +11616,29 @@ export default function BuildFlow() {
                                     }))
                                   }
                                   className="mt-1 w-full px-3 py-2 border rounded-xl"
-                                  placeholder="Sq Ft"
+                                  placeholder="Heated sq ft"
+                                />
+                              </label>
+                              <label className="block">
+                                <span className="text-xs text-gray-500">Total sq ft</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={readPlanSqFtTotalMap(org)?.[plan.id] ?? ''}
+                                  onChange={(e) =>
+                                    setApp((prev) => ({
+                                      ...prev,
+                                      org: {
+                                        ...(prev.org ?? {}),
+                                        [PLAN_SQFT_TOTAL_MAP_KEY]: {
+                                          ...readPlanSqFtTotalMap(prev.org),
+                                          [plan.id]: e.target.value === '' ? '' : Number(e.target.value) || 0,
+                                        },
+                                      },
+                                    }))
+                                  }
+                                  className="mt-1 w-full px-3 py-2 border rounded-xl"
+                                  placeholder="Total sq ft"
                                 />
                               </label>
                             </div>
@@ -12776,13 +13098,15 @@ export default function BuildFlow() {
                   const resolvedTemplate =
                     productType?.template_id ? (prev.templates ?? []).find((t) => t.id === productType.template_id) ?? null : null
                   const plan = (prev.plans ?? []).find((p) => p.id === form.plan_id) ?? null
-                  const next = startLotFromTemplate({
+                  const nextLotType = normalizeLotType(form.lot_type)
+                  const nextCustomFields = ensureLotTypeCustomField(form.custom_fields, nextLotType)
+                  const nextBase = startLotFromTemplate({
                     lot: l,
                     start_date: form.start_date,
                     model_type: plan?.name ?? l.model_type ?? '',
                     plan_id: form.plan_id,
                     job_number: form.job_number,
-                    custom_fields: form.custom_fields,
+                    custom_fields: nextCustomFields,
                     address: form.address,
                     permit_number: form.permit_number,
                     hard_deadline: form.hard_deadline,
@@ -12792,6 +13116,7 @@ export default function BuildFlow() {
                     subcontractors: prev.subcontractors,
                     draftTasks: Array.isArray(draftTasks) ? draftTasks : [],
                   })
+                  const next = { ...nextBase, lot_type: nextLotType, custom_fields: nextCustomFields }
                   startedLot = next
                   op = buildV2TasksBatchOp({ lotId, prevLot: l, nextLot: next, includeLotRow: true })
                   return next
@@ -14319,6 +14644,13 @@ function OfflineStatusModal({
   const cloudPhaseLabel = (() => {
     if (!supabaseUser?.id) return 'Signed out (local only)'
     if (supabaseStatus?.phase !== 'ready') return 'Connecting to Supabase...'
+    if (syncV2Enabled) {
+      if (syncV2Status?.phase === 'error') return `Sync error: ${syncV2Status?.error || 'write failed'}`
+      if (syncV2Status?.phase === 'syncing') return 'Syncing changes...'
+      if (Number(syncStatus?.pending_count || 0) > 0) return 'Pending sync'
+      if (syncV2Status?.phase === 'ready') return 'Synced'
+      return 'Ready'
+    }
     if (writeSyncState?.phase === 'error') return `Sync error: ${writeSyncState?.error || 'write failed'}`
     if (writeSyncState?.phase === 'syncing') return 'Syncing changes...'
     if (writeSyncState?.phase === 'pending') return 'Pending sync'
@@ -14379,7 +14711,12 @@ function OfflineStatusModal({
           {cloudLastSyncedAt ? (
             <p className="text-xs text-gray-600 mt-1">Last cloud sync: {formatSyncTimestamp(cloudLastSyncedAt)}</p>
           ) : null}
-          <p className="text-xs text-gray-600 mt-1">Queue: {cloudQueueCount ?? 0} snapshot{cloudQueueCount === 1 ? '' : 's'}</p>
+          <p className="text-xs text-gray-600 mt-1">
+            Queue:{' '}
+            {syncV2Enabled
+              ? `${Number(syncStatus?.pending_count || 0)} op${Number(syncStatus?.pending_count || 0) === 1 ? '' : 's'}`
+              : `${cloudQueueCount ?? 0} snapshot${cloudQueueCount === 1 ? '' : 's'}`}
+          </p>
           {cloudLastError ? (
             <div className="text-xs text-red-600 mt-1">
               <p className="font-semibold">Last error: {cloudLastError}</p>
@@ -14540,6 +14877,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
   const [form, setForm] = useState(() => ({
     start_date: '',
     plan_id: '',
+    lot_type: resolvedLot ? getLotType(resolvedLot) : LOT_TYPE_FALLBACK,
     build_days_target: defaultBuildDaysTarget,
     hard_deadline: '',
     address: '',
@@ -14571,6 +14909,9 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
   const [previewGhost, setPreviewGhost] = useState(null)
   const previewGhostPosRef = useRef({ raf: null, x: 0, y: 0 })
   const [previewCollapsedTracks, setPreviewCollapsedTracks] = useState(() => new Set())
+  const selectedPlan = plans.find((p) => p.id === form.plan_id) ?? null
+  const selectedPlanHeatedSqFt = getPlanHeatedSqFt(selectedPlan)
+  const selectedPlanTotalSqFt = getPlanTotalSqFt(selectedPlan, org)
 
   useEffect(() => {
     if (!resolvedLotId) return
@@ -14579,13 +14920,22 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     for (const field of org.custom_fields ?? []) {
       fieldDefaults[field.id] = resolvedLot?.custom_fields?.[field.id] ?? ''
     }
+    const lotType = getLotType(resolvedLot)
     setForm((prev) => ({
       ...prev,
       plan_id: resolvedLot?.plan_id ?? defaultPlanId,
+      lot_type: lotType,
       address: resolvedLot?.address ?? '',
       permit_number: resolvedLot?.permit_number ?? '',
       job_number: resolvedLot?.job_number ?? '',
-      custom_fields: { ...fieldDefaults, ...(prev.custom_fields ?? {}) },
+      custom_fields: ensureLotTypeCustomField(
+        {
+          ...(prev.custom_fields ?? {}),
+          ...fieldDefaults,
+          ...(resolvedLot?.custom_fields ?? {}),
+        },
+        lotType,
+      ),
     }))
   }, [resolvedLot, resolvedLotId, plans, org.custom_fields])
 
@@ -14619,10 +14969,10 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     const nextLot = startLotFromTemplate({
       lot: resolvedLot,
       start_date: form.start_date,
-      model_type: resolvedLot?.model_type ?? '',
+      model_type: selectedPlan?.name ?? resolvedLot?.model_type ?? '',
       plan_id: form.plan_id || null,
       job_number: form.job_number,
-      custom_fields: form.custom_fields ?? {},
+      custom_fields: ensureLotTypeCustomField(form.custom_fields ?? {}, form.lot_type),
       address: form.address,
       permit_number: form.permit_number,
       hard_deadline: form.hard_deadline || null,
@@ -14640,6 +14990,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     resolvedLot,
     form.start_date,
     form.plan_id,
+    form.lot_type,
     form.job_number,
     form.custom_fields,
     form.address,
@@ -14647,6 +14998,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     form.hard_deadline,
     buildDaysTarget,
     template,
+    selectedPlan,
     org,
     app.subcontractors,
   ])
@@ -14666,7 +15018,7 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     return completion ? formatISODate(completion) : null
   }, [draftTasks])
 
-  const canStart = Boolean(resolvedLotId && form.start_date)
+  const canStart = Boolean(resolvedLotId && form.start_date && form.plan_id)
 
   const previewLot = useMemo(() => (resolvedLot ? { ...resolvedLot, tasks: draftTasks } : null), [resolvedLot, draftTasks])
 
@@ -14919,10 +15271,10 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
     const nextLot = startLotFromTemplate({
       lot: resolvedLot,
       start_date: form.start_date,
-      model_type: resolvedLot?.model_type ?? '',
+      model_type: selectedPlan?.name ?? resolvedLot?.model_type ?? '',
       plan_id: form.plan_id || null,
       job_number: form.job_number,
-      custom_fields: form.custom_fields ?? {},
+      custom_fields: ensureLotTypeCustomField(form.custom_fields ?? {}, form.lot_type),
       address: form.address,
       permit_number: form.permit_number,
       hard_deadline: form.hard_deadline || null,
@@ -15053,7 +15405,41 @@ function StartLotModal({ app, org, isOnline, prefill, onClose, onStart }) {
               </option>
             ))}
           </select>
+          <p className="text-xs text-gray-500 mt-1">Plan is required to start a lot so model/elevation data stays tied to reporting.</p>
         </label>
+
+        <label className="block">
+          <span className="text-sm font-semibold">Lot Type</span>
+          <select
+            value={form.lot_type}
+            onChange={(e) => setForm((prev) => ({ ...prev, lot_type: normalizeLotType(e.target.value) }))}
+            className="mt-1 w-full px-3 py-3 border rounded-xl"
+            disabled={!resolvedLotId}
+          >
+            {LOT_TYPES.map((type) => (
+              <option key={type.id} value={type.id}>
+                {type.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {selectedPlan ? (
+          <Card className="bg-gray-50 border border-gray-200">
+            <p className="text-sm font-semibold text-gray-800">Plan Square Footage</p>
+            <p className="text-xs text-gray-600 mt-1">Heated and total sqft are attached to this plan and editable in Admin → Plans.</p>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                <p className="text-[11px] text-gray-500">Heated</p>
+                <p className="text-sm font-semibold">{selectedPlanHeatedSqFt ?? '—'}</p>
+              </div>
+              <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                <p className="text-[11px] text-gray-500">Total</p>
+                <p className="text-sm font-semibold">{selectedPlanTotalSqFt ?? selectedPlanHeatedSqFt ?? '—'}</p>
+              </div>
+            </div>
+          </Card>
+        ) : null}
 
         <label className="block">
           <span className="text-sm font-semibold">Schedule Template</span>
@@ -25021,6 +25407,7 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
               { id: 'delay_analysis', label: 'Delay Analysis' },
               { id: 'sub_performance', label: 'Sub Performance' },
               { id: 'schedule_forecast', label: 'Schedule Forecast' },
+              { id: 'inventory_sales', label: 'Inventory & Sales' },
             ].map((rt) => (
               <button
                 key={rt.id}
@@ -25189,6 +25576,7 @@ function ScheduledReportsModal({ reports, communities, onClose, onUpdate }) {
                 <option value="delay_analysis">Delay Analysis</option>
                 <option value="sub_performance">Sub Performance</option>
                 <option value="schedule_forecast">Schedule Forecast</option>
+                <option value="inventory_sales">Inventory & Sales</option>
               </select>
               <div className="grid grid-cols-2 gap-2">
                 <select value={draft.frequency} onChange={(e) => setDraft((p) => ({ ...p, frequency: e.target.value }))} className="w-full px-3 py-3 border rounded-xl text-sm">

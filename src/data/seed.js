@@ -11,6 +11,11 @@ export const DEFAULT_ORG_SETTINGS = {
   work_days: [1, 2, 3, 4, 5],
   custom_fields: [
     { id: 'cf-elevation', label: 'Elevation' },
+    { id: 'cf-lot-cost', label: 'Lot Cost' },
+    { id: 'cf-construction-cost', label: 'Construction Cost' },
+    { id: 'cf-purchase-price', label: 'Purchase Price' },
+    { id: 'cf-sqft-heated', label: 'Sq Ft Heated (Override)' },
+    { id: 'cf-sqft-total', label: 'Sq Ft Total (Override)' },
     { id: 'cf-phase', label: 'Phase' },
     { id: 'cf-notes', label: 'Builder Notes' },
   ],
@@ -971,6 +976,15 @@ export const createSeedState = () => {
     { id: 'plan-birch', name: 'The Birch', product_type_id: 'pt-townhome', sq_ft: 2000, bedrooms: 4, bathrooms: 3 },
   ]
 
+  const planSqFtTotal = {
+    'plan-oak': 1810,
+    'plan-maple': 2060,
+    'plan-cedar': 2280,
+    'plan-pine': 2740,
+    'plan-spruce': 2010,
+    'plan-birch': 2480,
+  }
+
   const agencies = [
     {
       id: 'agency-huntsville',
@@ -1123,7 +1137,15 @@ export const createSeedState = () => {
         actual_completion_date: null,
         sold_status: 'available',
         sold_date: null,
-        custom_fields: {},
+        custom_fields: {
+          inventory_type: 'vacant',
+          'cf-elevation': '',
+          'cf-lot-cost': '',
+          'cf-construction-cost': '',
+          'cf-purchase-price': '',
+          'cf-sqft-heated': '',
+          'cf-sqft-total': '',
+        },
         tasks: [],
         inspections: [],
         punch_list: null,
@@ -1137,7 +1159,10 @@ export const createSeedState = () => {
   }
 
   return {
-    org: DEFAULT_ORG_SETTINGS,
+    org: {
+      ...DEFAULT_ORG_SETTINGS,
+      plan_sq_ft_total: planSqFtTotal,
+    },
     template: DEFAULT_TEMPLATE,
     templates: TEMPLATES,
     product_types,
