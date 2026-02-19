@@ -8951,11 +8951,12 @@ export default function BuildFlow() {
           {tab === 'dashboard' && !selectedLot && !selectedCommunity ? (
             <button
               onClick={() => setShowDemoSettings(true)}
-              className="px-2 py-1 rounded-lg text-xs bg-white/15 border border-white/20 inline-flex items-center gap-1"
+              className="h-8 w-8 sm:h-auto sm:w-auto sm:px-2 sm:py-1 rounded-lg text-xs bg-white/15 border border-white/20 inline-flex items-center justify-center gap-1"
               title="Open demo settings"
+              aria-label="Open demo settings"
             >
               <SlidersHorizontal className="w-4 h-4" />
-              Demo Settings
+              <span className="hidden sm:inline whitespace-nowrap">Demo Settings</span>
             </button>
           ) : null}
           {showSyncPill && (
