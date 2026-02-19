@@ -4694,11 +4694,20 @@ export default function BuildFlow() {
     requestImmediateSync()
   }
 
-  const ensureDestructiveOverride = (actionLabel) => {
+  const ensureDestructiveOverride = (actionLabel, { allowWithoutToken = false } = {}) => {
     if (!baselineProtectionEnabled) return true
     if (hasDestructiveOverride) return true
 
     if (!BASELINE_OVERRIDE_TOKEN) {
+      if (allowWithoutToken) {
+        const confirmed =
+          typeof window === 'undefined'
+            ? false
+            : window.confirm(
+                `Baseline-protected mode is enabled and no override token is configured.\n\nProceed with ${actionLabel}?`,
+              )
+        return confirmed
+      }
       alert(
         `Baseline-protected mode is enabled. ${actionLabel} is blocked until an override token is configured (VITE_BASELINE_OVERRIDE_TOKEN).`,
       )
@@ -8842,7 +8851,7 @@ export default function BuildFlow() {
   const unstartLot = async (lotId) => {
     const lot = lotId ? lotsById.get(lotId) : null
     if (!lot) return
-    if (!ensureDestructiveOverride(`unstart ${lotCode(lot)}`)) return
+    if (!ensureDestructiveOverride(`unstart ${lotCode(lot)}`, { allowWithoutToken: true })) return
     if (!isOnline) {
       alert('Unstart requires a connection right now.')
       return
