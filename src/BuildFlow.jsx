@@ -616,7 +616,9 @@ const MilestoneDots = ({ lot, className = '' }) => {
                 className={`w-3 h-3 rounded-full ${achieved ? 'bg-blue-600' : 'bg-gray-300'} ${isCurrent ? 'ring-2 ring-blue-300' : ''}`}
                 title={m.label}
               />
-              <span className={`mt-1 text-[10px] ${achieved ? 'text-gray-700' : 'text-gray-400'}`}>{m.short}</span>
+              <span className={`mt-1 px-1 text-center leading-tight text-[10px] ${achieved ? 'text-gray-700' : 'text-gray-400'}`}>
+                {m.label}
+              </span>
             </div>
           )
         })}
