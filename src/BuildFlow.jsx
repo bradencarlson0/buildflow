@@ -951,6 +951,65 @@ const getPhotoAnnotationBounds = (ctx, annotation) => {
   return null
 }
 
+const getPhotoAnnotationResizeHandles = (annotation) => {
+  if (!annotation) return []
+  if (annotation.type === 'arrow') {
+    return [
+      { id: 'start', x: Number(annotation.x1 ?? 0), y: Number(annotation.y1 ?? 0) },
+      { id: 'end', x: Number(annotation.x2 ?? 0), y: Number(annotation.y2 ?? 0) },
+    ]
+  }
+  if (annotation.type === 'rect' || annotation.type === 'ellipse') {
+    return [
+      { id: 'start', x: Number(annotation.x1 ?? 0), y: Number(annotation.y1 ?? 0) },
+      { id: 'end', x: Number(annotation.x2 ?? 0), y: Number(annotation.y2 ?? 0) },
+    ]
+  }
+  return []
+}
+
+const findPhotoAnnotationResizeHandle = (annotation, pt) => {
+  if (!annotation || !pt) return null
+  const handles = getPhotoAnnotationResizeHandles(annotation)
+  if (!handles.length) return null
+  for (const handle of handles) {
+    if (annotationDistance(pt, handle) <= 20) return handle.id
+  }
+  return null
+}
+
+const resizeAnnotationFromHandle = (annotation, handleId, pt, maxWidth, maxHeight) => {
+  if (!annotation || !handleId || !pt) return annotation
+  const clampX = clampNumber(Number(pt.x ?? 0), 0, Math.max(1, Number(maxWidth) || 1))
+  const clampY = clampNumber(Number(pt.y ?? 0), 0, Math.max(1, Number(maxHeight) || 1))
+  if (annotation.type === 'arrow' || annotation.type === 'rect' || annotation.type === 'ellipse') {
+    if (handleId === 'start') {
+      return { ...annotation, x1: clampX, y1: clampY }
+    }
+    if (handleId === 'end') {
+      return { ...annotation, x2: clampX, y2: clampY }
+    }
+  }
+  return annotation
+}
+
+const drawPhotoAnnotationResizeHandles = (ctx, annotation) => {
+  if (!ctx || !annotation) return
+  const handles = getPhotoAnnotationResizeHandles(annotation)
+  if (!handles.length) return
+  ctx.save()
+  for (const handle of handles) {
+    ctx.beginPath()
+    ctx.arc(handle.x, handle.y, 7, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.95)'
+    ctx.fill()
+    ctx.lineWidth = 2
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)'
+    ctx.stroke()
+  }
+  ctx.restore()
+}
+
 const drawSelectedAnnotationOutline = (ctx, annotation) => {
   if (!ctx || !annotation) return
   if (annotation.type === 'text') {
@@ -966,6 +1025,7 @@ const drawSelectedAnnotationOutline = (ctx, annotation) => {
   ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)'
   ctx.strokeRect(bounds.x - pad, bounds.y - pad, bounds.width + pad * 2, bounds.height + pad * 2)
   ctx.restore()
+  drawPhotoAnnotationResizeHandles(ctx, annotation)
 }
 
 const distancePointToSegment = (pt, a, b) => {
@@ -18312,8 +18372,6 @@ function InspectionNoteModal({ lot, community, tasks, inspection, isOnline, onCl
 
 function PhotoAnnotateModal({ file, onClose, onApply }) {
   const canvasRef = useRef(null)
-  const editorBodyRef = useRef(null)
-  const toolRailRef = useRef(null)
   const colorPickerRef = useRef(null)
   const [imageState, setImageState] = useState(null)
   const [tool, setTool] = useState('select')
@@ -18335,15 +18393,16 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const activePointersRef = useRef(new Map())
   const pinchRef = useRef({ active: false, targetId: null, startDistance: 0, baseSize: 0 })
   const selectionDragRef = useRef({ active: false, pointerId: null, targetId: null, lastPoint: null, moved: false })
-  const toolRailDragRef = useRef({ active: false, pointerId: null, startY: 0, startOffset: 0, moved: false })
-  const [toolRailOffsetY, setToolRailOffsetY] = useState(0)
+  const selectionResizeRef = useRef({ active: false, pointerId: null, targetId: null, handleId: null, moved: false })
 
   const selectedAnnotation = useMemo(
     () => (selectedAnnotationId ? annotations.find((item) => item.id === selectedAnnotationId) ?? null : null),
     [annotations, selectedAnnotationId],
   )
   const selectedTextAnnotation = selectedAnnotation?.type === 'text' ? selectedAnnotation : null
-  const selectedAnnotationIsLabelable = Boolean(selectedAnnotation && selectedAnnotation.type !== 'text')
+  const selectedAnnotationIsLabelable = Boolean(
+    selectedAnnotation && (selectedAnnotation.type === 'arrow' || selectedAnnotation.type === 'rect' || selectedAnnotation.type === 'ellipse'),
+  )
   const hasSaveableOutput = annotations.length > 0 || Boolean(String(description ?? '').trim())
 
   const triggerHaptic = useCallback((ms = 10) => {
@@ -18407,7 +18466,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       activePointersRef.current.clear()
       pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
       selectionDragRef.current = { active: false, pointerId: null, targetId: null, lastPoint: null, moved: false }
-      toolRailDragRef.current = { active: false, pointerId: null, startY: 0, startOffset: 0, moved: false }
+      selectionResizeRef.current = { active: false, pointerId: null, targetId: null, handleId: null, moved: false }
     },
     [],
   )
@@ -18480,65 +18539,19 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     return () => window.removeEventListener('pointerdown', onPointerDown)
   }, [showColorPicker])
 
-  const clampToolRailOffset = useCallback((nextOffset) => {
-    const host = editorBodyRef.current
-    const rail = toolRailRef.current
-    const hostHeight = Number(host?.clientHeight || 0)
-    const railHeight = Number(rail?.offsetHeight || 0)
-    if (!hostHeight || !railHeight) return Number(nextOffset) || 0
-    const margin = 12
-    const min = -(hostHeight / 2 - railHeight / 2 - margin)
-    const max = hostHeight / 2 - railHeight / 2 - margin
-    return clampNumber(Number(nextOffset) || 0, min, max)
+  const clearSelectionResize = useCallback(() => {
+    selectionResizeRef.current = { active: false, pointerId: null, targetId: null, handleId: null, moved: false }
   }, [])
 
-  const beginToolRailDrag = useCallback(
-    (e) => {
-      e.preventDefault()
-      toolRailDragRef.current = {
-        active: true,
-        pointerId: e.pointerId,
-        startY: e.clientY,
-        startOffset: toolRailOffsetY,
-        moved: false,
-      }
-      e.currentTarget?.setPointerCapture?.(e.pointerId)
-      triggerHaptic(8)
-    },
-    [toolRailOffsetY, triggerHaptic],
-  )
-
-  const moveToolRailDrag = useCallback(
-    (e) => {
-      const drag = toolRailDragRef.current
-      if (!drag.active || drag.pointerId !== e.pointerId) return
-      e.preventDefault()
-      const nextOffset = clampToolRailOffset(drag.startOffset + (e.clientY - drag.startY))
-      setToolRailOffsetY(nextOffset)
-      if (!drag.moved && Math.abs(e.clientY - drag.startY) > 8) {
-        drag.moved = true
-        triggerHaptic(6)
-      }
-    },
-    [clampToolRailOffset, triggerHaptic],
-  )
-
-  const endToolRailDrag = useCallback(
-    (e) => {
-      const drag = toolRailDragRef.current
-      if (!drag.active || drag.pointerId !== e.pointerId) return
-      if (e.currentTarget?.releasePointerCapture) {
-        try {
-          e.currentTarget.releasePointerCapture(e.pointerId)
-        } catch (_err) {
-          void _err
-        }
-      }
-      if (drag.moved) triggerHaptic(6)
-      toolRailDragRef.current = { active: false, pointerId: null, startY: 0, startOffset: 0, moved: false }
-    },
-    [triggerHaptic],
-  )
+  const beginSelectionResize = useCallback((pointerId, targetId, handleId) => {
+    selectionResizeRef.current = {
+      active: true,
+      pointerId,
+      targetId,
+      handleId,
+      moved: false,
+    }
+  }, [])
 
   const beginDraw = (e) => {
     setShowColorPicker(false)
@@ -18579,20 +18592,31 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       setShapeLabelDraft('')
       setDraftPath(null)
       setDraftShape(null)
+      clearSelectionResize()
       if (hitId) {
         e.preventDefault()
+        const hitAnnotation = annotations.find((item) => item.id === hitId) ?? null
+        const resizeHandleId = findPhotoAnnotationResizeHandle(hitAnnotation, pt)
         setSelectedAnnotationId(hitId)
-        beginSelectionDrag(e.pointerId, hitId, pt)
-        triggerHaptic(7)
+        if (resizeHandleId) {
+          beginSelectionResize(e.pointerId, hitId, resizeHandleId)
+          triggerHaptic(8)
+        } else {
+          beginSelectionDrag(e.pointerId, hitId, pt)
+          triggerHaptic(7)
+        }
         canvasRef.current?.setPointerCapture?.(e.pointerId)
       } else {
         setSelectedAnnotationId(null)
+        clearSelectionDrag()
+        clearSelectionResize()
       }
       return
     }
 
     if (tool === 'text') {
       e.preventDefault()
+      clearSelectionResize()
       if (hitItem?.type === 'text') {
         setSelectedAnnotationId(hitItem.id)
         setPendingTextPoint(null)
@@ -18614,6 +18638,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     setShapeLabelTargetId(null)
     setShapeLabelDraft('')
     clearSelectionDrag()
+    clearSelectionResize()
 
     if (tool === 'pen') {
       setDraftPath({
@@ -18660,6 +18685,22 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       }
       return
     }
+    const resizeState = selectionResizeRef.current
+    if (resizeState.active && resizeState.pointerId === e.pointerId && resizeState.targetId && resizeState.handleId) {
+      e.preventDefault()
+      const canvas = canvasRef.current
+      const maxWidth = Number(canvas?.width || imageState?.width || 1)
+      const maxHeight = Number(canvas?.height || imageState?.height || 1)
+      setAnnotations((prev) =>
+        prev.map((item) =>
+          item.id === resizeState.targetId
+            ? resizeAnnotationFromHandle(item, resizeState.handleId, pt, maxWidth, maxHeight)
+            : item,
+        ),
+      )
+      resizeState.moved = true
+      return
+    }
     const dragState = selectionDragRef.current
     if (dragState.active && dragState.pointerId === e.pointerId && dragState.targetId) {
       const prevPoint = dragState.lastPoint ?? pt
@@ -18693,6 +18734,19 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     if (saving) return
     const pt = getPointerPoint(e)
     activePointersRef.current.delete(e.pointerId)
+    const resizeState = selectionResizeRef.current
+    if (resizeState.active && resizeState.pointerId === e.pointerId) {
+      if (e.currentTarget?.releasePointerCapture) {
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId)
+        } catch (_err) {
+          void _err
+        }
+      }
+      if (resizeState.moved) triggerHaptic(6)
+      clearSelectionResize()
+      return
+    }
     const dragState = selectionDragRef.current
     if (dragState.active && dragState.pointerId === e.pointerId) {
       if (e.currentTarget?.releasePointerCapture) {
@@ -18740,6 +18794,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
     activePointersRef.current.clear()
     clearSelectionDrag()
+    clearSelectionResize()
     if (draftPath || draftShape) {
       setDraftPath(null)
       setDraftShape(null)
@@ -18757,6 +18812,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
     activePointersRef.current.clear()
     clearSelectionDrag()
+    clearSelectionResize()
     setAnnotations([])
     setDraftPath(null)
     setDraftShape(null)
@@ -18852,6 +18908,15 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     setShapeLabelDraft(String(selectedAnnotation.label ?? ''))
   }
 
+  const deleteSelectedAnnotation = () => {
+    if (!selectedAnnotationId) return
+    setAnnotations((prev) => prev.filter((item) => item.id !== selectedAnnotationId))
+    setSelectedAnnotationId(null)
+    clearSelectionDrag()
+    clearSelectionResize()
+    triggerHaptic(8)
+  }
+
   return (
     <div className="fixed inset-0 z-[95] bg-[#0A0A0D] text-white flex flex-col">
       <div className="safe-area-pt px-3 py-2 border-b border-white/10">
@@ -18879,19 +18944,11 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
             >
               <Trash2 className="w-5 h-5" />
             </button>
-            <button
-              type="button"
-              onClick={applyAnnotations}
-              disabled={saving || !hasSaveableOutput}
-              className="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/60 text-sm font-semibold"
-            >
-              {saving ? 'Saving...' : 'Save'}
-            </button>
           </div>
         </div>
       </div>
 
-      <div ref={editorBodyRef} className="relative flex-1 overflow-hidden">
+      <div className="relative flex-1 overflow-hidden">
         <div className="absolute inset-0 flex items-center justify-center p-3">
           {loadingError ? (
             <p className="text-sm text-red-300">{loadingError}</p>
@@ -18910,103 +18967,90 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           )}
         </div>
 
-        <div
-          ref={toolRailRef}
-          className="absolute right-3 z-20 bg-black/75 border border-white/10 rounded-2xl p-2 flex flex-col gap-2"
-          style={{ top: `calc(50% + ${toolRailOffsetY}px)`, transform: 'translateY(-50%)' }}
-        >
-          <button
-            type="button"
-            onPointerDown={beginToolRailDrag}
-            onPointerMove={moveToolRailDrag}
-            onPointerUp={endToolRailDrag}
-            onPointerCancel={endToolRailDrag}
-            className="h-9 w-11 rounded-xl flex items-center justify-center border border-white/20 bg-white/10 text-white/85 cursor-grab active:cursor-grabbing"
-            title="Drag tool rail"
-            aria-label="Drag tool rail"
-          >
-            <GripVertical className="w-5 h-5" />
-          </button>
-          {PHOTO_ANNOTATION_TOOLS.map((entry) => {
-            const Icon = entry.icon
-            const active = tool === entry.id
-            return (
-              <button
-                key={entry.id}
-                type="button"
-                onClick={() => {
-                  setShowColorPicker(false)
-                  setTool(entry.id)
-                  setDraftPath(null)
-                  setDraftShape(null)
-                  clearSelectionDrag()
-                  if (entry.id !== 'text' && pendingTextPoint) {
-                    setPendingTextPoint(null)
-                    setTextDraft('')
-                  }
-                  if (entry.id !== 'select') {
-                    setShapeLabelTargetId(null)
-                    setShapeLabelDraft('')
-                  }
-                  triggerHaptic(5)
-                }}
-                className={`h-11 w-11 rounded-xl flex items-center justify-center border ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-white/5 border-white/10 text-white/80 hover:bg-white/10'}`}
-                title={entry.label}
-                aria-label={entry.label}
-              >
-                <Icon className="w-5 h-5" />
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="absolute left-3 right-[4.75rem] bottom-3 bg-black/75 border border-white/10 rounded-2xl px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div ref={colorPickerRef} className="relative shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowColorPicker((prev) => !prev)}
-                className="h-10 px-3 rounded-xl border border-white/20 bg-white/10 hover:bg-white/15 flex items-center gap-2"
-                aria-label="Open color options"
-                title="Choose color"
-              >
-                <span className="w-6 h-6 rounded-full border border-white/40 flex items-center justify-center" style={{ backgroundColor: color }}>
-                  <Palette className="w-3.5 h-3.5 text-white mix-blend-difference" />
-                </span>
-                <span className="text-xs font-semibold text-white/85">Color</span>
-                <ChevronDown className={`w-3.5 h-3.5 text-white/70 transition-transform ${showColorPicker ? 'rotate-180' : ''}`} />
-              </button>
-              {showColorPicker ? (
-                <div className="absolute bottom-full left-0 mb-2 rounded-xl border border-white/20 bg-black/90 p-2 shadow-xl">
-                  <div className="grid grid-cols-3 gap-2">
-                    {PHOTO_ANNOTATION_COLORS.map((swatch) => {
-                      const active = swatch === color
-                      return (
-                        <button
-                          key={swatch}
-                          type="button"
-                          onClick={() => {
-                            setColor(swatch)
-                            setShowColorPicker(false)
-                            triggerHaptic(5)
-                          }}
-                          className={`h-8 w-8 rounded-lg border ${active ? 'border-blue-400 ring-1 ring-blue-400' : 'border-white/20'}`}
-                          style={{ backgroundColor: swatch }}
-                          aria-label={`Use ${swatch} annotation color`}
-                          title={swatch}
-                        />
-                      )
-                    })}
-                  </div>
-                </div>
-              ) : null}
+        <div className="absolute left-3 right-3 bottom-16 space-y-2">
+          <div className="bg-black/75 border border-white/10 rounded-2xl p-2">
+            <div className="flex items-center gap-2 overflow-x-auto">
+              {PHOTO_ANNOTATION_TOOLS.map((entry) => {
+                const Icon = entry.icon
+                const active = tool === entry.id
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => {
+                      setShowColorPicker(false)
+                      setTool(entry.id)
+                      setDraftPath(null)
+                      setDraftShape(null)
+                      clearSelectionDrag()
+                      clearSelectionResize()
+                      if (entry.id !== 'text' && pendingTextPoint) {
+                        setPendingTextPoint(null)
+                        setTextDraft('')
+                      }
+                      if (entry.id !== 'select') {
+                        setShapeLabelTargetId(null)
+                        setShapeLabelDraft('')
+                      }
+                      triggerHaptic(5)
+                    }}
+                    className={`h-10 px-3 rounded-xl border text-xs font-semibold shrink-0 inline-flex items-center gap-1.5 ${
+                      active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-white/5 border-white/10 text-white/85 hover:bg-white/10'
+                    }`}
+                    title={entry.label}
+                    aria-label={entry.label}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span>{entry.label}</span>
+                  </button>
+                )
+              })}
             </div>
+          </div>
 
-            <div className="flex-1 min-w-0 space-y-1.5">
-              <div className="h-7 rounded-lg border border-white/15 bg-white/5 px-2 flex items-center">
-                <div className="w-full rounded-full" style={{ height: `${Math.max(2, lineWidth)}px`, backgroundColor: color }} />
+          <div className="bg-black/75 border border-white/10 rounded-2xl px-3 py-2 space-y-2">
+            <div className="flex items-center gap-3">
+              <div ref={colorPickerRef} className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowColorPicker((prev) => !prev)}
+                  className="h-9 px-3 rounded-xl border border-white/20 bg-white/10 hover:bg-white/15 flex items-center gap-2"
+                  aria-label="Open color options"
+                  title="Choose color"
+                >
+                  <span className="w-5 h-5 rounded-full border border-white/40 flex items-center justify-center" style={{ backgroundColor: color }}>
+                    <Palette className="w-3 h-3 text-white mix-blend-difference" />
+                  </span>
+                  <span className="text-xs font-semibold text-white/85">Color</span>
+                  <ChevronDown className={`w-3.5 h-3.5 text-white/70 transition-transform ${showColorPicker ? 'rotate-180' : ''}`} />
+                </button>
+                {showColorPicker ? (
+                  <div className="absolute bottom-full left-0 mb-2 rounded-xl border border-white/20 bg-black/90 p-2 shadow-xl">
+                    <div className="grid grid-cols-3 gap-2">
+                      {PHOTO_ANNOTATION_COLORS.map((swatch) => {
+                        const active = swatch === color
+                        return (
+                          <button
+                            key={swatch}
+                            type="button"
+                            onClick={() => {
+                              setColor(swatch)
+                              setShowColorPicker(false)
+                              triggerHaptic(5)
+                            }}
+                            className={`h-8 w-8 rounded-lg border ${active ? 'border-blue-400 ring-1 ring-blue-400' : 'border-white/20'}`}
+                            style={{ backgroundColor: swatch }}
+                            aria-label={`Use ${swatch} annotation color`}
+                            title={swatch}
+                          />
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-              <label className="flex items-center gap-2 text-xs text-white/80">
+
+              <label className="flex-1 flex items-center gap-2 text-xs text-white/80">
                 <span>Thickness</span>
                 <input
                   type="range"
@@ -19018,53 +19062,66 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                 />
                 <span className="w-6 text-right tabular-nums">{lineWidth}</span>
               </label>
-              {selectedAnnotationId ? (
-                <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            </div>
+
+            {selectedAnnotationId ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedAnnotationId(null)
+                    clearSelectionDrag()
+                    clearSelectionResize()
+                  }}
+                  className="h-8 px-3 rounded-lg border border-white/20 bg-white/10 text-xs font-semibold"
+                >
+                  Unselect
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedAnnotation}
+                  className="h-8 px-3 rounded-lg border border-red-300/50 bg-red-500/20 text-red-100 text-xs font-semibold"
+                >
+                  Delete
+                </button>
+                {selectedAnnotationIsLabelable ? (
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedAnnotationId(null)
-                      clearSelectionDrag()
-                    }}
-                    className="h-7 px-2 rounded-lg border border-white/20 bg-white/10 text-[11px] font-semibold"
+                    onClick={openLabelPromptForSelection}
+                    className="h-8 px-3 rounded-lg border border-white/20 bg-white/10 text-xs font-semibold"
                   >
-                    Unselect
+                    Label
                   </button>
-                  {selectedAnnotationIsLabelable ? (
+                ) : null}
+                {selectedTextAnnotation ? (
+                  <div className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-white/10 px-1 py-0.5">
                     <button
                       type="button"
-                      onClick={openLabelPromptForSelection}
-                      className="h-7 px-2 rounded-lg border border-white/20 bg-white/10 text-[11px] font-semibold"
+                      onClick={() => adjustSelectedTextSize(-1)}
+                      className="h-6 w-6 rounded-md text-xs font-bold hover:bg-white/10"
+                      aria-label="Decrease text size"
                     >
-                      Label
+                      A-
                     </button>
-                  ) : null}
-                  {selectedTextAnnotation ? (
-                    <div className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-white/10 px-1 py-0.5">
-                      <button
-                        type="button"
-                        onClick={() => adjustSelectedTextSize(-1)}
-                        className="h-6 w-6 rounded-md text-xs font-bold hover:bg-white/10"
-                        aria-label="Decrease text size"
-                      >
-                        A-
-                      </button>
-                      <span className="text-[11px] tabular-nums w-6 text-center">{Math.max(2, Number(selectedTextAnnotation.size ?? 4))}</span>
-                      <button
-                        type="button"
-                        onClick={() => adjustSelectedTextSize(1)}
-                        className="h-6 w-6 rounded-md text-xs font-bold hover:bg-white/10"
-                        aria-label="Increase text size"
-                      >
-                        A+
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {selectedTextAnnotation ? <p className="text-[11px] text-white/60">Pinch or use A-/A+ to resize selected text.</p> : null}
-              {tool === 'select' ? <p className="text-[11px] text-white/60">Select tool: tap shape/text to move, tap blank area to unselect.</p> : null}
-            </div>
+                    <span className="text-[11px] tabular-nums w-6 text-center">{Math.max(2, Number(selectedTextAnnotation.size ?? 4))}</span>
+                    <button
+                      type="button"
+                      onClick={() => adjustSelectedTextSize(1)}
+                      className="h-6 w-6 rounded-md text-xs font-bold hover:bg-white/10"
+                      aria-label="Increase text size"
+                    >
+                      A+
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {(selectedAnnotation?.type === 'arrow' || selectedAnnotation?.type === 'rect' || selectedAnnotation?.type === 'ellipse') ? (
+              <p className="text-[11px] text-white/60">Drag the blue endpoint handles on the selected shape to resize.</p>
+            ) : null}
+            {selectedTextAnnotation ? <p className="text-[11px] text-white/60">Pinch or use A-/A+ to resize selected text.</p> : null}
+            {tool === 'select' ? <p className="text-[11px] text-white/60">Select tool: tap to select, drag to move, use handles to resize.</p> : null}
           </div>
         </div>
 
