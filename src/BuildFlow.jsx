@@ -1233,6 +1233,29 @@ const LOT_CUSTOM_FIELD_KEYS = {
   manual_milestones: 'cf-manual-milestones',
 }
 
+const INVENTORY_REPORT_FIELD_KEYS = {
+  spec_zero: 'cf-report-spec-zero',
+  pre_sale_buyer: 'cf-report-pre-sale-buyer',
+  contract_date: 'cf-report-contract-date',
+  superintendent: 'cf-report-superintendent',
+  sales_agent: 'cf-report-sales-agent',
+  prod_sched_date: 'cf-report-prod-sched-date',
+  permit_date: 'cf-report-permit-date',
+  slab_pour_date: 'cf-report-slab-pour-date',
+  frame_drop_date: 'cf-report-frame-drop-date',
+  co_date: 'cf-report-co-date',
+  walk_date: 'cf-report-walk-date',
+  close_date: 'cf-report-close-date',
+  lender_loan: 'cf-report-lender-loan',
+  broker_agent: 'cf-report-broker-agent',
+  com_percent: 'cf-report-com-percent',
+  rltr_bonus: 'cf-report-rltr-bns',
+  notes: 'cf-report-notes',
+  closing_date: 'cf-report-closing-date',
+  total_deposits: 'cf-report-total-deposits',
+  closing_agent: 'cf-report-closing-agent',
+}
+
 const PLAN_SQFT_TOTAL_MAP_KEY = 'plan_sq_ft_total'
 const LOT_TYPE_FALLBACK = 'vacant'
 const LOT_TYPE_VALUES = new Set(coerceArray(LOT_TYPES).map((x) => String(x?.id ?? '').toLowerCase()).filter(Boolean))
@@ -1685,6 +1708,15 @@ const formatSyncTimestamp = (iso) => {
     hour: 'numeric',
     minute: '2-digit',
   })
+}
+
+const formatReportDate = (value) => {
+  if (!value) return ''
+  const iso = typeof value === 'string' ? value.slice(0, 10) : value
+  const dt = parseISODate(iso)
+  if (!dt) return String(value ?? '').trim()
+  const yy = String(dt.getFullYear()).slice(-2)
+  return `${dt.getMonth() + 1}/${dt.getDate()}/${yy}`
 }
 
 const mergeTradeOptions = (customTrades = []) => {
@@ -7558,25 +7590,36 @@ export default function BuildFlow() {
     if (reportType === 'inventory_sales') {
       const rows = [
         [
-          'Community',
-          'Lot',
-          'Inventory Type',
-          'Sales Status',
-          'Build Status',
-          'Product Type',
-          'Plan',
-          'Elevation',
-          'Sq Ft Heated',
-          'Sq Ft Total',
-          'Lot Cost',
-          'Construction Cost',
-          'Purchase Price',
-          'Address',
-          'Job Number',
-          'Permit Number',
-          'Start Date',
-          'Target Completion',
-          'Actual Completion',
+          'LOT / UNIT',
+          'PLAN / ELEV',
+          'SQFT HEATED / TOTAL',
+          'LOT COST',
+          'CONST COST',
+          'PROPERTY ADDRESS',
+          'TOTAL PRICE',
+          'SPEC ZERO',
+          'PRE-SALE / SPEC',
+          '% COMP',
+          'CONTR DATE',
+          'SUPER',
+          'SALES AGENT',
+          'PROD SCHED',
+          'PERMIT DATE',
+          'SLAB POUR',
+          'FRAME DROP',
+          '110 DAYS',
+          '180 DAYS',
+          'CO DATE',
+          'WALK',
+          'CLOSE',
+          'LENDER/LOAN',
+          'BROKER/AGENT',
+          'COM %',
+          'RLTR BNS',
+          'NOTES',
+          'CLOSING DATE',
+          'TOTAL DEPOSITS',
+          'CLOSING AGENT',
         ],
       ]
 
@@ -7588,10 +7631,33 @@ export default function BuildFlow() {
             Number(a.lot_number ?? 0) - Number(b.lot_number ?? 0),
         )
 
+      const findTaskDate = (lot, tokens = [], { completedOnly = false } = {}) => {
+        const needle = tokens.map((token) => String(token ?? '').trim().toLowerCase()).filter(Boolean)
+        if (needle.length === 0) return ''
+        const tasks = (lot?.tasks ?? [])
+          .slice()
+          .sort((a, b) => (Number(a?.sort_order ?? 0) || 0) - (Number(b?.sort_order ?? 0) || 0))
+        for (const task of tasks) {
+          const name = String(task?.name ?? '').toLowerCase()
+          if (!needle.some((token) => name.includes(token))) continue
+          if (completedOnly && String(task?.status ?? '') !== 'complete') continue
+          const dateLike = task?.actual_end ?? task?.actual_start ?? task?.scheduled_end ?? task?.scheduled_start ?? null
+          if (!dateLike) continue
+          return String(dateLike).slice(0, 10)
+        }
+        return ''
+      }
+
+      const formatCurrency = (value) => {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return ''
+        return `$${Math.round(n).toLocaleString('en-US')}`
+      }
+
+      const coMilestone = (MILESTONES ?? []).find((m) => String(m?.id ?? '').toLowerCase() === 'co') ?? null
+
       for (const lot of sortedLots) {
-        const community = communitiesById.get(lot.community_id) ?? null
         const plan = plans.find((p) => p.id === lot.plan_id) ?? null
-        const productType = productTypes.find((pt) => pt.id === lot.product_type_id) ?? null
 
         const planHeated = getPlanHeatedSqFt(plan)
         const planTotal = getPlanTotalSqFt(plan, org)
@@ -7608,29 +7674,95 @@ export default function BuildFlow() {
             ? Math.round(((lotCost ?? 52000) + (constructionCost ?? 245000)) * 1.18)
             : null)
         const elevation = String(getLotCustomField(lot, LOT_CUSTOM_FIELD_KEYS.elevation) ?? '').trim()
+        const lotType = getLotType(lot)
+        const contractDate = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.contract_date)
+        const permitDate = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.permit_date)
+        const prodSchedDate = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.prod_sched_date) || lot.start_date || ''
+        const slabPourDate =
+          getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.slab_pour_date) ||
+          findTaskDate(lot, ['plumbing slab', 'slab pour', 'slab grade', 'slab inspection'])
+        const frameDropDate =
+          getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.frame_drop_date) ||
+          findTaskDate(lot, ['frame delivery', 'frame drop'])
+        const days110 = lot.start_date ? formatISODate(addCalendarDays(lot.start_date, 110)) : ''
+        const days180 = lot.start_date ? formatISODate(addCalendarDays(lot.start_date, 180)) : ''
+        const coDate =
+          getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.co_date) ||
+          lot.actual_completion_date ||
+          findTaskDate(lot, ['certificate of occupancy', 'coo', 'co inspection', 'final inspection'])
+        const walkDate =
+          getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.walk_date) ||
+          findTaskDate(lot, ['buyer walkthrough'], { completedOnly: true })
+        const closingDate = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.closing_date)
+        const closeDate = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.close_date) || closingDate
+        const preSaleBuyer = String(getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.pre_sale_buyer) ?? '').trim()
+        const preSaleSpec = lotType === 'spec' ? 'SPEC' : preSaleBuyer
+        const sqftText = [heatedSqFt, totalSqFt]
+          .map((value) => (Number.isFinite(Number(value)) ? String(Math.round(Number(value))) : ''))
+          .filter(Boolean)
+          .join('/')
+        const completedPct = Math.max(0, Math.min(100, Number(calculateLotProgress(lot) || 0)))
+        const planElev = [String(plan?.name ?? '').trim(), elevation].filter(Boolean).join(' ')
+        const lenderLoan = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.lender_loan)
+        const brokerAgent = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.broker_agent)
+        const comPercent = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.com_percent)
+        const rltrBonus = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.rltr_bonus)
+        const notes = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.notes)
+        const totalDeposits = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.total_deposits)
+        const closingAgent = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.closing_agent)
+        const superintendent = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.superintendent)
+        const salesAgent = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.sales_agent)
+        const specZero = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.spec_zero)
 
         rows.push([
-          community?.name ?? '',
           lotCode(lot),
-          getLotType(lot),
-          lot.sold_status ?? 'available',
-          lot.status ?? '',
-          productType?.name ?? '',
-          plan?.name ?? '',
-          elevation,
-          heatedSqFt ?? '',
-          totalSqFt ?? '',
-          lotCost ?? '',
-          constructionCost ?? '',
-          purchasePrice ?? '',
+          planElev,
+          sqftText,
+          formatCurrency(lotCost),
+          formatCurrency(constructionCost),
           lot.address ?? '',
-          lot.job_number ?? '',
-          lot.permit_number ?? '',
-          lot.start_date ?? '',
-          lot.target_completion_date ?? '',
-          lot.actual_completion_date ?? '',
+          formatCurrency(purchasePrice),
+          specZero,
+          preSaleSpec,
+          `${Math.round(completedPct)}`,
+          formatReportDate(contractDate),
+          superintendent,
+          salesAgent,
+          formatReportDate(prodSchedDate),
+          formatReportDate(permitDate),
+          formatReportDate(slabPourDate),
+          formatReportDate(frameDropDate),
+          formatReportDate(days110),
+          formatReportDate(days180),
+          formatReportDate(coDate),
+          formatReportDate(walkDate),
+          formatReportDate(closeDate),
+          lenderLoan,
+          brokerAgent,
+          comPercent,
+          rltrBonus,
+          notes,
+          formatReportDate(closingDate),
+          totalDeposits,
+          closingAgent,
         ])
       }
+
+      const totalVacantLots = sortedLots.filter((lot) => getLotType(lot) === 'vacant').length
+      const totalSpecs = sortedLots.filter((lot) => getLotType(lot) === 'spec').length
+      const completedSpecs = sortedLots.filter((lot) => getLotType(lot) === 'spec' && (lot.status === 'complete' || (coMilestone ? isMilestoneAchieved(lot, coMilestone) : false))).length
+      const totalModels = sortedLots.filter((lot) => getLotType(lot) === 'model').length
+      const completedModels = sortedLots.filter((lot) => getLotType(lot) === 'model' && lot.status === 'complete').length
+      const totalHomesSold = sortedLots.filter((lot) => String(lot?.sold_status ?? '').toLowerCase() === 'sold').length
+      const totalHomesOnReport = sortedLots.length
+
+      rows.push([])
+      rows.push(['TOTAL VACANT LOTS', totalVacantLots])
+      rows.push(['TOTAL SPECS', totalSpecs])
+      rows.push(['COMPLETED SPECS', completedSpecs])
+      rows.push(['TOTAL MODELS', `${totalModels}${completedModels > 0 ? ` (${completedModels} COMP MODEL)` : ''}`])
+      rows.push(['TOTAL HOMES SOLD', totalHomesSold])
+      rows.push(['TOTAL HOMES ON REPORT', totalHomesOnReport])
 
       return { title: 'Inventory & Sales Report', sheets: [{ name: 'Inventory & Sales', rows }] }
     }
@@ -7661,6 +7793,43 @@ export default function BuildFlow() {
         const wb = XLSX.utils.book_new()
         for (const sheet of sheets) {
           const ws = XLSX.utils.aoa_to_sheet(sheet.rows ?? [])
+          if (reportType === 'inventory_sales' && String(sheet.name ?? '').toLowerCase() === 'inventory & sales') {
+            ws['!cols'] = [
+              { wch: 13 }, // LOT / UNIT
+              { wch: 24 }, // PLAN / ELEV
+              { wch: 14 }, // SQFT HEATED / TOTAL
+              { wch: 11 }, // LOT COST
+              { wch: 11 }, // CONST COST
+              { wch: 24 }, // PROPERTY ADDRESS
+              { wch: 12 }, // TOTAL PRICE
+              { wch: 10 }, // SPEC ZERO
+              { wch: 13 }, // PRE-SALE / SPEC
+              { wch: 8 }, // % COMP
+              { wch: 11 }, // CONTR DATE
+              { wch: 11 }, // SUPER
+              { wch: 12 }, // SALES AGENT
+              { wch: 11 }, // PROD SCHED
+              { wch: 11 }, // PERMIT DATE
+              { wch: 11 }, // SLAB POUR
+              { wch: 11 }, // FRAME DROP
+              { wch: 9 }, // 110 DAYS
+              { wch: 9 }, // 180 DAYS
+              { wch: 10 }, // CO DATE
+              { wch: 10 }, // WALK
+              { wch: 10 }, // CLOSE
+              { wch: 18 }, // LENDER/LOAN
+              { wch: 20 }, // BROKER/AGENT
+              { wch: 8 }, // COM %
+              { wch: 10 }, // RLTR BNS
+              { wch: 24 }, // NOTES
+              { wch: 12 }, // CLOSING DATE
+              { wch: 12 }, // TOTAL DEPOSITS
+              { wch: 16 }, // CLOSING AGENT
+            ]
+            const endCol = XLSX.utils.encode_col(29)
+            ws['!autofilter'] = { ref: `A1:${endCol}1` }
+            ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' }
+          }
           XLSX.utils.book_append_sheet(wb, ws, String(sheet.name ?? 'Sheet').slice(0, 31))
         }
         XLSX.writeFile(wb, `${base}.xlsx`)
