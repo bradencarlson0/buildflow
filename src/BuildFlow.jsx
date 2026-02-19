@@ -716,14 +716,23 @@ const formatPct = (value, total) => {
   return `${Math.round((100 * part) / whole)}%`
 }
 
-const formatMoneyCompact = (value) => {
-  const n = Number(value)
-  if (!Number.isFinite(n)) return '$0'
-  return n.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    notation: 'compact',
-    maximumFractionDigits: 1,
+const buildDemoCycleRiskRows = (count, thresholdDays, options = {}) => {
+  const communityNames = options.communityNames ?? ['The Grove', 'Ovation', 'The Heights', 'Madison City']
+  const lotSeed = Number(options.lotSeed ?? 1)
+  const baseProgress = Number(options.baseProgress ?? 62)
+  return Array.from({ length: count }, (_, idx) => {
+    const days = thresholdDays + idx * 3 + 1
+    const lotNum = lotSeed + idx * 2
+    const communityName = communityNames[idx % communityNames.length]
+    return {
+      id: `demo-risk-${thresholdDays}-${idx}`,
+      lotId: null,
+      label: `${communityName} • Lot ${lotNum}`,
+      days,
+      progress: Math.max(8, Math.min(98, baseProgress + ((idx % 5) - 2) * 6)),
+      milestone: idx % 3 === 0 ? 'Cabinets' : idx % 3 === 1 ? 'Roof / Rough' : 'Brick / Sheet Rock',
+      isDemo: true,
+    }
   })
 }
 
@@ -738,6 +747,8 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
     const key = formatISODate(week)
     return { key, label: formatShortDate(key), value }
   })
+  const riskLots180 = buildDemoCycleRiskRows(4, 180, { lotSeed: 3, baseProgress: 74 })
+  const riskLots110 = [...riskLots180, ...buildDemoCycleRiskRows(14, 110, { lotSeed: 27, baseProgress: 56 })]
 
   return {
     isDemo: true,
@@ -748,15 +759,16 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
     completeCount: 31,
     avgProgress: 68,
     avgCycleDays: 97,
-    over110: 18,
-    over180: 4,
+    over110: riskLots110.length,
+    over180: riskLots180.length,
     sold: 31,
     pending: 22,
     available: 83,
     closingPipeline30: 14,
     projectedQuarterClosings: 38,
-    projectedRevenue30: 7250000,
-    atRiskRevenue: 6045000,
+    onTimeRate: 76,
+    riskLots110,
+    riskLots180,
     buildStatusMix: [
       { id: 'not_started', label: 'Not Started', value: 51, className: 'bg-slate-300' },
       { id: 'in_progress', label: 'In Progress', value: 54, className: 'bg-blue-500' },
@@ -787,6 +799,22 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
       { id: 'drywall', label: 'Drywall', value: 20, events: 5 },
       { id: 'cabinets', label: 'Cabinets', value: 16, events: 4 },
       { id: 'paint', label: 'Paint', value: 13, events: 3 },
+    ],
+    builderLoad: [
+      { id: 'b-black', label: 'B. Clark', value: 24, activeLots: 12 },
+      { id: 'b-bb', label: 'BB', value: 22, activeLots: 10 },
+      { id: 'b-jones', label: 'A. Jones', value: 18, activeLots: 8 },
+      { id: 'b-walker', label: 'C. Walker', value: 16, activeLots: 7 },
+      { id: 'b-hill', label: 'T. Hill', value: 14, activeLots: 6 },
+      { id: 'b-unassigned', label: 'Unassigned', value: 9, activeLots: 2 },
+    ],
+    subPerformance: [
+      { id: 'sub-mullins', label: 'Mullins Plumbing', value: 93, totalTasks: 34, delayedTasks: 2, delayDays: 9 },
+      { id: 'sub-hunts', label: 'Huntsville Electric', value: 91, totalTasks: 31, delayedTasks: 3, delayDays: 12 },
+      { id: 'sub-precision', label: 'Precision Cabinets', value: 88, totalTasks: 24, delayedTasks: 3, delayDays: 8 },
+      { id: 'sub-solid', label: 'Solid Frame', value: 86, totalTasks: 22, delayedTasks: 3, delayDays: 14 },
+      { id: 'sub-summit', label: 'Summit Drywall', value: 83, totalTasks: 29, delayedTasks: 5, delayDays: 18 },
+      { id: 'sub-alpha', label: 'Alpha Paint', value: 80, totalTasks: 20, delayedTasks: 4, delayDays: 16 },
     ],
     completionTrend,
   }
@@ -894,16 +922,16 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
         </svg>
       </div>
       <div className="flex items-center justify-between text-xs text-gray-600">
-        <span>{list[0]?.label ?? ''}</span>
+        <span>Week of {list[0]?.label ?? ''}</span>
         <span
           className={`font-semibold px-2 py-1 rounded-full border ${
             latestDelta >= 0 ? 'text-emerald-700 border-emerald-200 bg-emerald-50' : 'text-rose-700 border-rose-200 bg-rose-50'
           }`}
         >
-          Latest: {formatCount(latest?.value ?? 0)}
-          {previous ? ` (${latestDelta >= 0 ? '+' : ''}${formatCount(latestDelta)})` : ''}
+          This week: {formatCount(latest?.value ?? 0)} homes
+          {previous ? ` (${latestDelta >= 0 ? '+' : ''}${formatCount(latestDelta)} vs last week)` : ''}
         </span>
-        <span>{latest?.label ?? ''}</span>
+        <span>Week of {latest?.label ?? ''}</span>
       </div>
     </div>
   )
@@ -2302,6 +2330,7 @@ export default function BuildFlow() {
   const [taskModal, setTaskModal] = useState(null)
   const [onSiteLotModal, setOnSiteLotModal] = useState(null)
   const [dashboardStatusModal, setDashboardStatusModal] = useState(null)
+  const [cycleRiskModal, setCycleRiskModal] = useState(null)
   const [atGlanceModal, setAtGlanceModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
@@ -8473,14 +8502,32 @@ export default function BuildFlow() {
       ? Math.round(active.reduce((sum, lot) => sum + Number(calculateLotProgress(lot) || 0), 0) / active.length)
       : 0
 
-    const cycleSamples = active
-      .map((lot) => (lot?.start_date ? businessDaysBetweenInclusive(lot.start_date, todayIso) : null))
-      .filter((value) => Number.isFinite(value))
+    const cycleRiskRows = active
+      .map((lot) => {
+        const days = lot?.start_date ? businessDaysBetweenInclusive(lot.start_date, todayIso) : null
+        if (!Number.isFinite(days)) return null
+        const community = communitiesById.get(lot.community_id) ?? null
+        const milestone = getCurrentMilestone(lot)
+        return {
+          id: lot.id,
+          lotId: lot.id,
+          label: `${community?.name ?? 'Community'} • ${lotCode(lot)}`,
+          days: Number(days),
+          progress: Number(calculateLotProgress(lot) || 0),
+          milestone: milestone?.label ?? '',
+          isDemo: false,
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.days - a.days)
+    const cycleSamples = cycleRiskRows.map((row) => row.days)
     const avgCycleDays = cycleSamples.length
       ? Math.round(cycleSamples.reduce((sum, value) => sum + Number(value || 0), 0) / cycleSamples.length)
       : 0
-    const over110 = cycleSamples.filter((value) => Number(value) >= 110).length
-    const over180 = cycleSamples.filter((value) => Number(value) >= 180).length
+    const riskLots110 = cycleRiskRows.filter((row) => row.days >= 110)
+    const riskLots180 = cycleRiskRows.filter((row) => row.days >= 180)
+    const over110 = riskLots110.length
+    const over180 = riskLots180.length
 
     const sold = lots.filter((lot) => String(lot?.sold_status ?? '').toLowerCase() === 'sold').length
     const pending = lots.filter((lot) => String(lot?.sold_status ?? '').toLowerCase() === 'pending').length
@@ -8544,6 +8591,51 @@ export default function BuildFlow() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 6)
 
+    const builderLoad = Array.from(
+      lots.reduce((map, lot) => {
+        const community = communitiesById.get(lot.community_id) ?? null
+        const builders = community?.builders ?? []
+        const builder = builders.find((item) => item?.id === lot?.builder_id) ?? null
+        const name = String(builder?.name ?? '').trim() || 'Unassigned'
+        const key = name.toLowerCase()
+        const entry = map.get(key) ?? { id: key, label: name, value: 0, activeLots: 0 }
+        entry.value += 1
+        if (lot?.status === 'in_progress') entry.activeLots += 1
+        map.set(key, entry)
+        return map
+      }, new Map()).values(),
+    )
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 8)
+
+    const subPerformance = Array.from(
+      active.reduce((map, lot) => {
+        for (const task of lot?.tasks ?? []) {
+          const subId = String(task?.sub_id ?? '').trim()
+          if (!subId) continue
+          const sub = (app.subcontractors ?? []).find((item) => item.id === subId) ?? null
+          const label = String(sub?.company_name ?? '').trim() || 'Unassigned Sub'
+          const key = subId
+          const delayDays = Math.max(0, Number(task?.delay_days ?? 0) || 0)
+          const delayed = String(task?.status ?? '').toLowerCase() === 'delayed' || delayDays > 0
+          const entry = map.get(key) ?? { id: key, label, totalTasks: 0, delayedTasks: 0, delayDays: 0, value: 0 }
+          entry.totalTasks += 1
+          if (delayed) {
+            entry.delayedTasks += 1
+            entry.delayDays += Math.max(1, delayDays)
+          }
+          map.set(key, entry)
+        }
+        return map
+      }, new Map()).values(),
+    )
+      .map((entry) => ({
+        ...entry,
+        value: entry.totalTasks > 0 ? Math.round((100 * (entry.totalTasks - entry.delayedTasks)) / entry.totalTasks) : 0,
+      }))
+      .sort((a, b) => b.value - a.value || b.totalTasks - a.totalTasks)
+      .slice(0, 8)
+
     const parseWeekStartIso = (iso) => {
       const dt = parseISODate(iso)
       if (!dt) return ''
@@ -8599,16 +8691,19 @@ export default function BuildFlow() {
       available,
       closingPipeline30,
       projectedQuarterClosings: closingPipeline30 + Math.round(pending * 0.65),
-      projectedRevenue30: closingPipeline30 * 460000,
-      atRiskRevenue: delayedActive.length * 460000,
+      onTimeRate: active.length ? Math.round((100 * onTrackActive) / active.length) : 0,
+      riskLots110,
+      riskLots180,
       buildStatusMix,
       salesStatusMix,
       lotTypeMix,
       communityProgress,
       delayedByTrade,
+      builderLoad,
+      subPerformance,
       completionTrend,
     }
-  }, [visibleLots, lotHasDelay, businessDaysBetweenInclusive, todayIso, communitiesById])
+  }, [visibleLots, lotHasDelay, businessDaysBetweenInclusive, todayIso, communitiesById, app.subcontractors])
 
   const weatherByIso = useMemo(() => new Map((weather.forecast ?? []).map((d) => [d.date, d])), [weather.forecast])
 
@@ -12015,7 +12110,7 @@ export default function BuildFlow() {
                   <h3 className="mt-1 text-2xl font-bold">Reporting & Analytics</h3>
                   <p className="text-sm text-white/85 mt-1">
                     {executiveAnalytics.isDemo
-                      ? 'Illustrative executive snapshot for demo storytelling, including pipeline, delivery risk, and revenue outlook.'
+                      ? 'Illustrative executive snapshot for demo storytelling, including pipeline, delivery risk, and execution trends.'
                       : 'Live operational snapshot plus exportable progress, delay, forecast, and inventory/sales reports.'}
                   </p>
                 </div>
@@ -12075,14 +12170,14 @@ export default function BuildFlow() {
                   <p className="text-white/75 mt-1">Expected at current pace + pending pipeline.</p>
                 </div>
                 <div className="rounded-xl border border-white/20 bg-black/15 p-3">
-                  <p className="text-white/70 uppercase tracking-wide">30d Revenue Pipeline</p>
-                  <p className="mt-1 text-xl font-semibold text-emerald-200">{formatMoneyCompact(executiveAnalytics.projectedRevenue30)}</p>
-                  <p className="text-white/75 mt-1">Estimated from scheduled closings this month.</p>
+                  <p className="text-white/70 uppercase tracking-wide">On-Time Active Rate</p>
+                  <p className="mt-1 text-xl font-semibold text-emerald-200">{formatCount(executiveAnalytics.onTimeRate)}%</p>
+                  <p className="text-white/75 mt-1">Active lots currently progressing without delays.</p>
                 </div>
                 <div className="rounded-xl border border-white/20 bg-black/15 p-3">
-                  <p className="text-white/70 uppercase tracking-wide">Delay Exposure</p>
-                  <p className="mt-1 text-xl font-semibold text-amber-200">{formatMoneyCompact(executiveAnalytics.atRiskRevenue)}</p>
-                  <p className="text-white/75 mt-1">Value impacted if delayed active lots slip.</p>
+                  <p className="text-white/70 uppercase tracking-wide">Delay Exposure Lots</p>
+                  <p className="mt-1 text-xl font-semibold text-amber-200">{formatCount(executiveAnalytics.delayedActive)}</p>
+                  <p className="text-white/75 mt-1">{formatPct(executiveAnalytics.delayedActive, executiveAnalytics.activeCount)} of active inventory.</p>
                 </div>
               </div>
             </Card>
@@ -12166,8 +12261,45 @@ export default function BuildFlow() {
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <Card>
                 <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Homes Assigned by Builder</h3>
+                  <span className="text-xs text-gray-500">Workload distribution</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.builderLoad.map((entry) => ({
+                      id: entry.id,
+                      label: `${entry.label} (${formatCount(entry.activeLots)} active)`,
+                      value: entry.value,
+                    }))}
+                    barClassName="bg-indigo-600"
+                  />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Vendor Analysis (Subs)</h3>
+                  <span className="text-xs text-gray-500">On-time task completion</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.subPerformance.map((entry) => ({
+                      id: entry.id,
+                      label: `${entry.label} (${formatCount(entry.totalTasks)} tasks, ${formatCount(entry.delayDays)} delay days)`,
+                      value: entry.value,
+                    }))}
+                    valueSuffix="%"
+                    barClassName="bg-emerald-600"
+                  />
+                </div>
+              </Card>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card>
+                <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">12-Week Completion Trend</h3>
-                  <span className="text-xs text-gray-500">Lots completed per week</span>
+                  <span className="text-xs text-gray-500">Weekly homes completed (rolling 12 weeks)</span>
                 </div>
                 <div className="mt-3">
                   <ExecutiveTrendSparkline points={executiveAnalytics.completionTrend} />
@@ -12190,17 +12322,80 @@ export default function BuildFlow() {
                     <p className="text-gray-500">Avg Cycle</p>
                     <p className="font-semibold text-gray-800">{formatCount(executiveAnalytics.avgCycleDays)}d</p>
                   </div>
-                  <div className="rounded-lg border border-gray-200 p-2">
+                  <button
+                    type="button"
+                    onClick={() => setCycleRiskModal('110')}
+                    className="rounded-lg border border-gray-200 p-2 text-left hover:border-blue-300 hover:bg-blue-50/40"
+                  >
                     <p className="text-gray-500">110+ Days</p>
                     <p className="font-semibold text-gray-800">{formatCount(executiveAnalytics.over110)}</p>
-                  </div>
-                  <div className="rounded-lg border border-gray-200 p-2">
+                    <p className="mt-1 text-[10px] text-blue-600 font-semibold">View lots</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCycleRiskModal('180')}
+                    className="rounded-lg border border-gray-200 p-2 text-left hover:border-red-300 hover:bg-red-50/40"
+                  >
                     <p className="text-gray-500">180+ Days</p>
                     <p className="font-semibold text-gray-800">{formatCount(executiveAnalytics.over180)}</p>
-                  </div>
+                    <p className="mt-1 text-[10px] text-red-600 font-semibold">View lots</p>
+                  </button>
                 </div>
               </Card>
             </div>
+
+            {cycleRiskModal ? (
+              <Modal
+                title={`${cycleRiskModal}+ Day Cycle Lots (${formatCount(
+                  cycleRiskModal === '180' ? executiveAnalytics.riskLots180.length : executiveAnalytics.riskLots110.length,
+                )})`}
+                onClose={() => setCycleRiskModal(null)}
+              >
+                <p className="text-xs text-gray-600 mb-3">
+                  Lots at or above {cycleRiskModal} business days in cycle. Sorted highest to lowest.
+                </p>
+                <div className="space-y-2 max-h-[60vh] overflow-auto pr-1">
+                  {(cycleRiskModal === '180' ? executiveAnalytics.riskLots180 : executiveAnalytics.riskLots110).map((row) => {
+                    const isClickable = Boolean(row?.lotId) && !row?.isDemo
+                    const className = isClickable
+                      ? 'w-full rounded-xl border border-gray-200 bg-gray-50 p-3 text-left hover:border-blue-300 hover:bg-blue-50/40'
+                      : 'w-full rounded-xl border border-gray-200 bg-gray-50 p-3 text-left'
+                    const content = (
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-gray-900">{row?.label ?? 'Lot'}</p>
+                          <p className="text-xs text-gray-600 mt-1">
+                            Cycle: {formatCount(row?.days ?? 0)} business days • Progress: {formatCount(row?.progress ?? 0)}%
+                          </p>
+                          {row?.milestone ? <p className="text-xs text-gray-600 mt-1">Current milestone: {row.milestone}</p> : null}
+                        </div>
+                        {row?.isDemo ? (
+                          <span className="text-[10px] uppercase tracking-wide font-semibold text-blue-700 bg-blue-100 border border-blue-200 rounded-full px-2 py-1">
+                            Demo
+                          </span>
+                        ) : null}
+                      </div>
+                    )
+                    if (!isClickable) return <div key={row.id} className={className}>{content}</div>
+                    return (
+                      <button
+                        key={row.id}
+                        type="button"
+                        className={className}
+                        onClick={() => {
+                          const lot = lotsById.get(row.lotId)
+                          if (lot?.community_id) setSelectedCommunityId(lot.community_id)
+                          setSelectedLotId(row.lotId)
+                          setCycleRiskModal(null)
+                        }}
+                      >
+                        {content}
+                      </button>
+                    )
+                  })}
+                </div>
+              </Modal>
+            ) : null}
           </div>
         )}
 
