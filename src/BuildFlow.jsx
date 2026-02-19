@@ -702,6 +702,117 @@ const csvEscape = (value) => {
 
 const rowsToCsv = (rows) => rows.map((r) => r.map(csvEscape).join(',')).join('\n')
 
+const formatCount = (value) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '0'
+  return Math.round(n).toLocaleString('en-US')
+}
+
+const ExecutiveMetricCard = ({ label, value, tone = 'blue', subtext = '' }) => {
+  const toneClasses = {
+    blue: 'from-blue-500 to-blue-700',
+    green: 'from-emerald-500 to-green-700',
+    amber: 'from-amber-400 to-orange-600',
+    slate: 'from-slate-500 to-slate-700',
+  }
+  return (
+    <div className="rounded-2xl border border-white/20 bg-white/10 p-3 backdrop-blur-sm">
+      <p className="text-[11px] uppercase tracking-wide text-white/80">{label}</p>
+      <p className={`mt-1 text-2xl font-bold bg-gradient-to-r ${toneClasses[tone] ?? toneClasses.blue} bg-clip-text text-transparent`}>
+        {value}
+      </p>
+      {subtext ? <p className="mt-1 text-[11px] text-white/75">{subtext}</p> : null}
+    </div>
+  )
+}
+
+const ExecutiveStackedBar = ({ segments = [] }) => {
+  const normalized = (Array.isArray(segments) ? segments : []).filter((s) => Number(s?.value ?? 0) > 0)
+  const total = normalized.reduce((acc, seg) => acc + Number(seg.value ?? 0), 0)
+  if (total <= 0) return <div className="h-3 rounded-full bg-gray-200" />
+  return (
+    <div className="h-3 w-full rounded-full overflow-hidden bg-gray-100 flex">
+      {normalized.map((seg) => (
+        <div
+          key={seg.id}
+          className={seg.className ?? 'bg-blue-500'}
+          style={{ width: `${(100 * Number(seg.value ?? 0)) / total}%` }}
+          title={`${seg.label}: ${formatCount(seg.value)}`}
+        />
+      ))}
+    </div>
+  )
+}
+
+const ExecutiveRankBars = ({ items = [], valueSuffix = '', valueFormatter = null, barClassName = 'bg-blue-600' }) => {
+  const list = (Array.isArray(items) ? items : []).filter((item) => Number(item?.value ?? 0) > 0)
+  const max = Math.max(1, ...list.map((item) => Number(item.value ?? 0)))
+  if (list.length === 0) return <p className="text-sm text-gray-500">No data yet.</p>
+  return (
+    <div className="space-y-2">
+      {list.map((item) => {
+        const value = Number(item.value ?? 0)
+        const pct = Math.max(0, Math.min(100, (100 * value) / max))
+        return (
+          <div key={item.id ?? item.label} className="space-y-1">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-gray-700 truncate">{item.label}</span>
+              <span className="text-gray-600 whitespace-nowrap">
+                {valueFormatter ? valueFormatter(value) : formatCount(value)}
+                {valueSuffix}
+              </span>
+            </div>
+            <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+              <div className={`h-full ${barClassName}`} style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const ExecutiveTrendSparkline = ({ points = [] }) => {
+  const list = Array.isArray(points) ? points : []
+  if (list.length === 0) return <p className="text-sm text-gray-500">No completion trend available yet.</p>
+  const width = 420
+  const height = 140
+  const padX = 20
+  const padY = 18
+  const maxValue = Math.max(1, ...list.map((p) => Number(p?.value ?? 0)))
+  const xFor = (idx) =>
+    list.length === 1
+      ? width / 2
+      : padX + (idx / (list.length - 1)) * (width - padX * 2)
+  const yFor = (value) => height - padY - (Number(value ?? 0) / maxValue) * (height - padY * 2)
+  const coords = list.map((point, idx) => `${xFor(idx)},${yFor(point.value)}`).join(' ')
+  const latest = list[list.length - 1]
+  const previous = list.length > 1 ? list[list.length - 2] : null
+  const latestDelta = previous ? Number(latest?.value ?? 0) - Number(previous?.value ?? 0) : 0
+
+  return (
+    <div className="space-y-2">
+      <div className="h-36 rounded-xl border border-gray-200 bg-gradient-to-b from-blue-50 to-white p-2">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
+          <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} stroke="#CBD5E1" strokeWidth="1" />
+          <polyline points={coords} fill="none" stroke="#2563EB" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+          {list.map((point, idx) => (
+            <circle key={`${point.label}-${idx}`} cx={xFor(idx)} cy={yFor(point.value)} r="3.2" fill="#1D4ED8" />
+          ))}
+        </svg>
+      </div>
+      <div className="flex items-center justify-between text-xs text-gray-600">
+        <span>{list[0]?.label ?? ''}</span>
+        <span className="font-semibold text-gray-700">
+          Latest: {formatCount(latest?.value ?? 0)}
+          {previous ? ` (${latestDelta >= 0 ? '+' : ''}${formatCount(latestDelta)})` : ''}
+        </span>
+        <span>{latest?.label ?? ''}</span>
+      </div>
+    </div>
+  )
+}
+
 const downloadTextFile = (filename, text, mime = 'text/plain;charset=utf-8') => {
   try {
     const blob = new Blob([text], { type: mime })
@@ -8250,6 +8361,151 @@ export default function BuildFlow() {
     }
   }, [filteredSalesLots])
 
+  const executiveAnalytics = useMemo(() => {
+    const lots = Array.isArray(visibleLots) ? visibleLots : []
+    const active = lots.filter((lot) => lot?.status === 'in_progress')
+    const complete = lots.filter((lot) => lot?.status === 'complete')
+    const notStarted = lots.filter((lot) => lot?.status === 'not_started')
+    const delayedActive = active.filter((lot) => lotHasDelay(lot))
+    const onTrackActive = Math.max(0, active.length - delayedActive.length)
+
+    const avgProgress = active.length
+      ? Math.round(active.reduce((sum, lot) => sum + Number(calculateLotProgress(lot) || 0), 0) / active.length)
+      : 0
+
+    const cycleSamples = active
+      .map((lot) => (lot?.start_date ? businessDaysBetweenInclusive(lot.start_date, todayIso) : null))
+      .filter((value) => Number.isFinite(value))
+    const avgCycleDays = cycleSamples.length
+      ? Math.round(cycleSamples.reduce((sum, value) => sum + Number(value || 0), 0) / cycleSamples.length)
+      : 0
+    const over110 = cycleSamples.filter((value) => Number(value) >= 110).length
+    const over180 = cycleSamples.filter((value) => Number(value) >= 180).length
+
+    const sold = lots.filter((lot) => String(lot?.sold_status ?? '').toLowerCase() === 'sold').length
+    const pending = lots.filter((lot) => String(lot?.sold_status ?? '').toLowerCase() === 'pending').length
+    const available = lots.filter((lot) => String(lot?.sold_status ?? 'available').toLowerCase() === 'available').length
+
+    const buildStatusMix = [
+      { id: 'not_started', label: 'Not Started', value: notStarted.length, className: 'bg-slate-300' },
+      { id: 'in_progress', label: 'In Progress', value: active.length, className: 'bg-blue-500' },
+      { id: 'complete', label: 'Complete', value: complete.length, className: 'bg-emerald-500' },
+    ]
+
+    const salesStatusMix = [
+      { id: 'available', label: 'Available', value: available, className: 'bg-emerald-500' },
+      { id: 'pending', label: 'Pending', value: pending, className: 'bg-amber-500' },
+      { id: 'sold', label: 'Sold', value: sold, className: 'bg-slate-600' },
+    ]
+
+    const lotTypeMix = ['vacant', 'spec', 'model', 'sold'].map((typeId) => ({
+      id: typeId,
+      label: String(typeId).charAt(0).toUpperCase() + String(typeId).slice(1),
+      value: lots.filter((lot) => getLotType(lot) === typeId).length,
+    }))
+
+    const communityProgress = Array.from(
+      active.reduce((map, lot) => {
+        const key = String(lot?.community_id ?? '')
+        const entry = map.get(key) ?? { id: key, label: communitiesById.get(key)?.name ?? 'Community', count: 0, delayed: 0, pctTotal: 0 }
+        entry.count += 1
+        entry.pctTotal += Number(calculateLotProgress(lot) || 0)
+        if (lotHasDelay(lot)) entry.delayed += 1
+        map.set(key, entry)
+        return map
+      }, new Map()).values(),
+    )
+      .map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        value: entry.count ? Math.round(entry.pctTotal / entry.count) : 0,
+        activeLots: entry.count,
+        delayedLots: entry.delayed,
+      }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6)
+
+    const delayedByTrade = Array.from(
+      active.reduce((map, lot) => {
+        for (const task of lot?.tasks ?? []) {
+          const status = String(task?.status ?? '').toLowerCase()
+          const delayDays = Number(task?.delay_days ?? 0) || 0
+          if (status !== 'delayed' && delayDays <= 0) continue
+          const tradeId = String(task?.trade ?? 'other')
+          const label = TRADES.find((trade) => trade.id === tradeId)?.label ?? tradeId
+          const entry = map.get(tradeId) ?? { id: tradeId, label, value: 0, events: 0 }
+          entry.value += Math.max(1, delayDays)
+          entry.events += 1
+          map.set(tradeId, entry)
+        }
+        return map
+      }, new Map()).values(),
+    )
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6)
+
+    const parseWeekStartIso = (iso) => {
+      const dt = parseISODate(iso)
+      if (!dt) return ''
+      const mondayOffset = (dt.getDay() + 6) % 7
+      dt.setDate(dt.getDate() - mondayOffset)
+      return formatISODate(dt)
+    }
+
+    const todayDate = parseISODate(todayIso) ?? new Date()
+    const thisWeekStart = new Date(todayDate)
+    thisWeekStart.setDate(todayDate.getDate() - ((todayDate.getDay() + 6) % 7))
+    const weekPoints = []
+    const weekMap = new Map()
+    for (let i = 11; i >= 0; i -= 1) {
+      const start = new Date(thisWeekStart)
+      start.setDate(thisWeekStart.getDate() - i * 7)
+      const key = formatISODate(start)
+      weekMap.set(key, 0)
+      weekPoints.push({ key, label: formatShortDate(key), value: 0 })
+    }
+    for (const lot of lots) {
+      const completionIso = String(lot?.actual_completion_date ?? '').slice(0, 10)
+      if (!completionIso) continue
+      const weekKey = parseWeekStartIso(completionIso)
+      if (!weekMap.has(weekKey)) continue
+      weekMap.set(weekKey, Number(weekMap.get(weekKey) || 0) + 1)
+    }
+    const completionTrend = weekPoints.map((point) => ({
+      ...point,
+      value: Number(weekMap.get(point.key) || 0),
+    }))
+
+    const closingPipeline30 = lots.filter((lot) => {
+      const closeIso = String(getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.closing_date) || '').slice(0, 10)
+      if (!closeIso) return false
+      const daysOut = daysBetweenCalendar(closeIso, todayIso)
+      return daysOut >= 0 && daysOut <= 30
+    }).length
+
+    return {
+      lotCount: lots.length,
+      activeCount: active.length,
+      onTrackActive,
+      delayedActive: delayedActive.length,
+      completeCount: complete.length,
+      avgProgress,
+      avgCycleDays,
+      over110,
+      over180,
+      sold,
+      pending,
+      available,
+      closingPipeline30,
+      buildStatusMix,
+      salesStatusMix,
+      lotTypeMix,
+      communityProgress,
+      delayedByTrade,
+      completionTrend,
+    }
+  }, [visibleLots, lotHasDelay, businessDaysBetweenInclusive, todayIso, communitiesById])
+
   const weatherByIso = useMemo(() => new Map((weather.forecast ?? []).map((d) => [d.date, d])), [weather.forecast])
 
   const weatherWarnings = useMemo(() => {
@@ -11641,32 +11897,175 @@ export default function BuildFlow() {
 
         {tab === 'reports' && !selectedLot && !selectedCommunity && (
           <div className="space-y-4">
-            <Card>
-              <h3 className="font-semibold mb-2">Reporting & Analytics</h3>
-              <p className="text-sm text-gray-600">Generate Progress, Community Summary, Delay Analysis, Sub Performance, Forecast, and Inventory/Sales exports.</p>
-              <div className="mt-3 flex gap-2">
-                <PrimaryButton onClick={() => setReportModal(true)} className="flex-1" disabled={!isOnline} title={!isOnline ? 'Export requires connection' : ''}>
-                  Generate Report
-                </PrimaryButton>
-                <SecondaryButton onClick={() => setScheduledReportModal(true)} className="flex-1">
-                  Scheduled Reports
-                </SecondaryButton>
+            <Card className="overflow-hidden border-0 bg-gradient-to-br from-slate-900 via-blue-900 to-cyan-700 text-white">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.16em] text-white/70">Executive Dashboard</p>
+                  <h3 className="mt-1 text-2xl font-bold">Reporting & Analytics</h3>
+                  <p className="text-sm text-white/85 mt-1">
+                    Live operational snapshot plus exportable progress, delay, forecast, and inventory/sales reports.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 w-full md:w-auto md:min-w-[22rem]">
+                  <PrimaryButton
+                    onClick={() => setReportModal(true)}
+                    className="bg-white text-blue-700 hover:bg-blue-50 border border-white"
+                    disabled={!isOnline}
+                    title={!isOnline ? 'Export requires connection' : ''}
+                  >
+                    Generate Report
+                  </PrimaryButton>
+                  <SecondaryButton
+                    onClick={() => setScheduledReportModal(true)}
+                    className="border-white/40 text-white bg-white/10 hover:bg-white/20"
+                  >
+                    Scheduled Reports
+                  </SecondaryButton>
+                </div>
               </div>
               {!isOnline ? (
-                <div className="mt-3 bg-orange-50 border border-orange-200 rounded-xl p-3 text-sm text-orange-800">
-                  Offline — report exports are disabled (spec 5.19).
+                <div className="mt-3 bg-amber-100/20 border border-amber-200/50 rounded-xl p-3 text-sm text-amber-100">
+                  Offline — report exports are disabled.
                 </div>
               ) : null}
+              <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <ExecutiveMetricCard
+                  label="Active Lots"
+                  value={formatCount(executiveAnalytics.activeCount)}
+                  tone="blue"
+                  subtext={`${formatCount(executiveAnalytics.onTrackActive)} on track`}
+                />
+                <ExecutiveMetricCard
+                  label="Avg Completion"
+                  value={`${formatCount(executiveAnalytics.avgProgress)}%`}
+                  tone="green"
+                  subtext={`${formatCount(executiveAnalytics.completeCount)} completed`}
+                />
+                <ExecutiveMetricCard
+                  label="Delayed Active"
+                  value={formatCount(executiveAnalytics.delayedActive)}
+                  tone="amber"
+                  subtext={`${formatCount(executiveAnalytics.over110)} at/over 110 days`}
+                />
+                <ExecutiveMetricCard
+                  label="30d Closings"
+                  value={formatCount(executiveAnalytics.closingPipeline30)}
+                  tone="slate"
+                  subtext={`${formatCount(executiveAnalytics.sold)} sold total`}
+                />
+              </div>
             </Card>
-            <Card>
-              <h3 className="font-semibold mb-2">Schedule Summary</h3>
-              <p className="text-sm text-gray-600">
-                Active lots: <span className="font-semibold">{activeLots.length}</span>
-              </p>
-              <p className="text-sm text-gray-600">
-                Avg completion: <span className="font-semibold">{activeLots.length ? Math.round(activeLots.reduce((a, l) => a + calculateLotProgress(l), 0) / activeLots.length) : 0}%</span>
-              </p>
-            </Card>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Build Status Mix</h3>
+                  <span className="text-xs text-gray-500">{formatCount(executiveAnalytics.lotCount)} lots</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveStackedBar segments={executiveAnalytics.buildStatusMix} />
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    {executiveAnalytics.buildStatusMix.map((item) => (
+                      <div key={item.id} className="rounded-lg border border-gray-200 p-2">
+                        <p className="text-gray-500">{item.label}</p>
+                        <p className="font-semibold text-gray-800">{formatCount(item.value)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Sales Pipeline</h3>
+                  <span className="text-xs text-gray-500">Availability snapshot</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveStackedBar segments={executiveAnalytics.salesStatusMix} />
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    {executiveAnalytics.salesStatusMix.map((item) => (
+                      <div key={item.id} className="rounded-lg border border-gray-200 p-2">
+                        <p className="text-gray-500">{item.label}</p>
+                        <p className="font-semibold text-gray-800">{formatCount(item.value)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Community Progress Leaderboard</h3>
+                  <span className="text-xs text-gray-500">Avg % complete (active lots)</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.communityProgress.map((entry) => ({
+                      id: entry.id,
+                      label: `${entry.label} (${entry.activeLots} active${entry.delayedLots ? `, ${entry.delayedLots} delayed` : ''})`,
+                      value: entry.value,
+                    }))}
+                    valueSuffix="%"
+                    barClassName="bg-blue-600"
+                  />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Delay Hotspots by Trade</h3>
+                  <span className="text-xs text-gray-500">Total delay days</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.delayedByTrade}
+                    valueSuffix="d"
+                    barClassName="bg-rose-500"
+                  />
+                </div>
+              </Card>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">12-Week Completion Trend</h3>
+                  <span className="text-xs text-gray-500">Lots completed per week</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveTrendSparkline points={executiveAnalytics.completionTrend} />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Inventory Type Mix</h3>
+                  <span className="text-xs text-gray-500">Current portfolio composition</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.lotTypeMix}
+                    barClassName="bg-cyan-600"
+                  />
+                </div>
+                <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
+                  <div className="rounded-lg border border-gray-200 p-2">
+                    <p className="text-gray-500">Avg Cycle</p>
+                    <p className="font-semibold text-gray-800">{formatCount(executiveAnalytics.avgCycleDays)}d</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 p-2">
+                    <p className="text-gray-500">110+ Days</p>
+                    <p className="font-semibold text-gray-800">{formatCount(executiveAnalytics.over110)}</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 p-2">
+                    <p className="text-gray-500">180+ Days</p>
+                    <p className="font-semibold text-gray-800">{formatCount(executiveAnalytics.over180)}</p>
+                  </div>
+                </div>
+              </Card>
+            </div>
           </div>
         )}
 
