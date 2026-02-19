@@ -716,6 +716,14 @@ const formatPct = (value, total) => {
   return `${Math.round((100 * part) / whole)}%`
 }
 
+const slugifyId = (value, fallback = 'item') => {
+  const slug = String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || fallback
+}
+
 const withParetoCumulative = (rows = []) => {
   const list = Array.isArray(rows) ? rows : []
   const total = list.reduce((sum, row) => sum + Number(row?.value ?? 0), 0)
@@ -767,6 +775,61 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
   }))
   const riskLots180 = buildDemoCycleRiskRows(4, 180, { lotSeed: 3, baseProgress: 74 })
   const riskLots110 = [...riskLots180, ...buildDemoCycleRiskRows(14, 110, { lotSeed: 27, baseProgress: 56 })]
+  const demoDelayIssues = [
+    { id: 'demo-delay-1', lotId: null, communityId: null, lotLabel: 'The Grove • Lot 12', tradeId: 'electrical', tradeLabel: 'Electrical', taskName: 'Electrical Trim', delayDays: 5, isDemo: true },
+    { id: 'demo-delay-2', lotId: null, communityId: null, lotLabel: 'Ovation • Lot 9', tradeId: 'electrical', tradeLabel: 'Electrical', taskName: 'Electrical Trim', delayDays: 4, isDemo: true },
+    { id: 'demo-delay-3', lotId: null, communityId: null, lotLabel: 'The Heights • Lot 7', tradeId: 'electrical', tradeLabel: 'Electrical', taskName: 'Electrical Rough-In', delayDays: 4, isDemo: true },
+    { id: 'demo-delay-4', lotId: null, communityId: null, lotLabel: 'Madison City • Lot 21', tradeId: 'electrical', tradeLabel: 'Electrical', taskName: 'Panel Set + Meter Release', delayDays: 6, isDemo: true },
+    { id: 'demo-delay-5', lotId: null, communityId: null, lotLabel: 'The Grove • Lot 3', tradeId: 'plumbing', tradeLabel: 'Plumbing', taskName: 'Plumbing Rough-In', delayDays: 6, isDemo: true },
+    { id: 'demo-delay-6', lotId: null, communityId: null, lotLabel: 'Ovation • Lot 14', tradeId: 'plumbing', tradeLabel: 'Plumbing', taskName: 'Plumbing Rough-In', delayDays: 4, isDemo: true },
+    { id: 'demo-delay-7', lotId: null, communityId: null, lotLabel: 'Village at Clift • Lot 2', tradeId: 'plumbing', tradeLabel: 'Plumbing', taskName: 'Plumbing Top-Out', delayDays: 5, isDemo: true },
+    { id: 'demo-delay-8', lotId: null, communityId: null, lotLabel: 'The Heights • Lot 11', tradeId: 'plumbing', tradeLabel: 'Plumbing', taskName: 'Final Plumbing', delayDays: 3, isDemo: true },
+    { id: 'demo-delay-9', lotId: null, communityId: null, lotLabel: 'The Grove • Lot 8', tradeId: 'framing', tradeLabel: 'Framing', taskName: 'Framing Inspection Corrections', delayDays: 7, isDemo: true },
+    { id: 'demo-delay-10', lotId: null, communityId: null, lotLabel: 'Ovation • Lot 5', tradeId: 'framing', tradeLabel: 'Framing', taskName: 'Wall Framing', delayDays: 4, isDemo: true },
+    { id: 'demo-delay-11', lotId: null, communityId: null, lotLabel: 'Madison City • Lot 6', tradeId: 'framing', tradeLabel: 'Framing', taskName: 'Truss Set', delayDays: 3, isDemo: true },
+    { id: 'demo-delay-12', lotId: null, communityId: null, lotLabel: 'The Heights • Lot 15', tradeId: 'drywall', tradeLabel: 'Drywall', taskName: 'Drywall Hang / Finish', delayDays: 6, isDemo: true },
+    { id: 'demo-delay-13', lotId: null, communityId: null, lotLabel: 'The Grove • Lot 1', tradeId: 'drywall', tradeLabel: 'Drywall', taskName: 'Texture + Sand', delayDays: 4, isDemo: true },
+    { id: 'demo-delay-14', lotId: null, communityId: null, lotLabel: 'Ovation • Lot 11', tradeId: 'cabinets', tradeLabel: 'Cabinets', taskName: 'Cabinet Install', delayDays: 5, isDemo: true },
+    { id: 'demo-delay-15', lotId: null, communityId: null, lotLabel: 'Village at Clift • Lot 4', tradeId: 'cabinets', tradeLabel: 'Cabinets', taskName: 'Cabinet Punch / Adjustments', delayDays: 3, isDemo: true },
+    { id: 'demo-delay-16', lotId: null, communityId: null, lotLabel: 'Madison City • Lot 9', tradeId: 'paint', tradeLabel: 'Paint', taskName: 'Paint Touch-Ups', delayDays: 4, isDemo: true },
+    { id: 'demo-delay-17', lotId: null, communityId: null, lotLabel: 'The Grove • Lot 18', tradeId: 'paint', tradeLabel: 'Paint', taskName: 'Final Paint', delayDays: 3, isDemo: true },
+  ]
+
+  const delayedByTrade = Array.from(
+    demoDelayIssues.reduce((map, issue) => {
+      const key = issue.tradeId
+      const entry = map.get(key) ?? { id: key, label: issue.tradeLabel, value: 0, events: 0, issues: [] }
+      entry.value += Math.max(1, Number(issue.delayDays ?? 0) || 0)
+      entry.events += 1
+      entry.issues.push(issue)
+      map.set(key, entry)
+      return map
+    }, new Map()).values(),
+  )
+    .map((entry) => ({ ...entry, issues: [...entry.issues].sort((a, b) => (Number(b.delayDays ?? 0) || 0) - (Number(a.delayDays ?? 0) || 0)) }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 6)
+
+  const delayedByTask = Array.from(
+    demoDelayIssues.reduce((map, issue) => {
+      const key = String(issue.taskName ?? '').trim().toLowerCase() || 'unspecified-task'
+      const entry = map.get(key) ?? {
+        id: `task-${slugifyId(key, 'unspecified-task')}`,
+        label: issue.taskName || 'Unspecified Task',
+        value: 0,
+        events: 0,
+        issues: [],
+      }
+      entry.value += Math.max(1, Number(issue.delayDays ?? 0) || 0)
+      entry.events += 1
+      entry.issues.push(issue)
+      map.set(key, entry)
+      return map
+    }, new Map()).values(),
+  )
+    .map((entry) => ({ ...entry, issues: [...entry.issues].sort((a, b) => (Number(b.delayDays ?? 0) || 0) - (Number(a.delayDays ?? 0) || 0)) }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 8)
 
   return {
     isDemo: true,
@@ -810,22 +873,8 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
       { id: 'madison', label: 'Madison City', value: 58, activeLots: 7, delayedLots: 2 },
       { id: 'village', label: 'Village at Clift', value: 52, activeLots: 6, delayedLots: 1 },
     ],
-    delayedByTrade: [
-      { id: 'electrical', label: 'Electrical', value: 32, events: 7 },
-      { id: 'plumbing', label: 'Plumbing', value: 29, events: 6 },
-      { id: 'framing', label: 'Framing', value: 24, events: 5 },
-      { id: 'drywall', label: 'Drywall', value: 20, events: 5 },
-      { id: 'cabinets', label: 'Cabinets', value: 16, events: 4 },
-      { id: 'paint', label: 'Paint', value: 13, events: 3 },
-    ],
-    delayedByTask: [
-      { id: 'task-framing-inspection', label: 'Framing Inspection Corrections', value: 18, events: 5 },
-      { id: 'task-plumbing-rough-in', label: 'Plumbing Rough-In', value: 16, events: 4 },
-      { id: 'task-electrical-trim', label: 'Electrical Trim', value: 14, events: 3 },
-      { id: 'task-drywall-hang', label: 'Drywall Hang / Finish', value: 13, events: 4 },
-      { id: 'task-cabinet-install', label: 'Cabinet Install', value: 11, events: 3 },
-      { id: 'task-paint-touchup', label: 'Paint Touch-Ups', value: 9, events: 2 },
-    ],
+    delayedByTrade,
+    delayedByTask,
     builderLoad: [
       { id: 'b-black', label: 'B. Clark', value: 24, activeLots: 12 },
       { id: 'b-bb', label: 'BB', value: 22, activeLots: 10 },
@@ -907,6 +956,7 @@ const ExecutiveRankBars = ({
   valueFormatter = null,
   rightLabelFormatter = null,
   barClassName = 'bg-blue-600',
+  onItemClick = null,
 }) => {
   const list = (Array.isArray(items) ? items : []).filter((item) => Number(item?.value ?? 0) > 0)
   const max = Math.max(1, ...list.map((item) => Number(item.value ?? 0)))
@@ -916,8 +966,9 @@ const ExecutiveRankBars = ({
       {list.map((item) => {
         const value = Number(item.value ?? 0)
         const pct = Math.max(0, Math.min(100, (100 * value) / max))
-        return (
-          <div key={item.id ?? item.label} className="space-y-1">
+        const clickable = typeof onItemClick === 'function'
+        const content = (
+          <>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="font-semibold text-gray-700 truncate">{item.label}</span>
               <span className="text-gray-600 whitespace-nowrap">
@@ -929,7 +980,21 @@ const ExecutiveRankBars = ({
             <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
               <div className={`h-full ${barClassName}`} style={{ width: `${pct}%` }} />
             </div>
-          </div>
+          </>
+        )
+        if (!clickable) {
+          return <div key={item.id ?? item.label} className="space-y-1">{content}</div>
+        }
+        return (
+          <button
+            key={item.id ?? item.label}
+            type="button"
+            className="w-full space-y-1 rounded-lg px-1 py-1 text-left hover:bg-gray-50"
+            onClick={() => onItemClick(item)}
+            title="Click to view impacted lots and tasks"
+          >
+            {content}
+          </button>
         )
       })}
     </div>
@@ -2829,6 +2894,7 @@ export default function BuildFlow() {
   const [onSiteLotModal, setOnSiteLotModal] = useState(null)
   const [dashboardStatusModal, setDashboardStatusModal] = useState(null)
   const [cycleRiskModal, setCycleRiskModal] = useState(null)
+  const [delayHotspotModal, setDelayHotspotModal] = useState(null)
   const [atGlanceModal, setAtGlanceModal] = useState(null)
   const [delayModal, setDelayModal] = useState(null)
   const [rescheduleModal, setRescheduleModal] = useState(null)
@@ -9074,42 +9140,69 @@ export default function BuildFlow() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 6)
 
+    const delayedIssues = []
+    for (const lot of active) {
+      const community = communitiesById.get(lot?.community_id) ?? null
+      for (const task of lot?.tasks ?? []) {
+        const status = String(task?.status ?? '').toLowerCase()
+        const delayDays = Number(task?.delay_days ?? 0) || 0
+        if (status !== 'delayed' && delayDays <= 0) continue
+        const tradeId = String(task?.trade ?? 'other')
+        const tradeLabel = TRADES.find((trade) => trade.id === tradeId)?.label ?? tradeId
+        delayedIssues.push({
+          id: `${lot?.id ?? 'lot'}:${task?.id ?? `${slugifyId(task?.name ?? 'task', 'task')}:${String(task?.start_date ?? '')}`}`,
+          lotId: lot?.id ?? null,
+          communityId: lot?.community_id ?? null,
+          lotLabel: `${community?.name ?? 'Community'} • ${lotCode(lot)}`,
+          taskName: String(task?.name ?? '').trim() || 'Unspecified Task',
+          tradeId,
+          tradeLabel,
+          delayDays: Math.max(1, delayDays),
+          status,
+          isDemo: false,
+        })
+      }
+    }
+
     const delayedByTrade = Array.from(
-      active.reduce((map, lot) => {
-        for (const task of lot?.tasks ?? []) {
-          const status = String(task?.status ?? '').toLowerCase()
-          const delayDays = Number(task?.delay_days ?? 0) || 0
-          if (status !== 'delayed' && delayDays <= 0) continue
-          const tradeId = String(task?.trade ?? 'other')
-          const label = TRADES.find((trade) => trade.id === tradeId)?.label ?? tradeId
-          const entry = map.get(tradeId) ?? { id: tradeId, label, value: 0, events: 0 }
-          entry.value += Math.max(1, delayDays)
-          entry.events += 1
-          map.set(tradeId, entry)
-        }
+      delayedIssues.reduce((map, issue) => {
+        const key = issue.tradeId || 'other'
+        const entry = map.get(key) ?? { id: key, label: issue.tradeLabel || key, value: 0, events: 0, issues: [] }
+        entry.value += Math.max(1, Number(issue.delayDays ?? 0) || 0)
+        entry.events += 1
+        entry.issues.push(issue)
+        map.set(key, entry)
         return map
       }, new Map()).values(),
     )
+      .map((entry) => ({
+        ...entry,
+        issues: [...entry.issues].sort((a, b) => (Number(b?.delayDays ?? 0) || 0) - (Number(a?.delayDays ?? 0) || 0)),
+      }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 6)
 
     const delayedByTask = Array.from(
-      active.reduce((map, lot) => {
-        for (const task of lot?.tasks ?? []) {
-          const status = String(task?.status ?? '').toLowerCase()
-          const delayDays = Number(task?.delay_days ?? 0) || 0
-          if (status !== 'delayed' && delayDays <= 0) continue
-          const rawLabel = String(task?.name ?? '').trim()
-          const label = rawLabel || 'Unspecified Task'
-          const key = rawLabel ? rawLabel.toLowerCase() : 'unspecified-task'
-          const entry = map.get(key) ?? { id: `task-${key.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'unspecified'}`, label, value: 0, events: 0 }
-          entry.value += Math.max(1, delayDays)
-          entry.events += 1
-          map.set(key, entry)
+      delayedIssues.reduce((map, issue) => {
+        const key = String(issue.taskName ?? '').trim().toLowerCase() || 'unspecified-task'
+        const entry = map.get(key) ?? {
+          id: `task-${slugifyId(key, 'unspecified-task')}`,
+          label: issue.taskName || 'Unspecified Task',
+          value: 0,
+          events: 0,
+          issues: [],
         }
+        entry.value += Math.max(1, Number(issue.delayDays ?? 0) || 0)
+        entry.events += 1
+        entry.issues.push(issue)
+        map.set(key, entry)
         return map
       }, new Map()).values(),
     )
+      .map((entry) => ({
+        ...entry,
+        issues: [...entry.issues].sort((a, b) => (Number(b?.delayDays ?? 0) || 0) - (Number(a?.delayDays ?? 0) || 0)),
+      }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 8)
 
@@ -12875,13 +12968,14 @@ export default function BuildFlow() {
               <Card>
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Delay Hotspots by Trade</h3>
-                  <span className="text-xs text-gray-500">Total delay days and issue count</span>
+                  <span className="text-xs text-gray-500">Total delay days and issue count · click a row</span>
                 </div>
                 <div className="mt-3">
                   <ExecutiveRankBars
                     items={executiveAnalytics.delayedByTrade}
                     rightLabelFormatter={(item, value) => `${formatCount(value)}d • ${formatCount(item?.events ?? 0)} issues`}
                     barClassName="bg-rose-500"
+                    onItemClick={(item) => setDelayHotspotModal({ type: 'trade', item })}
                   />
                 </div>
               </Card>
@@ -12889,13 +12983,14 @@ export default function BuildFlow() {
               <Card>
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Delay Hotspots by Task</h3>
-                  <span className="text-xs text-gray-500">Top delayed task names</span>
+                  <span className="text-xs text-gray-500">Top delayed task names · click a row</span>
                 </div>
                 <div className="mt-3">
                   <ExecutiveRankBars
                     items={executiveAnalytics.delayedByTask}
                     rightLabelFormatter={(item, value) => `${formatCount(value)}d • ${formatCount(item?.events ?? 0)} issues`}
                     barClassName="bg-orange-500"
+                    onItemClick={(item) => setDelayHotspotModal({ type: 'task', item })}
                   />
                 </div>
               </Card>
@@ -12937,6 +13032,61 @@ export default function BuildFlow() {
                 </div>
               </Card>
             </div>
+
+            {delayHotspotModal ? (
+              <Modal
+                title={`Delay Details — ${delayHotspotModal?.item?.label ?? ''}`}
+                onClose={() => setDelayHotspotModal(null)}
+              >
+                <p className="text-xs text-gray-600 mb-3">
+                  {delayHotspotModal?.type === 'trade'
+                    ? 'Delayed tasks grouped under this trade.'
+                    : 'Lots where this task is currently delayed.'}{' '}
+                  Click a lot to open it.
+                </p>
+                <div className="space-y-2 max-h-[60vh] overflow-auto pr-1">
+                  {(Array.isArray(delayHotspotModal?.item?.issues) ? delayHotspotModal.item.issues : []).length === 0 ? (
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600">
+                      No detailed rows found for this item.
+                    </div>
+                  ) : (
+                    (Array.isArray(delayHotspotModal?.item?.issues) ? delayHotspotModal.item.issues : []).map((issue, idx) => {
+                      const isClickable = Boolean(issue?.lotId) && !issue?.isDemo
+                      const className = isClickable
+                        ? 'w-full rounded-xl border border-gray-200 bg-gray-50 p-3 text-left hover:border-blue-300 hover:bg-blue-50/40'
+                        : 'w-full rounded-xl border border-gray-200 bg-gray-50 p-3 text-left'
+                      const content = (
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-semibold text-gray-900">{issue?.lotLabel ?? `Issue ${idx + 1}`}</p>
+                            <p className="text-xs text-gray-600 mt-1">
+                              Task: {issue?.taskName || 'Unspecified Task'} • Trade: {issue?.tradeLabel || 'Other'}
+                            </p>
+                          </div>
+                          <p className="text-sm font-semibold text-rose-600">{formatCount(issue?.delayDays ?? 0)}d</p>
+                        </div>
+                      )
+                      if (!isClickable) return <div key={issue?.id ?? `${delayHotspotModal?.item?.id ?? 'issue'}-${idx}`} className={className}>{content}</div>
+                      return (
+                        <button
+                          key={issue?.id ?? `${delayHotspotModal?.item?.id ?? 'issue'}-${idx}`}
+                          type="button"
+                          className={className}
+                          onClick={() => {
+                            const lot = lotsById.get(issue.lotId)
+                            if (lot?.community_id) setSelectedCommunityId(lot.community_id)
+                            setSelectedLotId(issue.lotId)
+                            setDelayHotspotModal(null)
+                          }}
+                        >
+                          {content}
+                        </button>
+                      )
+                    })
+                  )}
+                </div>
+              </Modal>
+            ) : null}
 
             {cycleRiskModal ? (
               <Modal
