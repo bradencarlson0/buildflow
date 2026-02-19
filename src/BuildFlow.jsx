@@ -1997,6 +1997,7 @@ export default function BuildFlow() {
   const [scheduleView, setScheduleView] = useState('list')
   const [scheduleTimelineScale, setScheduleTimelineScale] = useState('week')
   const [selectedScheduleTaskIds, setSelectedScheduleTaskIds] = useState([])
+  const [scheduleCollapsedTracks, setScheduleCollapsedTracks] = useState(() => new Set())
   const [parallelOverrideDeps, setParallelOverrideDeps] = useState(false)
   const [listDraggingTaskId, setListDraggingTaskId] = useState(null)
   const [listDropTaskId, setListDropTaskId] = useState(null)
@@ -4194,6 +4195,10 @@ export default function BuildFlow() {
     setListDragOffset(0)
   }, [selectedLotId, scheduleView])
 
+  useEffect(() => {
+    setScheduleCollapsedTracks(new Set())
+  }, [selectedLotId])
+
   const org = app.org
   const communities = app.communities ?? []
   const activeCommunities = useMemo(
@@ -5649,6 +5654,17 @@ export default function BuildFlow() {
     setSelectedScheduleTaskIds([])
     setParallelOverrideDeps(false)
   }
+
+  const toggleScheduleTrack = (track) => {
+    setScheduleCollapsedTracks((prev) => {
+      const next = new Set(prev)
+      if (next.has(track)) next.delete(track)
+      else next.add(track)
+      return next
+    })
+  }
+
+  const getScheduleTrackLabel = (track) => TASK_CATEGORIES.find((c) => c.track === track)?.label ?? String(track ?? 'misc')
 
   const updateTaskDuration = (lotId, taskId, nextDuration) => {
     void runScheduleEditWithLock(lotId, async () => {
@@ -11024,22 +11040,23 @@ export default function BuildFlow() {
                         {['foundation', 'structure', 'interior', 'exterior', 'final', 'misc'].map((track) => {
                           const tasks = (selectedLot.tasks ?? []).filter((t) => t.track === track).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
                           if (tasks.length === 0) return null
-                          const title =
-                            track === 'foundation'
-                              ? 'Foundation'
-                              : track === 'structure'
-                                ? 'Structure'
-                                : track === 'interior'
-                                  ? 'Interior Track'
-                                  : track === 'exterior'
-                                    ? 'Exterior Track'
-                                    : track === 'final'
-                                      ? 'Final'
-                                      : 'Miscellaneous'
+                          const title = getScheduleTrackLabel(track)
+                          const collapsed = scheduleCollapsedTracks.has(track)
                           return (
-                            <div key={track}>
-                              <p className="text-sm font-semibold text-gray-800 mb-2">{title}</p>
-                              <div className="space-y-2">
+                            <div key={track} className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+                              <button
+                                type="button"
+                                onClick={() => toggleScheduleTrack(track)}
+                                className="w-full px-3 py-2 flex items-center justify-between text-left hover:bg-gray-50"
+                                aria-expanded={!collapsed}
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="text-sm font-semibold text-gray-900 truncate">{title}</span>
+                                  <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{tasks.length} tasks</span>
+                                </div>
+                                <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${collapsed ? '-rotate-90' : 'rotate-0'}`} />
+                              </button>
+                              {!collapsed ? <div className="space-y-2 p-2 border-t border-gray-100">
                                 {tasks.map((task) => {
                                   const status = deriveTaskStatus(task, selectedLot.tasks, selectedLot.inspections)
                                   const subsForSelect = getSubsForTrade(task.trade)
@@ -11214,7 +11231,7 @@ export default function BuildFlow() {
                                     </div>
                                   )
                                 })}
-                              </div>
+                              </div> : null}
                             </div>
                           )
                         })}
