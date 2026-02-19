@@ -19924,6 +19924,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const [textMode, setTextMode] = useState('text')
   const [description, setDescription] = useState('')
   const [selectedAnnotationId, setSelectedAnnotationId] = useState(null)
+  const [controlsExpanded, setControlsExpanded] = useState(false)
   const activePointersRef = useRef(new Map())
   const pinchRef = useRef({ active: false, targetId: null, startDistance: 0, baseSize: 0 })
   const selectionDragRef = useRef({ active: false, pointerId: null, targetId: null, lastPoint: null, moved: false })
@@ -19994,6 +19995,10 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       setSelectedAnnotationId(null)
     }
   }, [annotations, selectedAnnotationId])
+
+  useEffect(() => {
+    if (selectedAnnotationId && !controlsExpanded) setControlsExpanded(true)
+  }, [selectedAnnotationId, controlsExpanded])
 
   useEffect(
     () => () => {
@@ -20501,9 +20506,65 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           )}
         </div>
 
-        <div className="absolute left-3 right-3 bottom-16 space-y-2">
-          <div className="bg-black/75 border border-white/10 rounded-2xl p-2">
-            <div className="flex items-center gap-2 overflow-x-auto">
+        {promptOpen ? (
+          <div className="absolute inset-0 bg-black/55 flex items-start justify-center p-4 pt-[14vh]">
+            <div className="w-full max-w-sm bg-white text-gray-900 rounded-2xl shadow-xl border border-gray-200 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTextMode('text')}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'text' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
+                >
+                  Abc
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTextMode('feet_inches')}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'feet_inches' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
+                >
+                  ft. in.
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTextMode('feet_cm')}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'feet_cm' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
+                >
+                  ft. cm.
+                </button>
+              </div>
+
+              <p className="text-sm font-semibold">{promptTitle}</p>
+              <input
+                autoFocus
+                value={promptValue}
+                onChange={(e) => setPromptValue(e.target.value)}
+                placeholder={
+                  textMode === 'text'
+                    ? 'Type note'
+                    : textMode === 'feet_inches'
+                      ? 'Example: 4 ft 2 in'
+                      : 'Example: 4 ft 20 cm'
+                }
+                className="w-full px-3 py-2 border rounded-xl"
+              />
+
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={cancelPrompt} className="px-4 py-2 rounded-xl border border-gray-300 bg-white text-sm font-semibold">
+                  Cancel
+                </button>
+                <button type="button" onClick={savePrompt} className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold">
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="px-3 py-2 border-t border-white/10 bg-black/88 space-y-2">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 overflow-x-auto">
+            <div className="flex items-center gap-2 min-w-max">
               {PHOTO_ANNOTATION_TOOLS.map((entry) => {
                 const Icon = entry.icon
                 const active = tool === entry.id
@@ -20528,20 +20589,31 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                       }
                       triggerHaptic(5)
                     }}
-                    className={`h-10 px-3 rounded-xl border text-xs font-semibold shrink-0 inline-flex items-center gap-1.5 ${
+                    className={`h-9 px-3 rounded-xl border text-xs font-semibold shrink-0 inline-flex items-center gap-1.5 ${
                       active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-white/5 border-white/10 text-white/85 hover:bg-white/10'
                     }`}
                     title={entry.label}
                     aria-label={entry.label}
                   >
                     <Icon className="w-4 h-4" />
-                    <span>{entry.label}</span>
+                    <span className="hidden sm:inline">{entry.label}</span>
                   </button>
                 )
               })}
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setControlsExpanded((prev) => !prev)}
+            className="h-9 px-3 rounded-xl border border-white/20 bg-white/10 text-xs font-semibold inline-flex items-center gap-1.5"
+            title={controlsExpanded ? 'Hide style controls' : 'Show style controls'}
+          >
+            <SlidersHorizontal className="w-4 h-4" />
+            <span className="hidden sm:inline">{controlsExpanded ? 'Hide' : 'Style'}</span>
+          </button>
+        </div>
 
+        {controlsExpanded ? (
           <div className="bg-black/75 border border-white/10 rounded-2xl px-3 py-2 space-y-2">
             <div className="flex items-center gap-3">
               <div ref={colorPickerRef} className="relative shrink-0">
@@ -20559,7 +20631,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                   <ChevronDown className={`w-3.5 h-3.5 text-white/70 transition-transform ${showColorPicker ? 'rotate-180' : ''}`} />
                 </button>
                 {showColorPicker ? (
-                  <div className="absolute bottom-full left-0 mb-2 rounded-xl border border-white/20 bg-black/90 p-2 shadow-xl">
+                  <div className="absolute bottom-full left-0 mb-2 rounded-xl border border-white/20 bg-black/90 p-2 shadow-xl z-10">
                     <div className="grid grid-cols-3 gap-2">
                       {PHOTO_ANNOTATION_COLORS.map((swatch) => {
                         const active = swatch === color
@@ -20650,66 +20722,6 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                 ) : null}
               </div>
             ) : null}
-
-            {(selectedAnnotation?.type === 'arrow' || selectedAnnotation?.type === 'rect' || selectedAnnotation?.type === 'ellipse') ? (
-              <p className="text-[11px] text-white/60">Drag the blue endpoint handles on the selected shape to resize.</p>
-            ) : null}
-            {selectedTextAnnotation ? <p className="text-[11px] text-white/60">Pinch or use A-/A+ to resize selected text.</p> : null}
-            {tool === 'select' ? <p className="text-[11px] text-white/60">Select tool: tap to select, drag to move, use handles to resize.</p> : null}
-          </div>
-        </div>
-
-        {promptOpen ? (
-          <div className="absolute inset-0 bg-black/55 flex items-start justify-center p-4 pt-[14vh]">
-            <div className="w-full max-w-sm bg-white text-gray-900 rounded-2xl shadow-xl border border-gray-200 p-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setTextMode('text')}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'text' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
-                >
-                  Abc
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTextMode('feet_inches')}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'feet_inches' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
-                >
-                  ft. in.
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTextMode('feet_cm')}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${textMode === 'feet_cm' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300'}`}
-                >
-                  ft. cm.
-                </button>
-              </div>
-
-              <p className="text-sm font-semibold">{promptTitle}</p>
-              <input
-                autoFocus
-                value={promptValue}
-                onChange={(e) => setPromptValue(e.target.value)}
-                placeholder={
-                  textMode === 'text'
-                    ? 'Type note'
-                    : textMode === 'feet_inches'
-                      ? 'Example: 4 ft 2 in'
-                      : 'Example: 4 ft 20 cm'
-                }
-                className="w-full px-3 py-2 border rounded-xl"
-              />
-
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={cancelPrompt} className="px-4 py-2 rounded-xl border border-gray-300 bg-white text-sm font-semibold">
-                  Cancel
-                </button>
-                <button type="button" onClick={savePrompt} className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold">
-                  Save
-                </button>
-              </div>
-            </div>
           </div>
         ) : null}
       </div>
