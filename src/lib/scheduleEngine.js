@@ -315,6 +315,11 @@ export const assignSubsToTasks = (tasks, subs) => {
     const bStart = parseISODate(b.scheduled_start)?.getTime() ?? 0
     return aStart - bStart || bySortOrder(a, b)
   })) {
+    // Final track is coordinated by supers/office and should stay intentionally unassigned by default.
+    if (task.track === 'final') {
+      task.sub_id = null
+      continue
+    }
     if (!task.scheduled_start) continue
     const chosen = pickSubForTrade(task.trade, task.scheduled_start)
     task.sub_id = chosen?.id ?? null
