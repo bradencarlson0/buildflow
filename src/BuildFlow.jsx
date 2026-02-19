@@ -716,6 +716,17 @@ const formatPct = (value, total) => {
   return `${Math.round((100 * part) / whole)}%`
 }
 
+const withParetoCumulative = (rows = []) => {
+  const list = Array.isArray(rows) ? rows : []
+  const total = list.reduce((sum, row) => sum + Number(row?.value ?? 0), 0)
+  let running = 0
+  return list.map((row) => {
+    running += Number(row?.value ?? 0)
+    const cumulativePct = total > 0 ? (100 * running) / total : 0
+    return { ...row, cumulativePct: Math.max(0, Math.min(100, cumulativePct)) }
+  })
+}
+
 const buildDemoCycleRiskRows = (count, thresholdDays, options = {}) => {
   const communityNames = options.communityNames ?? ['The Grove', 'Ovation', 'The Heights', 'Madison City']
   const lotSeed = Number(options.lotSeed ?? 1)
@@ -738,6 +749,7 @@ const buildDemoCycleRiskRows = (count, thresholdDays, options = {}) => {
 
 const buildExecutiveDemoAnalytics = (todayIso = '') => {
   const weekValues = [4, 5, 6, 5, 7, 8, 8, 9, 10, 10, 11, 12]
+  const plannedWeekValues = [5, 6, 6, 6, 7, 8, 8, 9, 9, 10, 11, 11]
   const todayDate = parseISODate(todayIso) ?? new Date()
   const thisWeekStart = new Date(todayDate)
   thisWeekStart.setDate(todayDate.getDate() - ((todayDate.getDay() + 6) % 7))
@@ -747,6 +759,12 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
     const key = formatISODate(week)
     return { key, label: formatShortDate(key), value }
   })
+  const completionPlanVsActual = completionTrend.map((point, idx) => ({
+    key: point.key,
+    label: point.label,
+    actual: Number(point.value ?? 0),
+    planned: Number(plannedWeekValues[idx] ?? 0),
+  }))
   const riskLots180 = buildDemoCycleRiskRows(4, 180, { lotSeed: 3, baseProgress: 74 })
   const riskLots110 = [...riskLots180, ...buildDemoCycleRiskRows(14, 110, { lotSeed: 27, baseProgress: 56 })]
 
@@ -816,6 +834,25 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
       { id: 'sub-summit', label: 'Summit Drywall', value: 83, totalTasks: 29, delayedTasks: 5, delayDays: 18 },
       { id: 'sub-alpha', label: 'Alpha Paint', value: 80, totalTasks: 20, delayedTasks: 4, delayDays: 16 },
     ],
+    milestoneFunnel: [
+      { id: 'started', label: 'Started Homes', value: 92 },
+      { id: 'fup', label: 'Forms Up', value: 87 },
+      { id: 'slb', label: 'Slab Poured', value: 79 },
+      { id: 'rgh', label: 'Roof / Rough', value: 68 },
+      { id: 'brk', label: 'Brick / Sheet Rock', value: 57 },
+      { id: 'cab', label: 'Cabinets', value: 45 },
+      { id: 'csd', label: 'Carpet / Sod', value: 38 },
+      { id: 'co', label: 'Certificate of Occupancy', value: 31 },
+    ],
+    completionPlanVsActual,
+    delayReasonPareto: withParetoCumulative([
+      { id: 'weather', label: 'Weather', value: 28, events: 11 },
+      { id: 'labor', label: 'Labor Shortage', value: 19, events: 7 },
+      { id: 'material', label: 'Material Delay', value: 14, events: 6 },
+      { id: 'change_order', label: 'Change Order', value: 11, events: 4 },
+      { id: 'inspection', label: 'Inspection Hold', value: 8, events: 3 },
+      { id: 'owner', label: 'Owner Decision', value: 5, events: 2 },
+    ]),
     completionTrend,
   }
 }
@@ -994,6 +1031,211 @@ const ExecutiveSubPerformanceTable = ({ rows = [] }) => {
   )
 }
 
+const EXECUTIVE_FUNNEL_COLORS = [
+  'from-blue-700 to-blue-600',
+  'from-blue-600 to-sky-600',
+  'from-sky-600 to-cyan-600',
+  'from-cyan-600 to-teal-600',
+  'from-teal-600 to-emerald-600',
+  'from-emerald-600 to-green-600',
+  'from-green-600 to-lime-600',
+  'from-lime-600 to-yellow-500',
+]
+
+const ExecutiveMilestoneFunnel = ({ steps = [] }) => {
+  const list = (Array.isArray(steps) ? steps : []).filter((step) => Number(step?.value ?? 0) >= 0)
+  if (list.length === 0) return <p className="text-sm text-gray-500">No milestone data yet.</p>
+  const max = Math.max(1, ...list.map((step) => Number(step.value ?? 0)))
+  return (
+    <div className="space-y-2">
+      {list.map((step, idx) => {
+        const value = Number(step.value ?? 0)
+        const widthPct = Math.max(35, Math.min(100, 35 + (65 * value) / max))
+        const previous = idx > 0 ? Number(list[idx - 1]?.value ?? 0) : null
+        const delta = previous == null ? null : previous - value
+        return (
+          <div key={step.id ?? step.label} className="space-y-1">
+            <div className="flex items-center justify-between text-xs text-gray-600">
+              <span className="font-semibold text-gray-700">{step.label}</span>
+              <span>
+                {formatCount(value)}
+                {delta != null ? ` (${delta >= 0 ? '-' : '+'}${formatCount(Math.abs(delta))})` : ''}
+              </span>
+            </div>
+            <div className="h-8 flex items-center">
+              <div
+                className={`h-7 rounded-md bg-gradient-to-r ${EXECUTIVE_FUNNEL_COLORS[idx % EXECUTIVE_FUNNEL_COLORS.length]} text-white text-xs font-semibold flex items-center justify-center shadow-sm transition-all`}
+                style={{ width: `${widthPct}%` }}
+                title={`${step.label}: ${formatCount(value)}`}
+              >
+                {formatCount(value)}
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const ExecutivePlanVsActualChart = ({ points = [] }) => {
+  const list = Array.isArray(points) ? points : []
+  if (list.length === 0) return <p className="text-sm text-gray-500">No completion forecast data yet.</p>
+  const width = 560
+  const height = 240
+  const padLeft = 44
+  const padRight = 14
+  const padTop = 16
+  const padBottom = 38
+  const maxRaw = Math.max(1, ...list.flatMap((p) => [Number(p?.actual ?? 0), Number(p?.planned ?? 0)]))
+  const yStep = maxRaw <= 12 ? 2 : maxRaw <= 24 ? 4 : 5
+  const yMax = Math.max(yStep * 3, Math.ceil(maxRaw / yStep) * yStep)
+  const yTicks = Array.from({ length: Math.floor(yMax / yStep) + 1 }, (_, i) => i * yStep)
+  const xFor = (idx) => (list.length === 1 ? width / 2 : padLeft + (idx / (list.length - 1)) * (width - padLeft - padRight))
+  const yFor = (value) => height - padBottom - (Number(value ?? 0) / yMax) * (height - padTop - padBottom)
+  const actualCoords = list.map((point, idx) => `${xFor(idx)},${yFor(point.actual)}`).join(' ')
+  const plannedCoords = list.map((point, idx) => `${xFor(idx)},${yFor(point.planned)}`).join(' ')
+  const actualTotal = list.reduce((sum, point) => sum + Number(point?.actual ?? 0), 0)
+  const plannedTotal = list.reduce((sum, point) => sum + Number(point?.planned ?? 0), 0)
+  const variance = actualTotal - plannedTotal
+  const tickEvery = Math.max(1, Math.floor((list.length - 1) / 4))
+
+  return (
+    <div className="space-y-2">
+      <div className="h-60 rounded-xl border border-gray-200 bg-white p-2">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
+          {yTicks.map((tick) => (
+            <g key={`pva-y-${tick}`}>
+              <line x1={padLeft} y1={yFor(tick)} x2={width - padRight} y2={yFor(tick)} stroke="#E2E8F0" strokeWidth="1" />
+              <text x={padLeft - 6} y={yFor(tick) + 4} textAnchor="end" fontSize="10" fill="#64748B">
+                {tick}
+              </text>
+            </g>
+          ))}
+          {list.map((point, idx) => {
+            const showTick = idx === 0 || idx === list.length - 1 || idx % tickEvery === 0
+            if (!showTick) return null
+            return (
+              <g key={`pva-x-${point.key ?? idx}`}>
+                <line x1={xFor(idx)} y1={height - padBottom} x2={xFor(idx)} y2={height - padBottom + 4} stroke="#94A3B8" strokeWidth="1" />
+                <text x={xFor(idx)} y={height - 8} textAnchor="middle" fontSize="10" fill="#64748B">
+                  {point.label}
+                </text>
+              </g>
+            )
+          })}
+          <line x1={padLeft} y1={height - padBottom} x2={width - padRight} y2={height - padBottom} stroke="#94A3B8" strokeWidth="1.2" />
+          <polyline points={plannedCoords} fill="none" stroke="#16A34A" strokeWidth="2.5" strokeDasharray="5 4" strokeLinecap="round" />
+          <polyline points={actualCoords} fill="none" stroke="#2563EB" strokeWidth="3" strokeLinecap="round" />
+          {list.map((point, idx) => (
+            <g key={`pva-dot-${point.key ?? idx}`}>
+              <circle cx={xFor(idx)} cy={yFor(point.actual)} r="3.2" fill="#1D4ED8" />
+              <circle cx={xFor(idx)} cy={yFor(point.planned)} r="2.7" fill="#16A34A" />
+            </g>
+          ))}
+          <text x={12} y={14} fontSize="10" fill="#64748B">
+            Homes per week
+          </text>
+          <text x={(padLeft + (width - padRight)) / 2} y={height - 2} textAnchor="middle" fontSize="10" fill="#64748B">
+            Week starting date
+          </text>
+        </svg>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-4">
+          <span className="inline-flex items-center gap-1.5 text-gray-700">
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-600" />
+            Actual completions
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-gray-700">
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-green-600" />
+            Planned completions
+          </span>
+        </div>
+        <span className={`font-semibold px-2 py-1 rounded-full border ${variance >= 0 ? 'text-emerald-700 border-emerald-200 bg-emerald-50' : 'text-rose-700 border-rose-200 bg-rose-50'}`}>
+          12-week variance: {variance >= 0 ? '+' : ''}{formatCount(variance)} homes
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <div className="rounded-lg border border-gray-200 p-2">
+          <p className="text-gray-500">Actual (12w)</p>
+          <p className="font-semibold text-gray-900">{formatCount(actualTotal)}</p>
+        </div>
+        <div className="rounded-lg border border-gray-200 p-2">
+          <p className="text-gray-500">Planned (12w)</p>
+          <p className="font-semibold text-gray-900">{formatCount(plannedTotal)}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const ExecutiveParetoChart = ({ items = [] }) => {
+  const list = (Array.isArray(items) ? items : []).filter((item) => Number(item?.value ?? 0) > 0)
+  if (list.length === 0) return <p className="text-sm text-gray-500">No delay reason data yet.</p>
+  const width = 560
+  const height = 250
+  const padLeft = 42
+  const padRight = 34
+  const padTop = 16
+  const padBottom = 54
+  const chartW = width - padLeft - padRight
+  const chartH = height - padTop - padBottom
+  const maxBar = Math.max(1, ...list.map((item) => Number(item.value ?? 0)))
+  const barGap = chartW / list.length
+  const barW = Math.max(16, Math.min(52, barGap * 0.6))
+  const xFor = (idx) => padLeft + idx * barGap + (barGap - barW) / 2
+  const yBarFor = (value) => padTop + chartH - (Number(value ?? 0) / maxBar) * chartH
+  const yPctFor = (pct) => padTop + chartH - (Math.max(0, Math.min(100, Number(pct ?? 0))) / 100) * chartH
+  const lineCoords = list.map((item, idx) => `${xFor(idx) + barW / 2},${yPctFor(item.cumulativePct)}`).join(' ')
+
+  return (
+    <div className="space-y-2">
+      <div className="h-64 rounded-xl border border-gray-200 bg-white p-2">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
+          <line x1={padLeft} y1={padTop + chartH} x2={width - padRight} y2={padTop + chartH} stroke="#94A3B8" strokeWidth="1.2" />
+          <line x1={padLeft} y1={padTop} x2={padLeft} y2={padTop + chartH} stroke="#CBD5E1" strokeWidth="1" />
+          <line x1={width - padRight} y1={padTop} x2={width - padRight} y2={padTop + chartH} stroke="#CBD5E1" strokeWidth="1" />
+          {[0, 50, 80, 100].map((tick) => (
+            <g key={`pareto-p-${tick}`}>
+              <line x1={padLeft} y1={yPctFor(tick)} x2={width - padRight} y2={yPctFor(tick)} stroke="#EEF2FF" strokeWidth="1" />
+              <text x={width - padRight + 4} y={yPctFor(tick) + 4} textAnchor="start" fontSize="10" fill="#64748B">
+                {tick}%
+              </text>
+            </g>
+          ))}
+          {list.map((item, idx) => (
+            <g key={item.id ?? item.label}>
+              <rect x={xFor(idx)} y={yBarFor(item.value)} width={barW} height={padTop + chartH - yBarFor(item.value)} rx="3" fill="#2563EB" />
+              <text x={xFor(idx) + barW / 2} y={height - 22} textAnchor="middle" fontSize="9.5" fill="#64748B">
+                {String(item.label ?? '').split(' ')[0]}
+              </text>
+            </g>
+          ))}
+          <polyline points={lineCoords} fill="none" stroke="#F59E0B" strokeWidth="2.4" />
+          {list.map((item, idx) => (
+            <circle key={`pareto-dot-${item.id ?? idx}`} cx={xFor(idx) + barW / 2} cy={yPctFor(item.cumulativePct)} r="3" fill="#D97706" />
+          ))}
+          <text x={padLeft} y={10} fontSize="10" fill="#64748B">
+            Delay days by reason (bars)
+          </text>
+          <text x={width - padRight} y={10} textAnchor="end" fontSize="10" fill="#64748B">
+            Cumulative impact % (line)
+          </text>
+        </svg>
+      </div>
+      <div className="space-y-1">
+        {list.map((item, idx) => (
+          <div key={`pareto-row-${item.id ?? idx}`} className="text-xs text-gray-700 flex items-center justify-between gap-3">
+            <span className="truncate">{idx + 1}. {item.label}</span>
+            <span className="whitespace-nowrap">{formatCount(item.value)}d • {formatCount(item.events ?? 0)} issues • {Math.round(Number(item.cumulativePct ?? 0))}% cum</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 const ExecutiveTrendSparkline = ({ points = [] }) => {
   const list = Array.isArray(points) ? points : []
   if (list.length === 0) return <p className="text-sm text-gray-500">No completion trend available yet.</p>
@@ -1004,8 +1246,9 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
   const padTop = 14
   const padBottom = 36
   const maxRaw = Math.max(1, ...list.map((p) => Number(p?.value ?? 0)))
-  const yMax = Math.max(5, Math.ceil(maxRaw / 5) * 5)
-  const yTicks = [0, 1, 2, 3].map((i) => Math.round((yMax * i) / 3))
+  const yStep = maxRaw <= 12 ? 2 : maxRaw <= 24 ? 4 : 5
+  const yMax = Math.max(yStep * 3, Math.ceil(maxRaw / yStep) * yStep)
+  const yTicks = Array.from({ length: Math.floor(yMax / yStep) + 1 }, (_, i) => i * yStep)
   const xFor = (idx) =>
     list.length === 1
       ? width / 2
@@ -1016,6 +1259,12 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
   const latest = list[list.length - 1]
   const previous = list.length > 1 ? list[list.length - 2] : null
   const latestDelta = previous ? Number(latest?.value ?? 0) - Number(previous?.value ?? 0) : 0
+  const twelveWeekTotal = list.reduce((sum, point) => sum + Number(point?.value ?? 0), 0)
+  const lastFour = list.slice(-4)
+  const fourWeekAvg = lastFour.length ? (lastFour.reduce((sum, point) => sum + Number(point?.value ?? 0), 0) / lastFour.length) : 0
+  const targetValue = Math.max(1, Math.round(fourWeekAvg + 1))
+  const targetY = yFor(targetValue)
+  const tickEvery = Math.max(1, Math.floor((list.length - 1) / 4))
 
   return (
     <div className="space-y-2">
@@ -1043,8 +1292,12 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
               </text>
             </g>
           ))}
+          <line x1={padLeft} y1={targetY} x2={width - padRight} y2={targetY} stroke="#F59E0B" strokeWidth="1.2" strokeDasharray="5 4" />
+          <text x={width - padRight - 2} y={targetY - 4} textAnchor="end" fontSize="10" fill="#B45309">
+            Target {targetValue}/wk
+          </text>
           {list.map((point, idx) => {
-            const showTick = idx === 0 || idx === list.length - 1 || idx === Math.floor(list.length / 2)
+            const showTick = idx === 0 || idx === list.length - 1 || idx % tickEvery === 0
             if (!showTick) return null
             return (
               <g key={`xt-${point.key ?? idx}`}>
@@ -1061,13 +1314,20 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
           {list.map((point, idx) => (
             <circle key={`${point.label}-${idx}`} cx={xFor(idx)} cy={yFor(point.value)} r="3.2" fill="#1D4ED8" />
           ))}
+          <circle cx={xFor(list.length - 1)} cy={yFor(latest?.value ?? 0)} r="4" fill="#1D4ED8" />
+          <text x={xFor(list.length - 1) + 8} y={yFor(latest?.value ?? 0) - 8} fontSize="10" fill="#1E40AF" fontWeight="700">
+            {formatCount(latest?.value ?? 0)}
+          </text>
           <text x={12} y={14} fontSize="10" fill="#64748B">
-            Homes
+            Homes completed
+          </text>
+          <text x={(padLeft + (width - padRight)) / 2} y={height - 2} textAnchor="middle" fontSize="10" fill="#64748B">
+            Week starting date
           </text>
         </svg>
       </div>
       <div className="flex items-center justify-between text-xs text-gray-600">
-        <span>Week of {list[0]?.label ?? ''}</span>
+        <span>12-week total: {formatCount(twelveWeekTotal)} homes</span>
         <span
           className={`font-semibold px-2 py-1 rounded-full border ${
             latestDelta >= 0 ? 'text-emerald-700 border-emerald-200 bg-emerald-50' : 'text-rose-700 border-rose-200 bg-rose-50'
@@ -1076,7 +1336,7 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
           This week: {formatCount(latest?.value ?? 0)} homes
           {previous ? ` (${latestDelta >= 0 ? '+' : ''}${formatCount(latestDelta)} vs last week)` : ''}
         </span>
-        <span>Week of {latest?.label ?? ''}</span>
+        <span>4-week avg: {fourWeekAvg.toFixed(1)}/wk</span>
       </div>
     </div>
   )
@@ -8736,6 +8996,27 @@ export default function BuildFlow() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 6)
 
+    const delayReasonPareto = withParetoCumulative(
+      Array.from(
+        active.reduce((map, lot) => {
+          for (const task of lot?.tasks ?? []) {
+            const delayDays = Number(task?.delay_days ?? 0) || 0
+            const delayed = String(task?.status ?? '').toLowerCase() === 'delayed' || delayDays > 0
+            if (!delayed) continue
+            const reasonId = String(task?.delay_reason ?? '').trim() || 'unspecified'
+            const reasonLabel = DELAY_REASONS.find((reason) => reason.id === reasonId)?.label ?? 'Unspecified'
+            const entry = map.get(reasonId) ?? { id: reasonId, label: reasonLabel, value: 0, events: 0 }
+            entry.value += Math.max(1, delayDays)
+            entry.events += 1
+            map.set(reasonId, entry)
+          }
+          return map
+        }, new Map()).values(),
+      )
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 7),
+    )
+
     const builderLoad = Array.from(
       lots.reduce((map, lot) => {
         const community = communitiesById.get(lot.community_id) ?? null
@@ -8812,6 +9093,33 @@ export default function BuildFlow() {
       ...point,
       value: Number(weekMap.get(point.key) || 0),
     }))
+    const plannedWeekMap = new Map(weekPoints.map((point) => [point.key, 0]))
+    for (const lot of lots) {
+      const targetIso = String(lot?.target_completion_date ?? '').slice(0, 10)
+      if (!targetIso) continue
+      const weekKey = parseWeekStartIso(targetIso)
+      if (!plannedWeekMap.has(weekKey)) continue
+      plannedWeekMap.set(weekKey, Number(plannedWeekMap.get(weekKey) || 0) + 1)
+    }
+    const completionPlanVsActual = weekPoints.map((point) => ({
+      key: point.key,
+      label: point.label,
+      actual: Number(weekMap.get(point.key) || 0),
+      planned: Number(plannedWeekMap.get(point.key) || 0),
+    }))
+
+    const orderedMilestones = (MILESTONES ?? [])
+      .slice()
+      .sort((a, b) => (Number(a?.pct ?? 0) || 0) - (Number(b?.pct ?? 0) || 0))
+    const startedLots = lots.filter((lot) => lot?.status === 'in_progress' || lot?.status === 'complete')
+    const milestoneFunnel = [
+      { id: 'started', label: 'Started Homes', value: startedLots.length },
+      ...orderedMilestones.map((milestone) => ({
+        id: milestone.id,
+        label: milestone.label,
+        value: startedLots.filter((lot) => isMilestoneAchieved(lot, milestone)).length,
+      })),
+    ]
 
     const closingPipeline30 = lots.filter((lot) => {
       const closeIso = String(getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.closing_date) || '').slice(0, 10)
@@ -8844,8 +9152,11 @@ export default function BuildFlow() {
       lotTypeMix,
       communityProgress,
       delayedByTrade,
+      delayReasonPareto,
       builderLoad,
       subPerformance,
+      milestoneFunnel,
+      completionPlanVsActual,
       completionTrend,
     }
   }, [visibleLots, lotHasDelay, businessDaysBetweenInclusive, todayIso, communitiesById, app.subcontractors])
@@ -12372,25 +12683,43 @@ export default function BuildFlow() {
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <Card>
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-semibold">Community Progress Scorecard</h3>
-                  <span className="text-xs text-gray-500">Progress + delay concentration</span>
+                  <h3 className="font-semibold">Milestone Funnel</h3>
+                  <span className="text-xs text-gray-500">Started homes progressing to CO</span>
                 </div>
                 <div className="mt-3">
-                  <ExecutiveCommunityScorecard rows={executiveAnalytics.communityProgress} />
+                  <ExecutiveMilestoneFunnel steps={executiveAnalytics.milestoneFunnel} />
                 </div>
               </Card>
 
               <Card>
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-semibold">Delay Hotspots by Trade</h3>
-                  <span className="text-xs text-gray-500">Total delay days</span>
+                  <h3 className="font-semibold">Planned vs Actual Completions (12 Weeks)</h3>
+                  <span className="text-xs text-gray-500">Execution vs forecast by week</span>
                 </div>
                 <div className="mt-3">
-                  <ExecutiveRankBars
-                    items={executiveAnalytics.delayedByTrade}
-                    rightLabelFormatter={(item, value) => `${formatCount(value)}d • ${formatCount(item?.events ?? 0)} issues`}
-                    barClassName="bg-rose-500"
-                  />
+                  <ExecutivePlanVsActualChart points={executiveAnalytics.completionPlanVsActual} />
+                </div>
+              </Card>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Delay Reason Pareto</h3>
+                  <span className="text-xs text-gray-500">Top causes driving cumulative delay</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveParetoChart items={executiveAnalytics.delayReasonPareto} />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Community Progress Scorecard</h3>
+                  <span className="text-xs text-gray-500">Progress + delay concentration</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveCommunityScorecard rows={executiveAnalytics.communityProgress} />
                 </div>
               </Card>
             </div>
@@ -12427,11 +12756,15 @@ export default function BuildFlow() {
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <Card>
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-semibold">12-Week Completion Trend</h3>
-                  <span className="text-xs text-gray-500">Weekly homes completed (rolling 12 weeks)</span>
+                  <h3 className="font-semibold">Delay Hotspots by Trade</h3>
+                  <span className="text-xs text-gray-500">Total delay days and issue count</span>
                 </div>
                 <div className="mt-3">
-                  <ExecutiveTrendSparkline points={executiveAnalytics.completionTrend} />
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.delayedByTrade}
+                    rightLabelFormatter={(item, value) => `${formatCount(value)}d • ${formatCount(item?.events ?? 0)} issues`}
+                    barClassName="bg-rose-500"
+                  />
                 </div>
               </Card>
 
