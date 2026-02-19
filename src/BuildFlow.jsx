@@ -1056,103 +1056,98 @@ const EXECUTIVE_FUNNEL_COLORS = [
 
 const ExecutiveMilestoneFunnel = ({ steps = [] }) => {
   const list = (Array.isArray(steps) ? steps : []).filter((step) => Number(step?.value ?? 0) >= 0)
-  if (list.length === 0) return <p className="text-sm text-gray-500">No milestone data yet.</p>
-  const startCount = Math.max(1, Number(list[0]?.value ?? 0))
-  const coCount = Number(list[list.length - 1]?.value ?? 0)
-  const overallConversion = Math.round((100 * coCount) / startCount)
-  const biggestDrop = list.reduce(
-    (best, step, idx) => {
-      if (idx === 0) return best
-      const previous = Number(list[idx - 1]?.value ?? 0)
-      const current = Number(step?.value ?? 0)
-      const drop = Math.max(0, previous - current)
-      if (drop > best.value) return { id: step.id, label: step.label, value: drop }
-      return best
-    },
-    { id: '', label: 'None', value: 0 },
-  )
+  if (list.length < 2) return <p className="text-sm text-gray-500">No milestone data yet.</p>
+
+  const startCount = Math.max(0, Number(list[0]?.value ?? 0))
+  const milestoneSteps = list.slice(1)
+  const stageRows = milestoneSteps.map((step, idx) => {
+    const reached = Math.max(0, Number(step?.value ?? 0))
+    const nextReached = idx < milestoneSteps.length - 1 ? Math.max(0, Number(milestoneSteps[idx + 1]?.value ?? 0)) : 0
+    const currentlyHere = Math.max(0, reached - nextReached)
+    const pctOfStarted = startCount > 0 ? Math.round((100 * currentlyHere) / startCount) : 0
+    return {
+      id: step.id ?? step.label,
+      label: step.label,
+      reached,
+      nextReached,
+      currentlyHere,
+      pctOfStarted,
+      colorClass: EXECUTIVE_FUNNEL_COLORS[idx % EXECUTIVE_FUNNEL_COLORS.length],
+    }
+  })
+
+  const maxStageLoad = Math.max(1, ...stageRows.map((row) => Number(row?.currentlyHere ?? 0)))
+  const completedCount = Number(stageRows[stageRows.length - 1]?.currentlyHere ?? 0)
+  const inProgressCount = Math.max(0, startCount - completedCount)
+  const topStage = [...stageRows].sort((a, b) => b.currentlyHere - a.currentlyHere)[0] ?? null
 
   return (
     <div className="space-y-3">
       <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-xs text-blue-900 space-y-1">
         <p className="font-semibold">How to read this</p>
         <p>
-          <span className="font-semibold">Moved forward from prior stage</span> = percent of homes that advanced from the previous milestone.
+          This is a <span className="font-semibold">stage snapshot</span>: how many homes are currently sitting in each milestone right now.
         </p>
-        <p>
-          <span className="font-semibold">Still between stages</span> = homes that have not reached this milestone yet.
-        </p>
-        <p>
-          <span className="font-semibold">Reached from start</span> = percent of all started homes that have reached this milestone.
-        </p>
+        <p>It is not a bottleneck score by itself. Use this to see workload concentration by stage.</p>
       </div>
 
       <div className="grid grid-cols-3 gap-2 text-xs">
         <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
-          <p className="text-gray-500 uppercase tracking-wide text-[10px]">Started</p>
+          <p className="text-gray-500 uppercase tracking-wide text-[10px]">Started Homes</p>
           <p className="font-semibold text-gray-900">{formatCount(startCount)}</p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
-          <p className="text-gray-500 uppercase tracking-wide text-[10px]">Reached CO</p>
-          <p className="font-semibold text-gray-900">{formatCount(coCount)}</p>
+          <p className="text-gray-500 uppercase tracking-wide text-[10px]">In Progress</p>
+          <p className="font-semibold text-gray-900">{formatCount(inProgressCount)}</p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
-          <p className="text-gray-500 uppercase tracking-wide text-[10px]">End-to-End</p>
-          <p className="font-semibold text-gray-900">{overallConversion}%</p>
+          <p className="text-gray-500 uppercase tracking-wide text-[10px]">Completed (CO)</p>
+          <p className="font-semibold text-gray-900">{formatCount(completedCount)}</p>
         </div>
       </div>
 
-      {list.map((step, idx) => {
-        const value = Number(step.value ?? 0)
-        const previous = idx > 0 ? Math.max(1, Number(list[idx - 1]?.value ?? 0)) : null
-        const drop = previous == null ? 0 : Math.max(0, previous - value)
-        const fromPrevious = previous == null ? 100 : Math.round((100 * value) / previous)
-        const fromStart = Math.round((100 * value) / startCount)
-        const widthPct = Math.max(10, Math.min(100, (100 * value) / startCount))
-        const isBiggestDrop = biggestDrop.id && biggestDrop.id === step.id && drop > 0
-        return (
-          <div key={step.id ?? step.label} className={`rounded-xl border p-3 ${isBiggestDrop ? 'border-rose-300 bg-rose-50/50' : 'border-gray-200 bg-white'}`}>
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-semibold text-gray-800">{step.label}</p>
-                <p className="text-[11px] text-gray-500">Stage {idx + 1} of {list.length}</p>
-              </div>
-              <p className="text-lg font-bold text-gray-900">{formatCount(value)}</p>
-            </div>
-
-            <div className="mt-2 h-2 rounded-full bg-gray-100 overflow-hidden">
+      <div className="rounded-xl border border-gray-200 bg-white p-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm font-semibold text-gray-800">Where homes are right now</p>
+          {topStage ? <p className="text-xs text-gray-600">Largest stage: {topStage.label} ({formatCount(topStage.currentlyHere)})</p> : null}
+        </div>
+        <div className="mt-2 h-2.5 rounded-full bg-gray-100 overflow-hidden flex">
+          {stageRows.map((row) => {
+            const widthPct = startCount > 0 ? (100 * row.currentlyHere) / startCount : 0
+            return (
               <div
-                className={`h-full ${EXECUTIVE_FUNNEL_COLORS[idx % EXECUTIVE_FUNNEL_COLORS.length]}`}
+                key={`milestone-snapshot-${row.id}`}
+                className={row.colorClass}
                 style={{ width: `${widthPct}%` }}
-                title={`${step.label}: ${formatCount(value)}`}
+                title={`${row.label}: ${formatCount(row.currentlyHere)} homes`}
               />
-            </div>
+            )
+          })}
+        </div>
+      </div>
 
-            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
-              {previous == null ? (
-                <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">Starting stage</span>
-              ) : (
-                <>
-                  <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-gray-700">
-                    Moved forward from prior stage: <span className="font-semibold">{fromPrevious}%</span>
-                  </span>
-                  <span className={`rounded-full border px-2 py-0.5 ${drop > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-                    Still between stages: <span className="font-semibold">{formatCount(drop)}</span>
-                  </span>
-                </>
-              )}
-              <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-700">
-                Reached from start: <span className="font-semibold">{fromStart}%</span>
-              </span>
-              {isBiggestDrop ? (
-                <span className="rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 font-semibold text-rose-800">
-                  Largest bottleneck
-                </span>
-              ) : null}
+      <div className="space-y-2">
+        {stageRows.map((row, idx) => {
+          const widthPct = Math.max(0, Math.min(100, (100 * row.currentlyHere) / maxStageLoad))
+          return (
+            <div key={row.id} className="rounded-xl border border-gray-200 bg-white p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-semibold text-gray-800">{row.label}</p>
+                  <p className="text-[11px] text-gray-500">Stage {idx + 1} of {stageRows.length}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-base font-bold text-gray-900">{formatCount(row.currentlyHere)} homes</p>
+                  <p className="text-[11px] text-gray-600">{row.pctOfStarted}% of started homes</p>
+                </div>
+              </div>
+              <div className="mt-2 h-2 rounded-full bg-gray-100 overflow-hidden">
+                <div className={`h-full ${row.colorClass}`} style={{ width: `${widthPct}%` }} />
+              </div>
             </div>
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -12766,8 +12761,8 @@ export default function BuildFlow() {
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <Card>
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-semibold">Milestone Funnel</h3>
-                  <span className="text-xs text-gray-500">How homes progress from start to CO</span>
+                  <h3 className="font-semibold">Milestone Stage Snapshot</h3>
+                  <span className="text-xs text-gray-500">How many homes are currently at each stage</span>
                 </div>
                 <div className="mt-3">
                   <ExecutiveMilestoneFunnel steps={executiveAnalytics.milestoneFunnel} />
