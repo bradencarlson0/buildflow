@@ -4694,7 +4694,7 @@ export default function BuildFlow() {
     requestImmediateSync()
   }
 
-  const ensureDestructiveOverride = (actionLabel, { allowWithoutToken = false } = {}) => {
+  const ensureDestructiveOverride = (actionLabel, { allowWithoutToken = false, fallbackConfirmMessage = '' } = {}) => {
     if (!baselineProtectionEnabled) return true
     if (hasDestructiveOverride) return true
 
@@ -4704,7 +4704,7 @@ export default function BuildFlow() {
           typeof window === 'undefined'
             ? false
             : window.confirm(
-                `Baseline-protected mode is enabled and no override token is configured.\n\nProceed with ${actionLabel}?`,
+                String(fallbackConfirmMessage || `Proceed with ${actionLabel}?`),
               )
         return confirmed
       }
@@ -8851,7 +8851,13 @@ export default function BuildFlow() {
   const unstartLot = async (lotId) => {
     const lot = lotId ? lotsById.get(lotId) : null
     if (!lot) return
-    if (!ensureDestructiveOverride(`unstart ${lotCode(lot)}`, { allowWithoutToken: true })) return
+    if (
+      !ensureDestructiveOverride(`unstart ${lotCode(lot)}`, {
+        allowWithoutToken: true,
+        fallbackConfirmMessage: 'Are you sure you want to unstart this lot?',
+      })
+    )
+      return
     if (!isOnline) {
       alert('Unstart requires a connection right now.')
       return
