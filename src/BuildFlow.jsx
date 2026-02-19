@@ -1032,44 +1032,98 @@ const ExecutiveSubPerformanceTable = ({ rows = [] }) => {
 }
 
 const EXECUTIVE_FUNNEL_COLORS = [
-  'from-blue-700 to-blue-600',
-  'from-blue-600 to-sky-600',
-  'from-sky-600 to-cyan-600',
-  'from-cyan-600 to-teal-600',
-  'from-teal-600 to-emerald-600',
-  'from-emerald-600 to-green-600',
-  'from-green-600 to-lime-600',
-  'from-lime-600 to-yellow-500',
+  'bg-blue-700',
+  'bg-blue-600',
+  'bg-sky-600',
+  'bg-cyan-600',
+  'bg-teal-600',
+  'bg-emerald-600',
+  'bg-green-600',
+  'bg-lime-600',
 ]
 
 const ExecutiveMilestoneFunnel = ({ steps = [] }) => {
   const list = (Array.isArray(steps) ? steps : []).filter((step) => Number(step?.value ?? 0) >= 0)
   if (list.length === 0) return <p className="text-sm text-gray-500">No milestone data yet.</p>
-  const max = Math.max(1, ...list.map((step) => Number(step.value ?? 0)))
+  const startCount = Math.max(1, Number(list[0]?.value ?? 0))
+  const coCount = Number(list[list.length - 1]?.value ?? 0)
+  const overallConversion = Math.round((100 * coCount) / startCount)
+  const biggestDrop = list.reduce(
+    (best, step, idx) => {
+      if (idx === 0) return best
+      const previous = Number(list[idx - 1]?.value ?? 0)
+      const current = Number(step?.value ?? 0)
+      const drop = Math.max(0, previous - current)
+      if (drop > best.value) return { id: step.id, label: step.label, value: drop }
+      return best
+    },
+    { id: '', label: 'None', value: 0 },
+  )
+
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
+          <p className="text-gray-500 uppercase tracking-wide text-[10px]">Started</p>
+          <p className="font-semibold text-gray-900">{formatCount(startCount)}</p>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
+          <p className="text-gray-500 uppercase tracking-wide text-[10px]">Reached CO</p>
+          <p className="font-semibold text-gray-900">{formatCount(coCount)}</p>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
+          <p className="text-gray-500 uppercase tracking-wide text-[10px]">End-to-End</p>
+          <p className="font-semibold text-gray-900">{overallConversion}%</p>
+        </div>
+      </div>
+
       {list.map((step, idx) => {
         const value = Number(step.value ?? 0)
-        const widthPct = Math.max(35, Math.min(100, 35 + (65 * value) / max))
-        const previous = idx > 0 ? Number(list[idx - 1]?.value ?? 0) : null
-        const delta = previous == null ? null : previous - value
+        const previous = idx > 0 ? Math.max(1, Number(list[idx - 1]?.value ?? 0)) : null
+        const drop = previous == null ? 0 : Math.max(0, previous - value)
+        const fromPrevious = previous == null ? 100 : Math.round((100 * value) / previous)
+        const fromStart = Math.round((100 * value) / startCount)
+        const widthPct = Math.max(10, Math.min(100, (100 * value) / startCount))
+        const isBiggestDrop = biggestDrop.id && biggestDrop.id === step.id && drop > 0
         return (
-          <div key={step.id ?? step.label} className="space-y-1">
-            <div className="flex items-center justify-between text-xs text-gray-600">
-              <span className="font-semibold text-gray-700">{step.label}</span>
-              <span>
-                {formatCount(value)}
-                {delta != null ? ` (${delta >= 0 ? '-' : '+'}${formatCount(Math.abs(delta))})` : ''}
-              </span>
+          <div key={step.id ?? step.label} className={`rounded-xl border p-3 ${isBiggestDrop ? 'border-rose-300 bg-rose-50/50' : 'border-gray-200 bg-white'}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold text-gray-800">{step.label}</p>
+                <p className="text-[11px] text-gray-500">Stage {idx + 1} of {list.length}</p>
+              </div>
+              <p className="text-lg font-bold text-gray-900">{formatCount(value)}</p>
             </div>
-            <div className="h-8 flex items-center">
+
+            <div className="mt-2 h-2 rounded-full bg-gray-100 overflow-hidden">
               <div
-                className={`h-7 rounded-md bg-gradient-to-r ${EXECUTIVE_FUNNEL_COLORS[idx % EXECUTIVE_FUNNEL_COLORS.length]} text-white text-xs font-semibold flex items-center justify-center shadow-sm transition-all`}
+                className={`h-full ${EXECUTIVE_FUNNEL_COLORS[idx % EXECUTIVE_FUNNEL_COLORS.length]}`}
                 style={{ width: `${widthPct}%` }}
                 title={`${step.label}: ${formatCount(value)}`}
-              >
-                {formatCount(value)}
-              </div>
+              />
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+              {previous == null ? (
+                <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">Baseline stage</span>
+              ) : (
+                <>
+                  <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-gray-700">
+                    From prior: <span className="font-semibold">{fromPrevious}%</span>
+                  </span>
+                  <span className={`rounded-full border px-2 py-0.5 ${drop > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+                    Drop-off: <span className="font-semibold">{formatCount(drop)}</span>
+                  </span>
+                </>
+              )}
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-700">
+                From start: <span className="font-semibold">{fromStart}%</span>
+              </span>
+              {isBiggestDrop ? (
+                <span className="rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 font-semibold text-rose-800">
+                  Largest bottleneck
+                </span>
+              ) : null}
             </div>
           </div>
         )
