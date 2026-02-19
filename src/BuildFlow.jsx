@@ -8231,6 +8231,7 @@ export default function BuildFlow() {
     if (reportType === 'inventory_sales') {
       const rows = [
         [
+          'COMMUNITY',
           'LOT / UNIT',
           'PLAN / ELEV',
           'SQFT HEATED / TOTAL',
@@ -8298,6 +8299,7 @@ export default function BuildFlow() {
       const coMilestone = (MILESTONES ?? []).find((m) => String(m?.id ?? '').toLowerCase() === 'co') ?? null
 
       for (const lot of sortedLots) {
+        const community = communitiesById.get(lot.community_id) ?? null
         const plan = plans.find((p) => p.id === lot.plan_id) ?? null
 
         const planHeated = getPlanHeatedSqFt(plan)
@@ -8356,6 +8358,7 @@ export default function BuildFlow() {
         const specZero = getLotCustomField(lot, INVENTORY_REPORT_FIELD_KEYS.spec_zero)
 
         rows.push([
+          community?.name ?? '',
           lotCode(lot),
           planElev,
           sqftText,
@@ -8436,6 +8439,7 @@ export default function BuildFlow() {
           const ws = XLSX.utils.aoa_to_sheet(sheet.rows ?? [])
           if (reportType === 'inventory_sales' && String(sheet.name ?? '').toLowerCase() === 'inventory & sales') {
             ws['!cols'] = [
+              { wch: 22 }, // COMMUNITY
               { wch: 13 }, // LOT / UNIT
               { wch: 24 }, // PLAN / ELEV
               { wch: 14 }, // SQFT HEATED / TOTAL
@@ -8467,7 +8471,7 @@ export default function BuildFlow() {
               { wch: 12 }, // TOTAL DEPOSITS
               { wch: 16 }, // CLOSING AGENT
             ]
-            const endCol = XLSX.utils.encode_col(29)
+            const endCol = XLSX.utils.encode_col(30)
             ws['!autofilter'] = { ref: `A1:${endCol}1` }
             ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' }
           }
