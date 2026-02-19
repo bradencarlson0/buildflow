@@ -1230,6 +1230,7 @@ const LOT_CUSTOM_FIELD_KEYS = {
   purchase_price: 'cf-purchase-price',
   sqft_heated: 'cf-sqft-heated',
   sqft_total: 'cf-sqft-total',
+  manual_milestones: 'cf-manual-milestones',
 }
 
 const PLAN_SQFT_TOTAL_MAP_KEY = 'plan_sq_ft_total'
@@ -1282,6 +1283,23 @@ const getLotCustomField = (lot, key) => {
 }
 
 const getLotNumericCustomField = (lot, key) => parseNumericValue(getLotCustomField(lot, key))
+
+const normalizeManualMilestones = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const normalized = {}
+  for (const [key, raw] of Object.entries(value)) {
+    const id = String(key ?? '').trim()
+    if (!id) continue
+    normalized[id] = Boolean(raw)
+  }
+  return normalized
+}
+
+const readLotManualMilestones = (lot) => {
+  const fromCustomFields = normalizeManualMilestones(lot?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.manual_milestones])
+  const fromTopLevel = normalizeManualMilestones(lot?.manual_milestones)
+  return { ...fromCustomFields, ...fromTopLevel }
+}
 
 const normalizeHolidayObjects = (nextLike, prevLike) => {
   const prev = Array.isArray(prevLike) ? prevLike : []
@@ -1348,11 +1366,18 @@ const mapTaskFromSupabase = (taskRow) => {
 
 const mapLotFromSupabase = (lotRow, lotTasks = []) => {
   const lotType = normalizeLotType(lotRow?.lot_type ?? lotRow?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.lot_type])
-  const customFields = ensureLotTypeCustomField(lotRow?.custom_fields, lotType)
+  const manualMilestones = normalizeManualMilestones(
+    lotRow?.manual_milestones ?? lotRow?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.manual_milestones],
+  )
+  const customFields = {
+    ...ensureLotTypeCustomField(lotRow?.custom_fields, lotType),
+    [LOT_CUSTOM_FIELD_KEYS.manual_milestones]: manualMilestones,
+  }
   return {
     ...lotRow,
     lot_type: lotType,
     custom_fields: customFields,
+    manual_milestones: manualMilestones,
     tasks: coerceArray(lotTasks),
     inspections: coerceArray(lotRow?.inspections),
     punch_list: lotRow?.punch_list ?? null,
@@ -1508,6 +1533,13 @@ const mapSubcontractorToSupabase = (row, orgId) => ({
 
 const mapLotToSupabase = (row, orgId) => {
   const lotType = normalizeLotType(row?.lot_type ?? row?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.lot_type])
+  const manualMilestones = normalizeManualMilestones(
+    row?.manual_milestones ?? row?.custom_fields?.[LOT_CUSTOM_FIELD_KEYS.manual_milestones],
+  )
+  const customFields = {
+    ...ensureLotTypeCustomField(row?.custom_fields, lotType),
+    [LOT_CUSTOM_FIELD_KEYS.manual_milestones]: manualMilestones,
+  }
   return {
     id: row?.id,
     org_id: orgId,
@@ -1529,7 +1561,7 @@ const mapLotToSupabase = (row, orgId) => {
     actual_completion_date: toIsoDateOrNull(row?.actual_completion_date),
     sold_status: row?.sold_status ?? 'available',
     sold_date: toIsoDateOrNull(row?.sold_date),
-    custom_fields: ensureLotTypeCustomField(row?.custom_fields, lotType),
+    custom_fields: customFields,
     inspections: coerceArray(row?.inspections),
     punch_list: row?.punch_list ?? null,
     daily_logs: coerceArray(row?.daily_logs),
@@ -4339,30 +4371,54 @@ export default function BuildFlow() {
     const ordered = (MILESTONES ?? []).slice().sort((a, b) => (Number(a?.pct ?? 0) || 0) - (Number(b?.pct ?? 0) || 0))
     const targetIndex = ordered.findIndex((m) => m.id === milestoneId)
 
-    updateLot(lotId, (l) => ({
-      ...l,
-      manual_milestones: (() => {
-        const current = { ...(l.manual_milestones ?? {}) }
-        if (targetIndex < 0) {
-          current[milestoneId] = Boolean(nextValue)
-          return current
-        }
-        if (nextValue) {
-          for (let i = 0; i <= targetIndex; i += 1) {
-            const m = ordered[i]
-            if (m?.manual === false) continue
-            current[m.id] = true
+    let op = null
+    setApp((prev) => {
+      const nextLots = (prev.lots ?? []).map((l) => {
+        if (l.id !== lotId) return l
+        const current = readLotManualMilestones(l)
+        const nextManualMilestones = (() => {
+          const next = { ...current }
+          if (targetIndex < 0) {
+            next[milestoneId] = Boolean(nextValue)
+            return next
           }
-        } else {
+          if (nextValue) {
+            for (let i = 0; i <= targetIndex; i += 1) {
+              const m = ordered[i]
+              if (m?.manual === false) continue
+              next[m.id] = true
+            }
+            return next
+          }
           for (let i = targetIndex; i < ordered.length; i += 1) {
             const m = ordered[i]
             if (m?.manual === false) continue
-            current[m.id] = false
+            next[m.id] = false
           }
+          return next
+        })()
+
+        const nextLot = {
+          ...l,
+          manual_milestones: nextManualMilestones,
+          custom_fields: {
+            ...(l.custom_fields ?? {}),
+            [LOT_CUSTOM_FIELD_KEYS.manual_milestones]: nextManualMilestones,
+          },
         }
-        return current
-      })(),
-    }))
+        op = buildV2TasksBatchOp({ lotId, prevLot: l, nextLot, includeLotRow: true, mode: 'task' })
+        return nextLot
+      })
+      return { ...prev, lots: nextLots }
+    })
+
+    if (op) {
+      Promise.resolve()
+        .then(() => outboxEnqueue(op))
+        .catch(() => {
+          // ignore
+        })
+    }
 
     if (nextValue) {
       const m = (MILESTONES ?? []).find((x) => x.id === milestoneId)
