@@ -14162,11 +14162,21 @@ export default function BuildFlow() {
             onOpenInspection={(inspectionId) => {
               const inspection = (lot.inspections ?? []).find((i) => i.id === inspectionId) ?? null
               if (!inspection) return
+              // Close the inspections list first so the detail modal opens cleanly.
+              setInspectionsLotId(null)
               if (inspection.type === 'NOTE') {
-                setInspectionNoteModal({ lot_id: lot.id, inspection_id: inspectionId })
+                if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+                  window.requestAnimationFrame(() => setInspectionNoteModal({ lot_id: lot.id, inspection_id: inspectionId }))
+                } else {
+                  setTimeout(() => setInspectionNoteModal({ lot_id: lot.id, inspection_id: inspectionId }), 0)
+                }
                 return
               }
-              setInspectionResultModal({ lot_id: lot.id, inspection_id: inspectionId })
+              if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+                window.requestAnimationFrame(() => setInspectionResultModal({ lot_id: lot.id, inspection_id: inspectionId }))
+              } else {
+                setTimeout(() => setInspectionResultModal({ lot_id: lot.id, inspection_id: inspectionId }), 0)
+              }
             }}
             onScheduleInspectionForTask={(taskId) => setScheduleInspectionModal({ lot_id: lot.id, task_id: taskId })}
           />
