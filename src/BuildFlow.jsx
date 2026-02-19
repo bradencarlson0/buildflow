@@ -3713,6 +3713,83 @@ export default function BuildFlow() {
     ],
   )
 
+  useEffect(() => {
+    if (!syncV2Enabled) return
+    if (supabaseStatus.phase !== 'ready') return
+
+    const warningParts = String(supabaseStatus.warning ?? '')
+      .split('|')
+      .map((part) => String(part).trim())
+      .filter(Boolean)
+    if (warningParts.length === 0) return
+
+    const isPreserveWarning = (text) => {
+      const lower = String(text ?? '').toLowerCase()
+      return (
+        lower.includes('preserving local edits on this device until sync flushes') ||
+        lower.includes('pending local sync ops:') ||
+        lower.includes('unsynced local edits detected')
+      )
+    }
+
+    const nonPreserveWarnings = warningParts.filter((part) => !isPreserveWarning(part))
+
+    const pendingOps = Number(syncV2Status?.pending_ops || 0)
+    const queuedHash = String(app?.sync?.v2_reference_last_queued_hash ?? '')
+    const ackedHash = String(app?.sync?.v2_reference_last_acked_hash ?? '')
+    const orgId = supabaseStatus?.orgId ?? app?.sync?.supabase_org_id ?? app?.org?.id ?? null
+    const localReferenceHash = orgId ? stableStringify(buildReferenceSnapshotPayload(latestAppRef.current, orgId)) : ''
+    const hasUnsyncedReferenceChanges = Boolean(localReferenceHash) && localReferenceHash !== ackedHash
+    const hasQueuedReferenceDelta = Boolean(queuedHash) && queuedHash !== ackedHash
+    const shouldShowPreserveWarning =
+      pendingOps > 0 ||
+      hasQueuedReferenceDelta ||
+      hasUnsyncedReferenceChanges ||
+      syncV2Status.phase === 'syncing'
+
+    const preserveWarningText =
+      pendingOps > 0
+        ? `Pending local sync ops: ${pendingOps} (preserving local edits on this device until sync flushes)`
+        : 'Unsynced local edits detected (preserving local edits on this device until sync flushes)'
+
+    const nextParts = shouldShowPreserveWarning
+      ? [...nonPreserveWarnings, preserveWarningText]
+      : nonPreserveWarnings
+    const nextWarning = nextParts.join(' | ')
+    const currentMessage = String(supabaseStatus.message ?? '')
+    const hasRemoteCoreData =
+      Number(supabaseStatus?.counts?.communities_total ?? 0) > 0 ||
+      Number(supabaseStatus?.counts?.lots_total ?? 0) > 0 ||
+      Number(supabaseStatus?.counts?.subcontractors_total ?? 0) > 0
+    const pendingMessage = 'Supabase connected. Pending local edits detected; preserving local state until sync completes.'
+    const readyMessage = hasRemoteCoreData
+      ? 'Supabase connected. Remote data is loaded.'
+      : 'Supabase connected. No remote core rows yet; local seed data remains active.'
+    const nextMessage = shouldShowPreserveWarning
+      ? pendingMessage
+      : currentMessage === pendingMessage
+      ? readyMessage
+      : currentMessage
+
+    if (nextWarning === String(supabaseStatus.warning ?? '') && nextMessage === currentMessage) return
+    setSupabaseStatus((prev) => ({ ...prev, warning: nextWarning, message: nextMessage }))
+  }, [
+    supabaseStatus?.counts?.communities_total,
+    supabaseStatus?.counts?.lots_total,
+    supabaseStatus?.counts?.subcontractors_total,
+    supabaseStatus.message,
+    app?.org?.id,
+    app?.sync?.supabase_org_id,
+    app?.sync?.v2_reference_last_acked_hash,
+    app?.sync?.v2_reference_last_queued_hash,
+    supabaseStatus?.orgId,
+    supabaseStatus.phase,
+    supabaseStatus.warning,
+    syncV2Enabled,
+    syncV2Status?.pending_ops,
+    syncV2Status?.phase,
+  ])
+
   const requestImmediateSync = useCallback(({ includeLegacy = true } = {}) => {
     if (!supabaseUser?.id) return
     if (!isOnline) return
