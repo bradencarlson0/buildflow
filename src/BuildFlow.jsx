@@ -11907,14 +11907,15 @@ export default function BuildFlow() {
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-2 w-full md:w-auto md:min-w-[22rem]">
-                  <PrimaryButton
+                  <button
+                    type="button"
                     onClick={() => setReportModal(true)}
-                    className="bg-white text-blue-700 hover:bg-blue-50 border border-white"
+                    className="h-12 px-4 rounded-xl border border-white bg-white text-blue-800 font-semibold hover:bg-blue-50 disabled:bg-white/70 disabled:text-blue-800/70"
                     disabled={!isOnline}
                     title={!isOnline ? 'Export requires connection' : ''}
                   >
                     Generate Report
-                  </PrimaryButton>
+                  </button>
                   <SecondaryButton
                     onClick={() => setScheduledReportModal(true)}
                     className="border-white/40 text-white bg-white/10 hover:bg-white/20"
