@@ -264,6 +264,7 @@ const DURATION_OPTIONS = Array.from({ length: 10 }, (_, i) => i + 1)
 const FILE_ACCEPT = '.pdf,.csv,.xls,.xlsx,.doc,.docx,.ppt,.pptx,.txt,.rtf,.jpg,.jpeg,.png,.heic,.heif'
 const SUPABASE_ORG_ID_FALLBACK = String(import.meta.env.VITE_SUPABASE_ORG_ID ?? '').trim()
 const BASELINE_OVERRIDE_TOKEN = String(import.meta.env.VITE_BASELINE_OVERRIDE_TOKEN ?? '').trim()
+const EXECUTIVE_REPORTS_DEMO_MODE = String(import.meta.env.VITE_EXECUTIVE_REPORTS_DEMO ?? '1').trim() !== '0'
 const BASELINE_OVERRIDE_UNTIL_KEY = 'buildflow:baseline_override_until'
 const BASELINE_OVERRIDE_WINDOW_MS = 15 * 60 * 1000
 const BASELINE_RTO_TARGET_MINUTES = 5
@@ -708,6 +709,89 @@ const formatCount = (value) => {
   return Math.round(n).toLocaleString('en-US')
 }
 
+const formatPct = (value, total) => {
+  const part = Number(value)
+  const whole = Number(total)
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return '0%'
+  return `${Math.round((100 * part) / whole)}%`
+}
+
+const formatMoneyCompact = (value) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '$0'
+  return n.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  })
+}
+
+const buildExecutiveDemoAnalytics = (todayIso = '') => {
+  const weekValues = [4, 5, 6, 5, 7, 8, 8, 9, 10, 10, 11, 12]
+  const todayDate = parseISODate(todayIso) ?? new Date()
+  const thisWeekStart = new Date(todayDate)
+  thisWeekStart.setDate(todayDate.getDate() - ((todayDate.getDay() + 6) % 7))
+  const completionTrend = weekValues.map((value, idx) => {
+    const week = new Date(thisWeekStart)
+    week.setDate(thisWeekStart.getDate() - (weekValues.length - 1 - idx) * 7)
+    const key = formatISODate(week)
+    return { key, label: formatShortDate(key), value }
+  })
+
+  return {
+    isDemo: true,
+    lotCount: 136,
+    activeCount: 54,
+    onTrackActive: 41,
+    delayedActive: 13,
+    completeCount: 31,
+    avgProgress: 68,
+    avgCycleDays: 97,
+    over110: 18,
+    over180: 4,
+    sold: 31,
+    pending: 22,
+    available: 83,
+    closingPipeline30: 14,
+    projectedQuarterClosings: 38,
+    projectedRevenue30: 7250000,
+    atRiskRevenue: 6045000,
+    buildStatusMix: [
+      { id: 'not_started', label: 'Not Started', value: 51, className: 'bg-slate-300' },
+      { id: 'in_progress', label: 'In Progress', value: 54, className: 'bg-blue-500' },
+      { id: 'complete', label: 'Complete', value: 31, className: 'bg-emerald-500' },
+    ],
+    salesStatusMix: [
+      { id: 'available', label: 'Available', value: 83, className: 'bg-emerald-500' },
+      { id: 'pending', label: 'Pending', value: 22, className: 'bg-amber-500' },
+      { id: 'sold', label: 'Sold', value: 31, className: 'bg-slate-600' },
+    ],
+    lotTypeMix: [
+      { id: 'vacant', label: 'Vacant', value: 62 },
+      { id: 'spec', label: 'Spec', value: 44 },
+      { id: 'model', label: 'Model', value: 7 },
+      { id: 'sold', label: 'Sold', value: 23 },
+    ],
+    communityProgress: [
+      { id: 'ovation', label: 'Ovation', value: 74, activeLots: 14, delayedLots: 2 },
+      { id: 'grove', label: 'The Grove', value: 67, activeLots: 18, delayedLots: 5 },
+      { id: 'heights', label: 'The Heights', value: 63, activeLots: 9, delayedLots: 3 },
+      { id: 'madison', label: 'Madison City', value: 58, activeLots: 7, delayedLots: 2 },
+      { id: 'village', label: 'Village at Clift', value: 52, activeLots: 6, delayedLots: 1 },
+    ],
+    delayedByTrade: [
+      { id: 'electrical', label: 'Electrical', value: 32, events: 7 },
+      { id: 'plumbing', label: 'Plumbing', value: 29, events: 6 },
+      { id: 'framing', label: 'Framing', value: 24, events: 5 },
+      { id: 'drywall', label: 'Drywall', value: 20, events: 5 },
+      { id: 'cabinets', label: 'Cabinets', value: 16, events: 4 },
+      { id: 'paint', label: 'Paint', value: 13, events: 3 },
+    ],
+    completionTrend,
+  }
+}
+
 const ExecutiveMetricCard = ({ label, value, tone = 'blue', subtext = '' }) => {
   const toneClasses = {
     blue: 'from-blue-500 to-blue-700',
@@ -786,6 +870,7 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
       : padX + (idx / (list.length - 1)) * (width - padX * 2)
   const yFor = (value) => height - padY - (Number(value ?? 0) / maxValue) * (height - padY * 2)
   const coords = list.map((point, idx) => `${xFor(idx)},${yFor(point.value)}`).join(' ')
+  const areaCoords = `${padX},${height - padY} ${coords} ${width - padX},${height - padY}`
   const latest = list[list.length - 1]
   const previous = list.length > 1 ? list[list.length - 2] : null
   const latestDelta = previous ? Number(latest?.value ?? 0) - Number(previous?.value ?? 0) : 0
@@ -794,7 +879,14 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
     <div className="space-y-2">
       <div className="h-36 rounded-xl border border-gray-200 bg-gradient-to-b from-blue-50 to-white p-2">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
+          <defs>
+            <linearGradient id="executiveTrendArea" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="#60A5FA" stopOpacity="0.35" />
+              <stop offset="100%" stopColor="#60A5FA" stopOpacity="0.04" />
+            </linearGradient>
+          </defs>
           <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} stroke="#CBD5E1" strokeWidth="1" />
+          <polygon points={areaCoords} fill="url(#executiveTrendArea)" />
           <polyline points={coords} fill="none" stroke="#2563EB" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
           {list.map((point, idx) => (
             <circle key={`${point.label}-${idx}`} cx={xFor(idx)} cy={yFor(point.value)} r="3.2" fill="#1D4ED8" />
@@ -803,7 +895,11 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
       </div>
       <div className="flex items-center justify-between text-xs text-gray-600">
         <span>{list[0]?.label ?? ''}</span>
-        <span className="font-semibold text-gray-700">
+        <span
+          className={`font-semibold px-2 py-1 rounded-full border ${
+            latestDelta >= 0 ? 'text-emerald-700 border-emerald-200 bg-emerald-50' : 'text-rose-700 border-rose-200 bg-rose-50'
+          }`}
+        >
           Latest: {formatCount(latest?.value ?? 0)}
           {previous ? ` (${latestDelta >= 0 ? '+' : ''}${formatCount(latestDelta)})` : ''}
         </span>
@@ -8362,6 +8458,10 @@ export default function BuildFlow() {
   }, [filteredSalesLots])
 
   const executiveAnalytics = useMemo(() => {
+    if (EXECUTIVE_REPORTS_DEMO_MODE) {
+      return buildExecutiveDemoAnalytics(todayIso)
+    }
+
     const lots = Array.isArray(visibleLots) ? visibleLots : []
     const active = lots.filter((lot) => lot?.status === 'in_progress')
     const complete = lots.filter((lot) => lot?.status === 'complete')
@@ -8484,6 +8584,7 @@ export default function BuildFlow() {
     }).length
 
     return {
+      isDemo: false,
       lotCount: lots.length,
       activeCount: active.length,
       onTrackActive,
@@ -8497,6 +8598,9 @@ export default function BuildFlow() {
       pending,
       available,
       closingPipeline30,
+      projectedQuarterClosings: closingPipeline30 + Math.round(pending * 0.65),
+      projectedRevenue30: closingPipeline30 * 460000,
+      atRiskRevenue: delayedActive.length * 460000,
       buildStatusMix,
       salesStatusMix,
       lotTypeMix,
@@ -11900,10 +12004,19 @@ export default function BuildFlow() {
             <Card className="overflow-hidden border-0 bg-gradient-to-br from-slate-900 via-blue-900 to-cyan-700 text-white">
               <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.16em] text-white/70">Executive Dashboard</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs uppercase tracking-[0.16em] text-white/70">Executive Dashboard</p>
+                    {executiveAnalytics.isDemo ? (
+                      <span className="inline-flex items-center rounded-full border border-cyan-200/50 bg-cyan-300/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-100">
+                        Demo Data
+                      </span>
+                    ) : null}
+                  </div>
                   <h3 className="mt-1 text-2xl font-bold">Reporting & Analytics</h3>
                   <p className="text-sm text-white/85 mt-1">
-                    Live operational snapshot plus exportable progress, delay, forecast, and inventory/sales reports.
+                    {executiveAnalytics.isDemo
+                      ? 'Illustrative executive snapshot for demo storytelling, including pipeline, delivery risk, and revenue outlook.'
+                      : 'Live operational snapshot plus exportable progress, delay, forecast, and inventory/sales reports.'}
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-2 w-full md:w-auto md:min-w-[22rem]">
@@ -11955,13 +12068,30 @@ export default function BuildFlow() {
                   subtext={`${formatCount(executiveAnalytics.sold)} sold total`}
                 />
               </div>
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                <div className="rounded-xl border border-white/20 bg-black/15 p-3">
+                  <p className="text-white/70 uppercase tracking-wide">Projected Qtr Closings</p>
+                  <p className="mt-1 text-xl font-semibold text-white">{formatCount(executiveAnalytics.projectedQuarterClosings)}</p>
+                  <p className="text-white/75 mt-1">Expected at current pace + pending pipeline.</p>
+                </div>
+                <div className="rounded-xl border border-white/20 bg-black/15 p-3">
+                  <p className="text-white/70 uppercase tracking-wide">30d Revenue Pipeline</p>
+                  <p className="mt-1 text-xl font-semibold text-emerald-200">{formatMoneyCompact(executiveAnalytics.projectedRevenue30)}</p>
+                  <p className="text-white/75 mt-1">Estimated from scheduled closings this month.</p>
+                </div>
+                <div className="rounded-xl border border-white/20 bg-black/15 p-3">
+                  <p className="text-white/70 uppercase tracking-wide">Delay Exposure</p>
+                  <p className="mt-1 text-xl font-semibold text-amber-200">{formatMoneyCompact(executiveAnalytics.atRiskRevenue)}</p>
+                  <p className="text-white/75 mt-1">Value impacted if delayed active lots slip.</p>
+                </div>
+              </div>
             </Card>
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <Card>
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Build Status Mix</h3>
-                  <span className="text-xs text-gray-500">{formatCount(executiveAnalytics.lotCount)} lots</span>
+                  <span className="text-xs text-gray-500">{formatCount(executiveAnalytics.lotCount)} total lots</span>
                 </div>
                 <div className="mt-3">
                   <ExecutiveStackedBar segments={executiveAnalytics.buildStatusMix} />
@@ -11969,7 +12099,9 @@ export default function BuildFlow() {
                     {executiveAnalytics.buildStatusMix.map((item) => (
                       <div key={item.id} className="rounded-lg border border-gray-200 p-2">
                         <p className="text-gray-500">{item.label}</p>
-                        <p className="font-semibold text-gray-800">{formatCount(item.value)}</p>
+                        <p className="font-semibold text-gray-800">
+                          {formatCount(item.value)} <span className="text-gray-500">({formatPct(item.value, executiveAnalytics.lotCount)})</span>
+                        </p>
                       </div>
                     ))}
                   </div>
@@ -11987,7 +12119,9 @@ export default function BuildFlow() {
                     {executiveAnalytics.salesStatusMix.map((item) => (
                       <div key={item.id} className="rounded-lg border border-gray-200 p-2">
                         <p className="text-gray-500">{item.label}</p>
-                        <p className="font-semibold text-gray-800">{formatCount(item.value)}</p>
+                        <p className="font-semibold text-gray-800">
+                          {formatCount(item.value)} <span className="text-gray-500">({formatPct(item.value, executiveAnalytics.lotCount)})</span>
+                        </p>
                       </div>
                     ))}
                   </div>
