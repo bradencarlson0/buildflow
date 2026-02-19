@@ -7088,14 +7088,20 @@ export default function BuildFlow() {
   }
 
   const isoFromDateTime = (dt) => (typeof dt === 'string' && dt.length >= 10 ? dt.slice(0, 10) : '')
-  const isIsoInRange = (iso, fromIso, toIso) => Boolean(iso && fromIso && toIso && iso >= fromIso && iso <= toIso)
-
-  const buildReportData = ({ reportType, fromIso, toIso, communityIds, includePhotos }) => {
+  const isIsoInRange = (iso, fromIso, toIso) => {
+    if (!iso) return false
+    if (!fromIso && !toIso) return true
+    if (fromIso && !toIso) return iso >= fromIso
+    if (!fromIso && toIso) return iso <= toIso
+    return iso >= fromIso && iso <= toIso
+  }
+  const buildReportData = ({ reportType, fromIso, toIso, communityIds, includePhotos, lotScope }) => {
     const communitySet = new Set(communityIds ?? [])
     const lots = (app.lots ?? []).filter((l) => (communitySet.size ? communitySet.has(l.community_id) : true))
+    const reportLots = lotScope === 'active_only' ? lots.filter((l) => l.status === 'in_progress') : lots
 
     const delayEvents = []
-    for (const lot of lots) {
+    for (const lot of reportLots) {
       const community = communitiesById.get(lot.community_id) ?? null
       for (const task of lot.tasks ?? []) {
         const at = isoFromDateTime(task.delay_logged_at)
@@ -7127,8 +7133,8 @@ export default function BuildFlow() {
           'Target Completion',
           'Predicted Completion',
           'Days Ahead/Behind',
-          'Delays (range)',
-          includePhotos ? 'Photos (range)' : null,
+          `Delays (${fromIso || toIso ? 'selected range' : 'all time'})`,
+          includePhotos ? `Photos (${fromIso || toIso ? 'selected range' : 'all time'})` : null,
         ].filter(Boolean),
       ]
 
@@ -7140,7 +7146,7 @@ export default function BuildFlow() {
 
       const photoCountsByLot = new Map()
       if (includePhotos) {
-        for (const lot of lots) {
+        for (const lot of reportLots) {
           const community = communitiesById.get(lot.community_id) ?? null
           const key = `${community?.name ?? ''}::${lotCode(lot)}`
           const count = (lot.photos ?? []).filter((p) => {
@@ -7151,7 +7157,7 @@ export default function BuildFlow() {
         }
       }
 
-      const active = lots.filter((l) => l.status === 'in_progress')
+      const active = reportLots.filter((l) => l.status === 'in_progress')
       for (const lot of active) {
         const community = communitiesById.get(lot.community_id) ?? null
         const pct = calculateLotProgress(lot)
@@ -7195,12 +7201,12 @@ export default function BuildFlow() {
         'Avg % Complete\n(active)',
         'Avg Build Days\n(complete)',
         'On-Time %\n(complete)',
-        'Total Delays\n(all time)',
+        `Total Delays\n(${fromIso || toIso ? 'selected range' : 'all time'})`,
       ]
       const rows = [header]
 
       const byCommunity = new Map()
-      for (const lot of lots) {
+      for (const lot of reportLots) {
         const community = communitiesById.get(lot.community_id) ?? null
         const key = community?.id ?? lot.community_id
         if (!byCommunity.has(key)) byCommunity.set(key, { community, lots: [] })
@@ -7301,7 +7307,7 @@ export default function BuildFlow() {
     if (reportType === 'schedule_forecast') {
       const rows = [
         ['Community', 'Lot', 'Milestone', '% Complete', 'Target Completion', 'Predicted Completion', 'Delayed?'],
-        ...lots
+        ...reportLots
           .filter((l) => l.status === 'in_progress')
           .map((l) => {
             const community = communitiesById.get(l.community_id) ?? null
@@ -7348,7 +7354,7 @@ export default function BuildFlow() {
         ],
       ]
 
-      const sortedLots = lots
+      const sortedLots = reportLots
         .slice()
         .sort(
           (a, b) =>
@@ -7406,14 +7412,17 @@ export default function BuildFlow() {
     return { title: 'Report', sheets: [{ name: 'Report', rows: [['Unsupported report type']] }] }
   }
 
-  const generateReportExport = async ({ reportType, fromIso, toIso, communityIds, format, includePhotos }) => {
+  const generateReportExport = async ({ reportType, fromIso, toIso, communityIds, format, includePhotos, lotScope }) => {
     if (!isOnline) {
       alert('Exporting reports requires an internet connection.')
       return
     }
-    const { title, sheets } = buildReportData({ reportType, fromIso, toIso, communityIds, includePhotos })
+    const { title, sheets } = buildReportData({ reportType, fromIso, toIso, communityIds, includePhotos, lotScope })
     const reportNo = allocateReportNumber()
-    const base = `${title}-${fromIso}-${toIso}-R${String(reportNo).padStart(3, '0')}`.replaceAll(/[^\w.-]+/g, '-')
+    const dateLabel =
+      fromIso && toIso ? `${fromIso}-${toIso}` : fromIso ? `${fromIso}-forward` : toIso ? `through-${toIso}` : 'all-time'
+    const scopeLabel = lotScope === 'active_only' ? 'active-lots' : 'all-lots'
+    const base = `${title}-${scopeLabel}-${dateLabel}-R${String(reportNo).padStart(3, '0')}`.replaceAll(/[^\w.-]+/g, '-')
 
     try {
       if (format === 'csv') {
@@ -7514,7 +7523,11 @@ export default function BuildFlow() {
 
           doc.setFont('helvetica', 'normal')
           doc.setFontSize(10)
-          doc.text(`Date range: ${formatShortDate(fromIso)} to ${formatShortDate(toIso)}`, PAGE.margin, PAGE.margin + 18)
+          const dateRangeText =
+            fromIso || toIso
+              ? `${formatShortDate(fromIso || '') || 'Beginning'} to ${formatShortDate(toIso || '') || 'Today'}`
+              : 'All time'
+          doc.text(`Date range: ${dateRangeText}`, PAGE.margin, PAGE.margin + 18)
           doc.text(`Generated: ${new Date().toLocaleString()}`, PAGE.margin, PAGE.margin + 32)
 
           doc.setFont('helvetica', 'bold')
@@ -7656,7 +7669,7 @@ export default function BuildFlow() {
       pushNotification({
         type: 'report_ready',
         title: `Report Ready - ${title}`,
-        body: `Generated ${format.toUpperCase()} (${fromIso} → ${toIso})`,
+        body: `Generated ${format.toUpperCase()} (${fromIso || toIso ? `${fromIso || 'start'} → ${toIso || 'today'}` : 'all time'})`,
         entity_type: 'report',
         entity_id: uuid(),
         lot_id: null,
@@ -25603,9 +25616,10 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
   }, [todayIso])
 
   const [reportType, setReportType] = useState('progress')
-  const [preset, setPreset] = useState('this_week')
-  const [fromIso, setFromIso] = useState(weekStartIso)
-  const [toIso, setToIso] = useState(() => formatISODate(addCalendarDays(weekStartIso, 6)))
+  const [preset, setPreset] = useState('all_time')
+  const [fromIso, setFromIso] = useState('')
+  const [toIso, setToIso] = useState('')
+  const [lotScope, setLotScope] = useState('active_only')
   const [selectedCommunityIds, setSelectedCommunityIds] = useState(() => new Set(['all']))
   const [format, setFormat] = useState('excel')
   const [includePhotos, setIncludePhotos] = useState(true)
@@ -25614,6 +25628,11 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
 
   const applyPreset = (nextPreset) => {
     setPreset(nextPreset)
+    if (nextPreset === 'all_time') {
+      setFromIso('')
+      setToIso('')
+      return
+    }
     if (nextPreset === 'custom') return
     const base = parseISODate(todayIso)
     if (!base) return
@@ -25659,6 +25678,7 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
                 reportType,
                 fromIso,
                 toIso,
+                lotScope,
                 communityIds: selectedIds,
                 format,
                 includePhotos,
@@ -25667,7 +25687,7 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
               })
             }
             className="flex-1"
-            disabled={!isOnline || !fromIso || !toIso}
+            disabled={!isOnline || (preset !== 'all_time' && (!fromIso || !toIso))}
             title={!isOnline ? 'Export requires connection' : ''}
           >
             Generate
@@ -25707,6 +25727,7 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
         <Card className="bg-gray-50">
           <p className="text-sm font-semibold mb-2">Date Range</p>
           <select value={preset} onChange={(e) => applyPreset(e.target.value)} className="w-full px-3 py-3 border rounded-xl text-sm">
+            <option value="all_time">All Time</option>
             <option value="this_week">This Week</option>
             <option value="last_week">Last Week</option>
             <option value="this_month">This Month</option>
@@ -25714,9 +25735,40 @@ function GenerateReportModal({ communities, isOnline, onClose, onGenerate }) {
             <option value="custom">Custom</option>
           </select>
           <div className="grid grid-cols-2 gap-2 mt-2">
-            <input type="date" value={fromIso} onChange={(e) => setFromIso(e.target.value)} className="px-3 py-3 border rounded-xl text-sm" />
-            <input type="date" value={toIso} onChange={(e) => setToIso(e.target.value)} className="px-3 py-3 border rounded-xl text-sm" />
+            <input
+              type="date"
+              value={fromIso}
+              onChange={(e) => setFromIso(e.target.value)}
+              disabled={preset === 'all_time'}
+              className="px-3 py-3 border rounded-xl text-sm disabled:bg-gray-100 disabled:text-gray-500"
+            />
+            <input
+              type="date"
+              value={toIso}
+              onChange={(e) => setToIso(e.target.value)}
+              disabled={preset === 'all_time'}
+              className="px-3 py-3 border rounded-xl text-sm disabled:bg-gray-100 disabled:text-gray-500"
+            />
           </div>
+        </Card>
+
+        <Card className="bg-gray-50">
+          <p className="text-sm font-semibold mb-2">Lot Scope</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              ['active_only', 'Active Lots Only'],
+              ['all_lots', 'All Lots'],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setLotScope(id)}
+                className={`h-11 rounded-xl border text-sm font-semibold ${lotScope === id ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-gray-200 text-gray-900'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">Use Active Lots Only to focus on live field progress.</p>
         </Card>
 
         <Card className="bg-gray-50">
