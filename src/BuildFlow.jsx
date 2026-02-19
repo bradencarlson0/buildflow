@@ -1950,6 +1950,8 @@ export default function BuildFlow() {
   })
   const [showStartLot, setShowStartLot] = useState(false)
   const [startLotPrefill, setStartLotPrefill] = useState(null)
+  const [activeLotsExpanded, setActiveLotsExpanded] = useState(false)
+  const [activeLotQuickJumpId, setActiveLotQuickJumpId] = useState('')
   const [taskModal, setTaskModal] = useState(null)
   const [onSiteLotModal, setOnSiteLotModal] = useState(null)
   const [dashboardStatusModal, setDashboardStatusModal] = useState(null)
@@ -4295,11 +4297,37 @@ export default function BuildFlow() {
   }
 
   const activeLots = useMemo(() => visibleLots.filter((l) => l.status === 'in_progress'), [visibleLots])
+  const ACTIVE_LOTS_PREVIEW_COUNT = 3
+  const activeLotsSorted = useMemo(() => {
+    return activeLots.slice().sort((a, b) => {
+      const communityA = String(communitiesById.get(a.community_id)?.name ?? '')
+      const communityB = String(communitiesById.get(b.community_id)?.name ?? '')
+      const communityCompare = communityA.localeCompare(communityB)
+      if (communityCompare !== 0) return communityCompare
+      const lotA = Number(a.lot_number ?? 0) || 0
+      const lotB = Number(b.lot_number ?? 0) || 0
+      if (lotA !== lotB) return lotA - lotB
+      return String(a.id ?? '').localeCompare(String(b.id ?? ''))
+    })
+  }, [activeLots, communitiesById])
+  const activeLotsVisible = activeLotsExpanded
+    ? activeLotsSorted
+    : activeLotsSorted.slice(0, ACTIVE_LOTS_PREVIEW_COUNT)
+  const activeLotsHiddenCount = Math.max(0, activeLotsSorted.length - activeLotsVisible.length)
 
   const unreadNotifications = useMemo(
     () => (app.notifications ?? []).filter((n) => !n.read).length,
     [app.notifications],
   )
+
+  useEffect(() => {
+    if (activeLotsSorted.length <= ACTIVE_LOTS_PREVIEW_COUNT && activeLotsExpanded) {
+      setActiveLotsExpanded(false)
+    }
+    if (activeLotQuickJumpId && !activeLotsSorted.some((lot) => lot.id === activeLotQuickJumpId)) {
+      setActiveLotQuickJumpId('')
+    }
+  }, [ACTIVE_LOTS_PREVIEW_COUNT, activeLotQuickJumpId, activeLotsExpanded, activeLotsSorted])
 
   const enqueueSyncOp = ({ type, lot_id, entity_type, entity_id, summary }) => {
     if (syncV2Enabled) return null
@@ -9307,15 +9335,51 @@ export default function BuildFlow() {
             <Card>
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-semibold">Active Lots</h3>
-                <button onClick={resetDemo} className="text-xs text-blue-600">
-                  Reset demo
-                </button>
+                <div className="flex items-center gap-3">
+                  {activeLotsSorted.length > ACTIVE_LOTS_PREVIEW_COUNT ? (
+                    <button
+                      onClick={() => setActiveLotsExpanded((prev) => !prev)}
+                      className="text-xs font-semibold text-blue-700"
+                    >
+                      {activeLotsExpanded ? 'Collapse' : `Expand (${activeLotsSorted.length})`}
+                    </button>
+                  ) : null}
+                  <button onClick={resetDemo} className="text-xs text-blue-600">
+                    Reset demo
+                  </button>
+                </div>
               </div>
               {activeLots.length === 0 ? (
                 <p className="text-sm text-gray-500">No active lots yet.</p>
               ) : (
                 <div className="space-y-2">
-                  {activeLots.slice(0, 6).map((lot) => {
+                  <label className="block">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Jump to active lot</span>
+                    <select
+                      value={activeLotQuickJumpId}
+                      onChange={(e) => {
+                        const nextLotId = e.target.value
+                        setActiveLotQuickJumpId(nextLotId)
+                        if (!nextLotId) return
+                        openLot(nextLotId)
+                      }}
+                      className="mt-1 w-full h-10 rounded-xl border border-gray-200 bg-white px-3 text-sm"
+                    >
+                      <option value="">Select a lot...</option>
+                      {activeLotsSorted.map((lot) => {
+                        const community = communitiesById.get(lot.community_id)
+                        const delayed = lotHasDelay(lot)
+                        const pct = calculateLotProgress(lot)
+                        return (
+                          <option key={lot.id} value={lot.id}>
+                            {community?.name ?? 'Community'} {lotCode(lot)}{delayed ? ' • Delayed' : ''} • {pct}%
+                          </option>
+                        )
+                      })}
+                    </select>
+                  </label>
+
+                  {activeLotsVisible.map((lot) => {
                     const community = communitiesById.get(lot.community_id)
                     const pct = calculateLotProgress(lot)
                     const milestone = getCurrentMilestone(lot)
@@ -9346,6 +9410,16 @@ export default function BuildFlow() {
                       </button>
                     )
                   })}
+
+                  {activeLotsHiddenCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setActiveLotsExpanded(true)}
+                      className="w-full rounded-xl border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-700"
+                    >
+                      Show {activeLotsHiddenCount} more active lot{activeLotsHiddenCount === 1 ? '' : 's'}
+                    </button>
+                  ) : null}
                 </div>
               )}
             </Card>
