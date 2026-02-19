@@ -7,6 +7,18 @@ const toErrorMessage = (error) => {
   return String(error)
 }
 
+const hardReload = () => {
+  try {
+    const nextUrl = new URL(window.location.href)
+    nextUrl.searchParams.set('_bf_manual_reload', String(Date.now()))
+    window.location.replace(nextUrl.toString())
+    return
+  } catch {
+    // fall through
+  }
+  window.location.reload()
+}
+
 export const StartupErrorPanel = ({ title, error }) => (
   <div className="min-h-screen bg-slate-100 px-4 py-6 text-slate-900 sm:px-6">
     <div className="mx-auto w-full max-w-2xl rounded-2xl border border-red-200 bg-white p-5 shadow-sm sm:p-6">
@@ -19,7 +31,7 @@ export const StartupErrorPanel = ({ title, error }) => (
       </pre>
       <button
         type="button"
-        onClick={() => window.location.reload()}
+        onClick={hardReload}
         className="mt-4 inline-flex h-10 items-center rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white"
       >
         Reload App
