@@ -23,6 +23,7 @@ import {
   Mail,
   MapPin,
   MessageSquare,
+  MousePointer2,
   Palette,
   PenLine,
   Phone,
@@ -819,7 +820,7 @@ const normalizeImageBlob = async (file) => {
 }
 
 const PHOTO_ANNOTATION_TOOLS = [
-  { id: 'select', label: 'Select', icon: GripVertical },
+  { id: 'select', label: 'Select', icon: MousePointer2 },
   { id: 'pen', label: 'Draw', icon: PenLine },
   { id: 'arrow', label: 'Arrow', icon: ArrowUpRight },
   { id: 'rect', label: 'Rectangle', icon: Square },
@@ -830,6 +831,11 @@ const PHOTO_ANNOTATION_TOOLS = [
 const PHOTO_ANNOTATION_COLORS = ['#EAB308', '#EF4444', '#10B981', '#2563EB', '#FFFFFF', '#111827']
 
 const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value))
+const canvasScaleFactor = (ctx) => {
+  const canvasWidth = Number(ctx?.canvas?.width || 0)
+  if (!canvasWidth) return 1
+  return clampNumber(canvasWidth / 390, 1, 5)
+}
 
 const annotationDistance = (a, b) => {
   if (!a || !b) return 0
@@ -854,7 +860,8 @@ const buildAnnotatedImageName = (name) => {
 const drawPhotoAnnotationLabel = (ctx, text, x, y, color, strokeWidth = 3) => {
   const label = String(text ?? '').trim()
   if (!label) return
-  const fontSize = Math.max(14, Math.round(strokeWidth * 4))
+  const scale = canvasScaleFactor(ctx)
+  const fontSize = Math.max(14 * scale, Math.round(strokeWidth * 4 * scale))
   ctx.save()
   ctx.font = `600 ${fontSize}px "Helvetica Neue", Helvetica, Arial, sans-serif`
   ctx.textBaseline = 'top'
@@ -873,8 +880,9 @@ const getPhotoAnnotationTextLayout = (ctx, annotation) => {
   if (!ctx || !annotation || annotation.type !== 'text') return null
   const text = String(annotation.text ?? '').trim()
   if (!text) return null
+  const scale = canvasScaleFactor(ctx)
   const width = Math.max(2, Number(annotation.size ?? 4))
-  const fontSize = Math.max(16, Math.round(width * 5))
+  const fontSize = Math.max(18 * scale, Math.round(width * 5 * scale))
   ctx.save()
   ctx.font = `700 ${fontSize}px "Helvetica Neue", Helvetica, Arial, sans-serif`
   ctx.textBaseline = 'top'
@@ -18294,9 +18302,13 @@ function InspectionNoteModal({ lot, community, tasks, inspection, isOnline, onCl
 
 function PhotoAnnotateModal({ file, onClose, onApply }) {
   const canvasRef = useRef(null)
+  const editorBodyRef = useRef(null)
+  const toolRailRef = useRef(null)
+  const colorPickerRef = useRef(null)
   const [imageState, setImageState] = useState(null)
   const [tool, setTool] = useState('select')
   const [color, setColor] = useState(PHOTO_ANNOTATION_COLORS[0])
+  const [showColorPicker, setShowColorPicker] = useState(false)
   const [lineWidth, setLineWidth] = useState(4)
   const [annotations, setAnnotations] = useState([])
   const [draftPath, setDraftPath] = useState(null)
@@ -18313,6 +18325,8 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   const activePointersRef = useRef(new Map())
   const pinchRef = useRef({ active: false, targetId: null, startDistance: 0, baseSize: 0 })
   const selectionDragRef = useRef({ active: false, pointerId: null, targetId: null, lastPoint: null, moved: false })
+  const toolRailDragRef = useRef({ active: false, pointerId: null, startY: 0, startOffset: 0, moved: false })
+  const [toolRailOffsetY, setToolRailOffsetY] = useState(0)
 
   const selectedAnnotation = useMemo(
     () => (selectedAnnotationId ? annotations.find((item) => item.id === selectedAnnotationId) ?? null : null),
@@ -18320,6 +18334,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   )
   const selectedTextAnnotation = selectedAnnotation?.type === 'text' ? selectedAnnotation : null
   const selectedAnnotationIsLabelable = Boolean(selectedAnnotation && selectedAnnotation.type !== 'text')
+  const hasSaveableOutput = annotations.length > 0 || Boolean(String(description ?? '').trim())
 
   const triggerHaptic = useCallback((ms = 10) => {
     try {
@@ -18382,6 +18397,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       activePointersRef.current.clear()
       pinchRef.current = { active: false, targetId: null, startDistance: 0, baseSize: 0 }
       selectionDragRef.current = { active: false, pointerId: null, targetId: null, lastPoint: null, moved: false }
+      toolRailDragRef.current = { active: false, pointerId: null, startY: 0, startOffset: 0, moved: false }
     },
     [],
   )
@@ -18443,32 +18459,101 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
     }
   }, [])
 
-  const cycleColor = useCallback(() => {
-    setColor((prev) => {
-      const idx = PHOTO_ANNOTATION_COLORS.indexOf(prev)
-      return PHOTO_ANNOTATION_COLORS[(idx + 1 + PHOTO_ANNOTATION_COLORS.length) % PHOTO_ANNOTATION_COLORS.length]
-    })
+  useEffect(() => {
+    if (!showColorPicker) return
+    const onPointerDown = (event) => {
+      const node = colorPickerRef.current
+      if (!node) return
+      if (!node.contains(event.target)) setShowColorPicker(false)
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [showColorPicker])
+
+  const clampToolRailOffset = useCallback((nextOffset) => {
+    const host = editorBodyRef.current
+    const rail = toolRailRef.current
+    const hostHeight = Number(host?.clientHeight || 0)
+    const railHeight = Number(rail?.offsetHeight || 0)
+    if (!hostHeight || !railHeight) return Number(nextOffset) || 0
+    const margin = 12
+    const min = -(hostHeight / 2 - railHeight / 2 - margin)
+    const max = hostHeight / 2 - railHeight / 2 - margin
+    return clampNumber(Number(nextOffset) || 0, min, max)
   }, [])
 
+  const beginToolRailDrag = useCallback(
+    (e) => {
+      e.preventDefault()
+      toolRailDragRef.current = {
+        active: true,
+        pointerId: e.pointerId,
+        startY: e.clientY,
+        startOffset: toolRailOffsetY,
+        moved: false,
+      }
+      e.currentTarget?.setPointerCapture?.(e.pointerId)
+      triggerHaptic(8)
+    },
+    [toolRailOffsetY, triggerHaptic],
+  )
+
+  const moveToolRailDrag = useCallback(
+    (e) => {
+      const drag = toolRailDragRef.current
+      if (!drag.active || drag.pointerId !== e.pointerId) return
+      e.preventDefault()
+      const nextOffset = clampToolRailOffset(drag.startOffset + (e.clientY - drag.startY))
+      setToolRailOffsetY(nextOffset)
+      if (!drag.moved && Math.abs(e.clientY - drag.startY) > 8) {
+        drag.moved = true
+        triggerHaptic(6)
+      }
+    },
+    [clampToolRailOffset, triggerHaptic],
+  )
+
+  const endToolRailDrag = useCallback(
+    (e) => {
+      const drag = toolRailDragRef.current
+      if (!drag.active || drag.pointerId !== e.pointerId) return
+      if (e.currentTarget?.releasePointerCapture) {
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId)
+        } catch (_err) {
+          void _err
+        }
+      }
+      if (drag.moved) triggerHaptic(6)
+      toolRailDragRef.current = { active: false, pointerId: null, startY: 0, startOffset: 0, moved: false }
+    },
+    [triggerHaptic],
+  )
+
   const beginDraw = (e) => {
+    setShowColorPicker(false)
     if (!imageState || saving) return
     const pt = getPointerPoint(e)
     if (!pt) return
+    const hitId = findAnnotationAtPoint(pt)
+    const hitItem = hitId ? annotations.find((item) => item.id === hitId) ?? null : null
     activePointersRef.current.set(e.pointerId, pt)
 
     if ((tool === 'text' || tool === 'select') && activePointersRef.current.size >= 2) {
-      const targetId = selectedTextAnnotation?.id ?? null
-      const target = targetId ? annotations.find((item) => item.id === targetId && item.type === 'text') : null
+      const dragTargetId = selectionDragRef.current.targetId
+      const preferredTargetId = hitItem?.type === 'text' ? hitItem.id : selectedTextAnnotation?.id ?? dragTargetId ?? null
+      const target = preferredTargetId ? annotations.find((item) => item.id === preferredTargetId && item.type === 'text') : null
       const points = Array.from(activePointersRef.current.values())
       if (target && points.length >= 2) {
         const startDistance = annotationDistance(points[0], points[1])
         if (startDistance > 0) {
           pinchRef.current = {
             active: true,
-            targetId,
+            targetId: target.id,
             startDistance,
             baseSize: Math.max(2, Number(target.size ?? lineWidth)),
           }
+          setSelectedAnnotationId(target.id)
           setPendingTextPoint(null)
           setTextDraft('')
           clearSelectionDrag()
@@ -18476,9 +18561,6 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
         }
       }
     }
-
-    const hitId = findAnnotationAtPoint(pt)
-    const hitItem = hitId ? annotations.find((item) => item.id === hitId) ?? null : null
 
     if (tool === 'select') {
       setPendingTextPoint(null)
@@ -18562,7 +18644,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
         if (nextDistance > 0 && pinchRef.current.startDistance > 0) {
           e.preventDefault()
           const scale = nextDistance / pinchRef.current.startDistance
-          const nextSize = clampNumber(pinchRef.current.baseSize * scale, 2, 20)
+          const nextSize = clampNumber(pinchRef.current.baseSize * scale, 2, 40)
           setAnnotations((prev) => prev.map((item) => (item.id === targetId ? { ...item, size: nextSize } : item)))
         }
       }
@@ -18676,6 +18758,12 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
   }
 
   const applyAnnotations = async () => {
+    const note = String(description ?? '').trim()
+    if (annotations.length === 0 && !note) return
+    if (annotations.length === 0) {
+      onApply?.(file, note)
+      return
+    }
     const canvas = canvasRef.current
     if (!canvas) return
     setSaving(true)
@@ -18685,7 +18773,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
       const nextName = buildAnnotatedImageName(file?.name)
       const annotatedFile =
         typeof File === 'function' ? new File([blob], nextName, { type: 'image/jpeg', lastModified: Date.now() }) : blob
-      onApply?.(annotatedFile, description)
+      onApply?.(annotatedFile, note)
     } catch (err) {
       console.error(err)
       alert('Unable to save annotations on this photo.')
@@ -18744,7 +18832,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
 
   const adjustSelectedTextSize = (delta) => {
     if (!selectedTextAnnotation) return
-    const nextSize = clampNumber(Math.round(Number(selectedTextAnnotation.size ?? lineWidth) + Number(delta || 0)), 2, 20)
+    const nextSize = clampNumber(Math.round(Number(selectedTextAnnotation.size ?? lineWidth) + Number(delta || 0)), 2, 40)
     setAnnotations((prev) => prev.map((item) => (item.id === selectedTextAnnotation.id ? { ...item, size: nextSize } : item)))
   }
 
@@ -18784,7 +18872,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
             <button
               type="button"
               onClick={applyAnnotations}
-              disabled={saving || annotations.length === 0}
+              disabled={saving || !hasSaveableOutput}
               className="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/60 text-sm font-semibold"
             >
               {saving ? 'Saving...' : 'Save'}
@@ -18793,15 +18881,15 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
         </div>
       </div>
 
-      <div className="relative flex-1 overflow-hidden">
+      <div ref={editorBodyRef} className="relative flex-1 overflow-hidden">
         <div className="absolute inset-0 flex items-center justify-center p-3">
           {loadingError ? (
             <p className="text-sm text-red-300">{loadingError}</p>
           ) : (
             <canvas
               ref={canvasRef}
-              className={`w-auto h-auto max-w-full max-h-full rounded-xl bg-black border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] ${tool === 'select' ? 'touch-auto' : 'touch-none'}`}
-              style={{ touchAction: tool === 'select' ? 'pan-x pan-y pinch-zoom' : 'none' }}
+              className="w-auto h-auto max-w-full max-h-full rounded-xl bg-black border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] touch-none"
+              style={{ touchAction: 'none' }}
               onPointerDown={beginDraw}
               onPointerMove={moveDraw}
               onPointerUp={endDraw}
@@ -18812,7 +18900,23 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           )}
         </div>
 
-        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-black/75 border border-white/10 rounded-2xl p-2 flex flex-col gap-2">
+        <div
+          ref={toolRailRef}
+          className="absolute right-3 z-20 bg-black/75 border border-white/10 rounded-2xl p-2 flex flex-col gap-2"
+          style={{ top: `calc(50% + ${toolRailOffsetY}px)`, transform: 'translateY(-50%)' }}
+        >
+          <button
+            type="button"
+            onPointerDown={beginToolRailDrag}
+            onPointerMove={moveToolRailDrag}
+            onPointerUp={endToolRailDrag}
+            onPointerCancel={endToolRailDrag}
+            className="h-9 w-11 rounded-xl flex items-center justify-center border border-white/20 bg-white/10 text-white/85 cursor-grab active:cursor-grabbing"
+            title="Drag tool rail"
+            aria-label="Drag tool rail"
+          >
+            <GripVertical className="w-5 h-5" />
+          </button>
           {PHOTO_ANNOTATION_TOOLS.map((entry) => {
             const Icon = entry.icon
             const active = tool === entry.id
@@ -18821,6 +18925,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
                 key={entry.id}
                 type="button"
                 onClick={() => {
+                  setShowColorPicker(false)
                   setTool(entry.id)
                   setDraftPath(null)
                   setDraftShape(null)
@@ -18847,18 +18952,45 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
 
         <div className="absolute left-3 right-[4.75rem] bottom-3 bg-black/75 border border-white/10 rounded-2xl px-3 py-2">
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={cycleColor}
-              className="h-10 px-3 rounded-xl border border-white/20 bg-white/10 hover:bg-white/15 flex items-center gap-2 shrink-0"
-              aria-label="Change annotation color"
-              title="Tap to cycle colors"
-            >
-              <span className="w-6 h-6 rounded-full border border-white/40 flex items-center justify-center" style={{ backgroundColor: color }}>
-                <Palette className="w-3.5 h-3.5 text-white mix-blend-difference" />
-              </span>
-              <span className="text-xs font-semibold text-white/85">Color</span>
-            </button>
+            <div ref={colorPickerRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowColorPicker((prev) => !prev)}
+                className="h-10 px-3 rounded-xl border border-white/20 bg-white/10 hover:bg-white/15 flex items-center gap-2"
+                aria-label="Open color options"
+                title="Choose color"
+              >
+                <span className="w-6 h-6 rounded-full border border-white/40 flex items-center justify-center" style={{ backgroundColor: color }}>
+                  <Palette className="w-3.5 h-3.5 text-white mix-blend-difference" />
+                </span>
+                <span className="text-xs font-semibold text-white/85">Color</span>
+                <ChevronDown className={`w-3.5 h-3.5 text-white/70 transition-transform ${showColorPicker ? 'rotate-180' : ''}`} />
+              </button>
+              {showColorPicker ? (
+                <div className="absolute bottom-full left-0 mb-2 rounded-xl border border-white/20 bg-black/90 p-2 shadow-xl">
+                  <div className="grid grid-cols-3 gap-2">
+                    {PHOTO_ANNOTATION_COLORS.map((swatch) => {
+                      const active = swatch === color
+                      return (
+                        <button
+                          key={swatch}
+                          type="button"
+                          onClick={() => {
+                            setColor(swatch)
+                            setShowColorPicker(false)
+                            triggerHaptic(5)
+                          }}
+                          className={`h-8 w-8 rounded-lg border ${active ? 'border-blue-400 ring-1 ring-blue-400' : 'border-white/20'}`}
+                          style={{ backgroundColor: swatch }}
+                          aria-label={`Use ${swatch} annotation color`}
+                          title={swatch}
+                        />
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
 
             <div className="flex-1 min-w-0 space-y-1.5">
               <div className="h-7 rounded-lg border border-white/15 bg-white/5 px-2 flex items-center">
@@ -18992,7 +19124,7 @@ function PhotoAnnotateModal({ file, onClose, onApply }) {
           <button
             type="button"
             onClick={applyAnnotations}
-            disabled={saving || annotations.length === 0}
+            disabled={saving || !hasSaveableOutput}
             className="h-11 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/60 text-sm font-semibold"
           >
             Save
