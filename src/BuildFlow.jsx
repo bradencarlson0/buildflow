@@ -28,6 +28,7 @@ import {
   Phone,
   Play,
   Plus,
+  SlidersHorizontal,
   Square,
   Sun,
   Trash2,
@@ -1937,6 +1938,7 @@ export default function BuildFlow() {
   const [showNotifications, setShowNotifications] = useState(false)
   const [showNotificationPrefs, setShowNotificationPrefs] = useState(false)
   const [showOfflineStatus, setShowOfflineStatus] = useState(false)
+  const [showDemoSettings, setShowDemoSettings] = useState(false)
   const [showCreateCommunity, setShowCreateCommunity] = useState(false)
   const [showArchivedCommunitiesInAdmin, setShowArchivedCommunitiesInAdmin] = useState(false)
   const [showEditCommunityAdmin, setShowEditCommunityAdmin] = useState(false)
@@ -2066,6 +2068,12 @@ export default function BuildFlow() {
   const persistenceBootstrappedRef = useRef(false)
   const latestAppRef = useRef(app)
   const localDbImportedOrgIdRef = useRef(null)
+
+  useEffect(() => {
+    if (tab === 'dashboard' && !selectedLotId && !selectedCommunityId) return
+    if (!showDemoSettings) return
+    setShowDemoSettings(false)
+  }, [selectedCommunityId, selectedLotId, showDemoSettings, tab])
 
   useEffect(() => {
     latestAppRef.current = app
@@ -8938,6 +8946,16 @@ export default function BuildFlow() {
         )}
 
         <div className="flex items-center gap-2">
+          {tab === 'dashboard' && !selectedLot && !selectedCommunity ? (
+            <button
+              onClick={() => setShowDemoSettings(true)}
+              className="px-2 py-1 rounded-lg text-xs bg-white/15 border border-white/20 inline-flex items-center gap-1"
+              title="Open demo settings"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              Demo Settings
+            </button>
+          ) : null}
           {showSyncPill && (
             <button
               onClick={() => setShowOfflineStatus(true)}
@@ -8967,7 +8985,9 @@ export default function BuildFlow() {
       <div className="p-4 space-y-4">
         {tab === 'dashboard' && !selectedLot && !selectedCommunity && (
           <div className="space-y-4">
-            <Card className="border-blue-200 bg-blue-50/40">
+            {showDemoSettings ? (
+              <Modal title="Demo Settings" onClose={() => setShowDemoSettings(false)}>
+                <Card className="border-blue-200 bg-blue-50/40">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Supabase</p>
@@ -9143,7 +9163,9 @@ export default function BuildFlow() {
                   Rollback captures a pre-rollback restore point, restores the active baseline locally, and promotes it to Supabase when connected.
                 </p>
               </div>
-            </Card>
+                </Card>
+              </Modal>
+            ) : null}
 
             <div className="bg-gradient-to-r from-sky-400 to-blue-500 rounded-2xl p-4 text-white">
               <div className="flex items-center justify-between mb-3">
