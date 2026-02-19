@@ -1007,7 +1007,7 @@ const ExecutiveSubPerformanceTable = ({ rows = [] }) => {
   if (list.length === 0) return <p className="text-sm text-gray-500">No subcontractor performance data yet.</p>
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-[minmax(0,1fr)_66px_50px_70px] sm:grid-cols-[minmax(0,1.3fr)_90px_70px_90px] gap-2 text-[10px] sm:text-[11px] uppercase tracking-wide text-gray-500 px-1">
+      <div className="hidden sm:grid sm:grid-cols-[minmax(0,1.3fr)_90px_70px_90px] gap-2 text-[11px] uppercase tracking-wide text-gray-500 px-1">
         <span>Subcontractor</span>
         <span className="text-right">On-Time</span>
         <span className="text-right">Tasks</span>
@@ -1018,11 +1018,23 @@ const ExecutiveSubPerformanceTable = ({ rows = [] }) => {
         const scoreClass = score >= 90 ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : score >= 80 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-rose-700 bg-rose-50 border-rose-200'
         return (
           <div key={entry.id} className="rounded-xl border border-gray-200 p-3">
-            <div className="grid grid-cols-[minmax(0,1fr)_66px_50px_70px] sm:grid-cols-[minmax(0,1.3fr)_90px_70px_90px] gap-2 items-center">
-              <p className="font-semibold text-gray-900 truncate">{entry.label}</p>
-              <p className={`text-right text-xs font-semibold border rounded-full px-2 py-1 ${scoreClass}`}>{formatCount(score)}%</p>
-              <p className="text-right text-gray-700">{formatCount(entry.totalTasks)}</p>
-              <p className="text-right text-gray-700">{formatCount(entry.delayDays)}</p>
+            <div className="grid grid-cols-3 sm:grid-cols-[minmax(0,1.3fr)_90px_70px_90px] gap-2 items-start sm:items-center">
+              <p className="col-span-3 sm:col-span-1 font-semibold text-gray-900 leading-tight break-words">{entry.label}</p>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-center sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0 sm:text-right">
+                <p className="text-[10px] uppercase tracking-wide text-gray-500 sm:hidden">On-Time</p>
+                <p className={`inline-flex text-xs font-semibold border rounded-full px-2 py-1 ${scoreClass}`}>{formatCount(score)}%</p>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-center sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0 sm:text-right">
+                <p className="text-[10px] uppercase tracking-wide text-gray-500 sm:hidden">Tasks</p>
+                <p className="text-gray-700">{formatCount(entry.totalTasks)}</p>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-center sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0 sm:text-right">
+                <p className="text-[10px] uppercase tracking-wide text-gray-500 sm:hidden">Delay Days</p>
+                <p className="text-gray-700">{formatCount(entry.delayDays)}</p>
+              </div>
             </div>
           </div>
         )
@@ -1062,6 +1074,19 @@ const ExecutiveMilestoneFunnel = ({ steps = [] }) => {
 
   return (
     <div className="space-y-3">
+      <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-xs text-blue-900 space-y-1">
+        <p className="font-semibold">How to read this</p>
+        <p>
+          <span className="font-semibold">Moved forward from prior stage</span> = percent of homes that advanced from the previous milestone.
+        </p>
+        <p>
+          <span className="font-semibold">Still between stages</span> = homes that have not reached this milestone yet.
+        </p>
+        <p>
+          <span className="font-semibold">Reached from start</span> = percent of all started homes that have reached this milestone.
+        </p>
+      </div>
+
       <div className="grid grid-cols-3 gap-2 text-xs">
         <div className="rounded-xl border border-gray-200 bg-gray-50 p-2">
           <p className="text-gray-500 uppercase tracking-wide text-[10px]">Started</p>
@@ -1105,19 +1130,19 @@ const ExecutiveMilestoneFunnel = ({ steps = [] }) => {
 
             <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
               {previous == null ? (
-                <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">Baseline stage</span>
+                <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">Starting stage</span>
               ) : (
                 <>
                   <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-gray-700">
-                    From prior: <span className="font-semibold">{fromPrevious}%</span>
+                    Moved forward from prior stage: <span className="font-semibold">{fromPrevious}%</span>
                   </span>
                   <span className={`rounded-full border px-2 py-0.5 ${drop > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-                    Drop-off: <span className="font-semibold">{formatCount(drop)}</span>
+                    Still between stages: <span className="font-semibold">{formatCount(drop)}</span>
                   </span>
                 </>
               )}
               <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-700">
-                From start: <span className="font-semibold">{fromStart}%</span>
+                Reached from start: <span className="font-semibold">{fromStart}%</span>
               </span>
               {isBiggestDrop ? (
                 <span className="rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 font-semibold text-rose-800">
@@ -12742,7 +12767,7 @@ export default function BuildFlow() {
               <Card>
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Milestone Funnel</h3>
-                  <span className="text-xs text-gray-500">Started homes progressing to CO</span>
+                  <span className="text-xs text-gray-500">How homes progress from start to CO</span>
                 </div>
                 <div className="mt-3">
                   <ExecutiveMilestoneFunnel steps={executiveAnalytics.milestoneFunnel} />
