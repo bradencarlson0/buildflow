@@ -5068,12 +5068,46 @@ export default function BuildFlow() {
     setSupabaseBootstrapVersion((prev) => prev + 1)
   }
 
+  const navScrollKeyRef = useRef(null)
+
+  const scrollViewportToTop = useCallback((behavior = 'smooth') => {
+    if (typeof window === 'undefined') return
+
+    const prefersReducedMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const resolvedBehavior = behavior === 'smooth' && prefersReducedMotion ? 'auto' : behavior
+
+    window.requestAnimationFrame(() => {
+      try {
+        window.scrollTo({ top: 0, left: 0, behavior: resolvedBehavior })
+      } catch {
+        window.scrollTo(0, 0)
+      }
+      if (typeof document !== 'undefined') {
+        if (document.documentElement) document.documentElement.scrollTop = 0
+        if (document.body) document.body.scrollTop = 0
+      }
+    })
+  }, [])
+
   const navigateRoot = (nextTab) => {
     setTab(nextTab)
     setSelectedCommunityId(null)
     setSelectedLotId(null)
     setLotDetailTab('overview')
   }
+
+  useEffect(() => {
+    const navKey = [tab, selectedCommunityId ?? '', selectedLotId ?? '', lotDetailTab].join('|')
+    if (navScrollKeyRef.current == null) {
+      navScrollKeyRef.current = navKey
+      return
+    }
+    if (navScrollKeyRef.current === navKey) return
+    navScrollKeyRef.current = navKey
+    scrollViewportToTop('smooth')
+  }, [lotDetailTab, scrollViewportToTop, selectedCommunityId, selectedLotId, tab])
 
   const [scheduleEditLock, setScheduleEditLock] = useState({
     lotId: null,
