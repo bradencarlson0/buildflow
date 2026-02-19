@@ -1304,19 +1304,22 @@ const mapCommunityFromSupabase = (communityRow) => ({
   documents: coerceArray(communityRow?.documents),
 })
 
-const mapSubcontractorFromSupabase = (subRow) => ({
-  ...subRow,
-  company_name: subRow?.company_name ?? subRow?.name ?? 'Subcontractor',
-  trade: subRow?.trade ?? 'other',
-  secondary_trades: coerceArray(subRow?.secondary_trades),
-  primary_contact: {
-    name: subRow?.primary_contact?.name ?? '',
-    phone: subRow?.primary_contact?.phone ?? subRow?.phone ?? '',
-    email: subRow?.primary_contact?.email ?? subRow?.email ?? '',
-  },
-  additional_contacts: coerceArray(subRow?.additional_contacts),
-  office_phone: subRow?.office_phone ?? subRow?.phone ?? subRow?.primary_contact?.phone ?? '',
-})
+const mapSubcontractorFromSupabase = (subRow) => {
+  const { rating: _rating, ...rest } = subRow ?? {}
+  return {
+    ...rest,
+    company_name: subRow?.company_name ?? subRow?.name ?? 'Subcontractor',
+    trade: subRow?.trade ?? 'other',
+    secondary_trades: coerceArray(subRow?.secondary_trades),
+    primary_contact: {
+      name: subRow?.primary_contact?.name ?? '',
+      phone: subRow?.primary_contact?.phone ?? subRow?.phone ?? '',
+      email: subRow?.primary_contact?.email ?? subRow?.email ?? '',
+    },
+    additional_contacts: coerceArray(subRow?.additional_contacts),
+    office_phone: subRow?.office_phone ?? subRow?.phone ?? subRow?.primary_contact?.phone ?? '',
+  }
+}
 
 const mapProductTypeFromSupabase = (row) => ({
   ...row,
@@ -1425,7 +1428,6 @@ const mapSubcontractorToSupabase = (row, orgId) => ({
   crew_size: Number.isFinite(Number(row?.crew_size)) ? Number(row.crew_size) : null,
   is_preferred: row?.is_preferred !== false,
   is_backup: Boolean(row?.is_backup),
-  rating: Number.isFinite(Number(row?.rating)) ? Number(row.rating) : null,
   total_jobs: Number.isFinite(Number(row?.total_jobs)) ? Number(row.total_jobs) : 0,
   on_time_pct: Number.isFinite(Number(row?.on_time_pct)) ? Number(row.on_time_pct) : null,
   delay_count: Number.isFinite(Number(row?.delay_count)) ? Number(row.delay_count) : 0,
@@ -7289,11 +7291,10 @@ export default function BuildFlow() {
 
     if (reportType === 'sub_performance') {
       const rows = [
-        ['Subcontractor', 'Trade', 'Rating', 'On-Time %', 'Delay Count', 'Total Jobs', 'Insurance Expiration', 'Status'],
+        ['Subcontractor', 'Trade', 'On-Time %', 'Delay Count', 'Total Jobs', 'Insurance Expiration', 'Status'],
         ...app.subcontractors.map((s) => [
           s.company_name,
           TRADES.find((t) => t.id === s.trade)?.label ?? s.trade,
-          s.rating ?? '',
           s.on_time_pct ?? '',
           s.delay_count ?? '',
           s.total_jobs ?? '',
@@ -14698,7 +14699,6 @@ export default function BuildFlow() {
                 crew_size: null,
                 is_preferred: false,
                 is_backup: false,
-                rating: 0,
                 total_jobs: 0,
                 on_time_pct: null,
                 delay_count: 0,

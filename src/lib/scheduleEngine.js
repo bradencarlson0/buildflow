@@ -304,7 +304,11 @@ export const assignSubsToTasks = (tasks, subs) => {
 
     const available = tradeSubs
       .filter((s) => isAvailable(s, dateIso))
-      .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
+      .sort((a, b) =>
+        String(a.company_name ?? a.name ?? '').localeCompare(String(b.company_name ?? b.name ?? ''), undefined, {
+          sensitivity: 'base',
+        }),
+      )
 
     return available[0] ?? null
   }
