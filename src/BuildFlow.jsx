@@ -124,7 +124,7 @@ import {
   withBaselineMetadata,
 } from './lib/baseline.js'
 import { stableStringify } from './lib/checksum.js'
-import { isSyncV2Enabled, writeFlag } from './lib/flags.js'
+import { isSyncV2Enabled, readFlag, writeFlag } from './lib/flags.js'
 import { syncV2HealthCheck, syncV2Pull, syncV2Push } from './lib/syncV2.js'
 import { uuid } from './lib/uuid.js'
 import { supabase } from './lib/supabaseClient.js'
@@ -2044,6 +2044,7 @@ export default function BuildFlow() {
   const [showNotificationPrefs, setShowNotificationPrefs] = useState(false)
   const [showOfflineStatus, setShowOfflineStatus] = useState(false)
   const [showDemoSettings, setShowDemoSettings] = useState(false)
+  const [showLotSyncDebug, setShowLotSyncDebug] = useState(() => readFlag('bf:lot_sync_debug', false))
   const [showCreateCommunity, setShowCreateCommunity] = useState(false)
   const [showArchivedCommunitiesInAdmin, setShowArchivedCommunitiesInAdmin] = useState(false)
   const [showEditCommunityAdmin, setShowEditCommunityAdmin] = useState(false)
@@ -3326,8 +3327,10 @@ export default function BuildFlow() {
 
               const idsToAck = []
               const ackedReferenceHashes = []
+              const ackedLotPushMetaById = new Map()
               const retryRows = []
               const conflictRows = []
+              const pushedAt = pushRes.server_time ?? new Date().toISOString()
               for (const op of ready) {
                 const id = String(op?.id ?? '')
                 if (!id) continue
@@ -3337,6 +3340,30 @@ export default function BuildFlow() {
                   idsToAck.push(id)
                   if (op?.kind === 'reference_snapshot' && op?.reference_hash) {
                     ackedReferenceHashes.push(String(op.reference_hash))
+                  }
+                  const lotId = String(op?.lot_id ?? op?.payload?.lot_id ?? op?.entity_id ?? '').trim()
+                  if (lotId) {
+                    const hasLotPatch =
+                      op?.kind === 'tasks_batch' &&
+                      op?.payload?.lot &&
+                      typeof op.payload.lot === 'object' &&
+                      Object.keys(op.payload.lot).length > 0
+                    const baseVersion = Number(op?.payload?.lot_base_version ?? op?.base_version)
+                    const inferredPushedVersion =
+                      hasLotPatch && Number.isFinite(baseVersion) ? Math.trunc(baseVersion + 1) : null
+                    const prevMeta = ackedLotPushMetaById.get(lotId) ?? null
+                    const prevVersion = Number(prevMeta?.last_pushed_lot_version)
+                    const nextVersion = Number.isFinite(inferredPushedVersion)
+                      ? Number.isFinite(prevVersion)
+                        ? Math.max(prevVersion, inferredPushedVersion)
+                        : inferredPushedVersion
+                      : Number.isFinite(prevVersion)
+                        ? prevVersion
+                        : null
+                    ackedLotPushMetaById.set(lotId, {
+                      last_pushed_at: pushedAt,
+                      last_pushed_lot_version: Number.isFinite(nextVersion) ? Math.trunc(nextVersion) : null,
+                    })
                   }
                 } else if (terminalStatuses.has(status)) {
                   conflictRows.push(row ?? { id, status, conflict_reason: 'Conflict' })
@@ -3429,7 +3456,34 @@ export default function BuildFlow() {
               setApp((prev) => ({
                 ...prev,
                 sync: {
-                  ...(prev.sync ?? {}),
+                  ...(() => {
+                    const sync = prev.sync ?? {}
+                    const existingLotSyncDebug =
+                      sync?.lot_sync_debug && typeof sync.lot_sync_debug === 'object' && !Array.isArray(sync.lot_sync_debug)
+                        ? sync.lot_sync_debug
+                        : {}
+                    const nextLotSyncDebug = { ...existingLotSyncDebug }
+                    if (ackedLotPushMetaById.size > 0) {
+                      for (const [lotId, meta] of ackedLotPushMetaById.entries()) {
+                        const prevMeta = nextLotSyncDebug?.[lotId] ?? {}
+                        const prevVersion = Number(prevMeta?.last_pushed_lot_version)
+                        const nextVersion = Number(meta?.last_pushed_lot_version)
+                        nextLotSyncDebug[lotId] = {
+                          ...prevMeta,
+                          last_pushed_at: meta?.last_pushed_at ?? prevMeta?.last_pushed_at ?? null,
+                          last_pushed_lot_version: Number.isFinite(nextVersion)
+                            ? Math.trunc(nextVersion)
+                            : Number.isFinite(prevVersion)
+                              ? Math.trunc(prevVersion)
+                              : null,
+                        }
+                      }
+                    }
+                    return {
+                      ...sync,
+                      lot_sync_debug: nextLotSyncDebug,
+                    }
+                  })(),
                   pending: idsToAck.length > 0 ? (prev.sync?.pending ?? []).filter((op) => !idsToAck.includes(String(op?.id ?? ''))) : prev.sync?.pending ?? [],
                   last_synced_at: idsToAck.length > 0 ? pushRes.server_time ?? new Date().toISOString() : prev.sync?.last_synced_at ?? null,
                   v2_reference_last_acked_hash: lastAckedReferenceHash || prev.sync?.v2_reference_last_acked_hash || '',
@@ -4356,6 +4410,28 @@ export default function BuildFlow() {
 
   const selectedCommunity = selectedCommunityId ? communitiesById.get(selectedCommunityId) : null
   const selectedLot = selectedLotId ? lotsById.get(selectedLotId) : null
+  const lotSyncDebugMap =
+    app?.sync?.lot_sync_debug && typeof app.sync.lot_sync_debug === 'object' && !Array.isArray(app.sync.lot_sync_debug)
+      ? app.sync.lot_sync_debug
+      : {}
+  const selectedLotSyncDebug = selectedLot ? lotSyncDebugMap[selectedLot.id] ?? null : null
+  const selectedLotLastPushedVersion = (() => {
+    const metaVersion = Number(selectedLotSyncDebug?.last_pushed_lot_version)
+    if (Number.isFinite(metaVersion)) return Math.trunc(metaVersion)
+    const lotVersion = Number(selectedLot?.version)
+    if (Number.isFinite(lotVersion)) return Math.trunc(lotVersion)
+    return null
+  })()
+  const selectedLotLastPushedAt =
+    selectedLotSyncDebug?.last_pushed_at ??
+    syncV2Status?.last_pushed_at ??
+    app?.sync?.last_synced_at ??
+    null
+  const selectedLotLastPulledAt =
+    syncV2Status?.last_pulled_at ??
+    app?.sync?.v2_last_pulled_at ??
+    app?.sync?.last_synced_at ??
+    null
   const selectedCommunityBuilders = selectedCommunity?.builders ?? []
   const selectedCommunityRealtors = selectedCommunity?.realtors ?? []
   const selectedCommunityInspectors = selectedCommunity?.inspectors ?? []
@@ -9295,6 +9371,22 @@ export default function BuildFlow() {
                 </div>
               )}
 
+              <div className="mt-3 rounded-xl border border-gray-200 bg-white p-3">
+                <label className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium text-gray-800">Show lot sync debug row</span>
+                  <input
+                    type="checkbox"
+                    checked={showLotSyncDebug}
+                    onChange={(e) => {
+                      const next = Boolean(e.target.checked)
+                      setShowLotSyncDebug(next)
+                      writeFlag('bf:lot_sync_debug', next)
+                    }}
+                  />
+                </label>
+                <p className="text-xs text-gray-500 mt-1">Adds lot version + push/pull timing in lot detail for demo diagnostics.</p>
+              </div>
+
               <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/60 p-3 space-y-2">
                 <div className="flex items-start justify-between gap-2">
                   <div>
@@ -9538,9 +9630,6 @@ export default function BuildFlow() {
                       {activeLotsExpanded ? 'Collapse' : `Expand (${activeLotsSorted.length})`}
                     </button>
                   ) : null}
-                  <button onClick={resetDemo} className="text-xs text-blue-600">
-                    Reset demo
-                  </button>
                 </div>
               </div>
               {activeLots.length === 0 ? (
@@ -10817,6 +10906,14 @@ export default function BuildFlow() {
                     <span>Days: {daysElapsed(selectedLot) ?? '--'} of {selectedLot.build_days}</span>
                     <span>ETA: {lotEta(selectedLot)}</span>
                   </div>
+                </div>
+              ) : null}
+              {showLotSyncDebug ? (
+                <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50/50 px-3 py-2 text-[11px] text-blue-900">
+                  <span className="font-semibold">Sync Debug</span> • lot.version:{' '}
+                  <span className="font-semibold">{selectedLotLastPushedVersion ?? '--'}</span> • last push:{' '}
+                  {formatSyncTimestamp(selectedLotLastPushedAt) || '--'} • last pull:{' '}
+                  {formatSyncTimestamp(selectedLotLastPulledAt) || '--'}
                 </div>
               ) : null}
             </Card>
