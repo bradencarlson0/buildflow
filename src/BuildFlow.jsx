@@ -21583,6 +21583,7 @@ function MessageModal({ lot, community, task, org, isOnline, subcontractors, ini
   const [email, setEmail] = useState(false)
   const [appChannel, setAppChannel] = useState(false)
   const [templateKey, setTemplateKey] = useState(() => (task && lot && community ? 'schedule_change' : 'custom'))
+  const primaryActionLabel = sms ? 'Preview in iMessage' : email ? 'Preview in Email' : 'Queue Message'
 
   const applyTemplate = (template, vars) =>
     String(template ?? '').replaceAll(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => (vars?.[key] ?? `{${key}}`))
@@ -21641,7 +21642,7 @@ function MessageModal({ lot, community, task, org, isOnline, subcontractors, ini
             className="flex-1"
             disabled={!subId || !body.trim()}
           >
-            Send Message
+            {primaryActionLabel}
           </PrimaryButton>
         </div>
       }
@@ -21732,6 +21733,7 @@ function MessageModal({ lot, community, task, org, isOnline, subcontractors, ini
             rows={8}
           />
         </label>
+        <p className="text-xs text-gray-500">This opens a draft preview. Nothing is sent automatically.</p>
       </div>
     </Modal>
   )
