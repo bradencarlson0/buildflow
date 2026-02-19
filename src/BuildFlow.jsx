@@ -856,7 +856,13 @@ const ExecutiveStackedBar = ({ segments = [] }) => {
   )
 }
 
-const ExecutiveRankBars = ({ items = [], valueSuffix = '', valueFormatter = null, barClassName = 'bg-blue-600' }) => {
+const ExecutiveRankBars = ({
+  items = [],
+  valueSuffix = '',
+  valueFormatter = null,
+  rightLabelFormatter = null,
+  barClassName = 'bg-blue-600',
+}) => {
   const list = (Array.isArray(items) ? items : []).filter((item) => Number(item?.value ?? 0) > 0)
   const max = Math.max(1, ...list.map((item) => Number(item.value ?? 0)))
   if (list.length === 0) return <p className="text-sm text-gray-500">No data yet.</p>
@@ -870,8 +876,9 @@ const ExecutiveRankBars = ({ items = [], valueSuffix = '', valueFormatter = null
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="font-semibold text-gray-700 truncate">{item.label}</span>
               <span className="text-gray-600 whitespace-nowrap">
-                {valueFormatter ? valueFormatter(value) : formatCount(value)}
-                {valueSuffix}
+                {rightLabelFormatter
+                  ? rightLabelFormatter(item, value)
+                  : `${valueFormatter ? valueFormatter(value) : formatCount(value)}${valueSuffix}`}
               </span>
             </div>
             <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
@@ -884,28 +891,135 @@ const ExecutiveRankBars = ({ items = [], valueSuffix = '', valueFormatter = null
   )
 }
 
+const EXECUTIVE_DONUT_COLORS = ['#2563EB', '#0EA5E9', '#14B8A6', '#22C55E', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B']
+
+const ExecutiveDonutBreakdown = ({ items = [], centerLabel = '', centerValue = '' }) => {
+  const rows = (Array.isArray(items) ? items : []).filter((item) => Number(item?.value ?? 0) > 0)
+  const total = rows.reduce((sum, item) => sum + Number(item.value ?? 0), 0)
+  if (total <= 0) return <p className="text-sm text-gray-500">No data yet.</p>
+
+  let cursor = 0
+  const slices = rows.map((item, idx) => {
+    const value = Number(item.value ?? 0)
+    const pct = (100 * value) / total
+    const start = cursor
+    const end = cursor + pct
+    cursor = end
+    return { ...item, color: EXECUTIVE_DONUT_COLORS[idx % EXECUTIVE_DONUT_COLORS.length], start, end }
+  })
+  const conicStops = slices.map((slice) => `${slice.color} ${slice.start}% ${slice.end}%`).join(', ')
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4 items-center">
+      <div className="mx-auto relative h-48 w-48">
+        <div className="h-full w-full rounded-full" style={{ background: `conic-gradient(${conicStops})` }} />
+        <div className="absolute inset-8 rounded-full bg-white border border-gray-200 flex flex-col items-center justify-center text-center px-2">
+          <p className="text-[11px] uppercase tracking-wide text-gray-500">{centerLabel}</p>
+          <p className="text-2xl font-bold text-gray-900">{centerValue}</p>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {slices.map((slice) => (
+          <div key={slice.id ?? slice.label} className="flex items-center justify-between gap-3 text-sm">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="inline-block h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: slice.color }} />
+              <span className="truncate text-gray-700 font-medium">{slice.label}</span>
+            </div>
+            <span className="text-gray-600 whitespace-nowrap">
+              {formatCount(slice.value)} ({formatPct(slice.value, total)})
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+const ExecutiveCommunityScorecard = ({ rows = [] }) => {
+  const list = Array.isArray(rows) ? rows : []
+  if (list.length === 0) return <p className="text-sm text-gray-500">No active communities yet.</p>
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-[minmax(0,1fr)_56px_56px_62px] sm:grid-cols-[minmax(0,1.3fr)_80px_80px_90px] gap-2 text-[10px] sm:text-[11px] uppercase tracking-wide text-gray-500 px-1">
+        <span>Community</span>
+        <span className="text-right">Active</span>
+        <span className="text-right">Delayed</span>
+        <span className="text-right">Avg %</span>
+      </div>
+      {list.map((entry) => (
+        <div key={entry.id} className="rounded-xl border border-gray-200 p-3">
+          <div className="grid grid-cols-[minmax(0,1fr)_56px_56px_62px] sm:grid-cols-[minmax(0,1.3fr)_80px_80px_90px] gap-2 items-center">
+            <p className="font-semibold text-gray-900 truncate">{entry.label}</p>
+            <p className="text-right text-gray-700">{formatCount(entry.activeLots)}</p>
+            <p className={`text-right font-semibold ${entry.delayedLots > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+              {formatCount(entry.delayedLots)}
+            </p>
+            <p className="text-right font-semibold text-blue-700">{formatCount(entry.value)}%</p>
+          </div>
+          <div className="mt-2 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+            <div className="h-full bg-blue-600" style={{ width: `${Math.max(0, Math.min(100, Number(entry.value ?? 0)))}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+const ExecutiveSubPerformanceTable = ({ rows = [] }) => {
+  const list = Array.isArray(rows) ? rows : []
+  if (list.length === 0) return <p className="text-sm text-gray-500">No subcontractor performance data yet.</p>
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-[minmax(0,1fr)_66px_50px_70px] sm:grid-cols-[minmax(0,1.3fr)_90px_70px_90px] gap-2 text-[10px] sm:text-[11px] uppercase tracking-wide text-gray-500 px-1">
+        <span>Subcontractor</span>
+        <span className="text-right">On-Time</span>
+        <span className="text-right">Tasks</span>
+        <span className="text-right">Delay Days</span>
+      </div>
+      {list.map((entry) => {
+        const score = Number(entry.value ?? 0)
+        const scoreClass = score >= 90 ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : score >= 80 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-rose-700 bg-rose-50 border-rose-200'
+        return (
+          <div key={entry.id} className="rounded-xl border border-gray-200 p-3">
+            <div className="grid grid-cols-[minmax(0,1fr)_66px_50px_70px] sm:grid-cols-[minmax(0,1.3fr)_90px_70px_90px] gap-2 items-center">
+              <p className="font-semibold text-gray-900 truncate">{entry.label}</p>
+              <p className={`text-right text-xs font-semibold border rounded-full px-2 py-1 ${scoreClass}`}>{formatCount(score)}%</p>
+              <p className="text-right text-gray-700">{formatCount(entry.totalTasks)}</p>
+              <p className="text-right text-gray-700">{formatCount(entry.delayDays)}</p>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 const ExecutiveTrendSparkline = ({ points = [] }) => {
   const list = Array.isArray(points) ? points : []
   if (list.length === 0) return <p className="text-sm text-gray-500">No completion trend available yet.</p>
-  const width = 420
-  const height = 140
-  const padX = 20
-  const padY = 18
-  const maxValue = Math.max(1, ...list.map((p) => Number(p?.value ?? 0)))
+  const width = 520
+  const height = 220
+  const padLeft = 44
+  const padRight = 16
+  const padTop = 14
+  const padBottom = 36
+  const maxRaw = Math.max(1, ...list.map((p) => Number(p?.value ?? 0)))
+  const yMax = Math.max(5, Math.ceil(maxRaw / 5) * 5)
+  const yTicks = [0, 1, 2, 3].map((i) => Math.round((yMax * i) / 3))
   const xFor = (idx) =>
     list.length === 1
       ? width / 2
-      : padX + (idx / (list.length - 1)) * (width - padX * 2)
-  const yFor = (value) => height - padY - (Number(value ?? 0) / maxValue) * (height - padY * 2)
+      : padLeft + (idx / (list.length - 1)) * (width - padLeft - padRight)
+  const yFor = (value) => height - padBottom - (Number(value ?? 0) / yMax) * (height - padTop - padBottom)
   const coords = list.map((point, idx) => `${xFor(idx)},${yFor(point.value)}`).join(' ')
-  const areaCoords = `${padX},${height - padY} ${coords} ${width - padX},${height - padY}`
+  const areaCoords = `${padLeft},${height - padBottom} ${coords} ${width - padRight},${height - padBottom}`
   const latest = list[list.length - 1]
   const previous = list.length > 1 ? list[list.length - 2] : null
   const latestDelta = previous ? Number(latest?.value ?? 0) - Number(previous?.value ?? 0) : 0
 
   return (
     <div className="space-y-2">
-      <div className="h-36 rounded-xl border border-gray-200 bg-gradient-to-b from-blue-50 to-white p-2">
+      <div className="h-56 rounded-xl border border-gray-200 bg-gradient-to-b from-blue-50 to-white p-2">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
           <defs>
             <linearGradient id="executiveTrendArea" x1="0" x2="0" y1="0" y2="1">
@@ -913,12 +1027,43 @@ const ExecutiveTrendSparkline = ({ points = [] }) => {
               <stop offset="100%" stopColor="#60A5FA" stopOpacity="0.04" />
             </linearGradient>
           </defs>
-          <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} stroke="#CBD5E1" strokeWidth="1" />
+          {yTicks.map((tick) => (
+            <g key={`yt-${tick}`}>
+              <line
+                x1={padLeft}
+                y1={yFor(tick)}
+                x2={width - padRight}
+                y2={yFor(tick)}
+                stroke="#E2E8F0"
+                strokeWidth="1"
+                strokeDasharray="3 4"
+              />
+              <text x={padLeft - 6} y={yFor(tick) + 4} textAnchor="end" fontSize="10" fill="#64748B">
+                {tick}
+              </text>
+            </g>
+          ))}
+          {list.map((point, idx) => {
+            const showTick = idx === 0 || idx === list.length - 1 || idx === Math.floor(list.length / 2)
+            if (!showTick) return null
+            return (
+              <g key={`xt-${point.key ?? idx}`}>
+                <line x1={xFor(idx)} y1={height - padBottom} x2={xFor(idx)} y2={height - padBottom + 4} stroke="#94A3B8" strokeWidth="1" />
+                <text x={xFor(idx)} y={height - 8} textAnchor="middle" fontSize="10" fill="#64748B">
+                  {point.label}
+                </text>
+              </g>
+            )
+          })}
+          <line x1={padLeft} y1={height - padBottom} x2={width - padRight} y2={height - padBottom} stroke="#94A3B8" strokeWidth="1.2" />
           <polygon points={areaCoords} fill="url(#executiveTrendArea)" />
           <polyline points={coords} fill="none" stroke="#2563EB" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
           {list.map((point, idx) => (
             <circle key={`${point.label}-${idx}`} cx={xFor(idx)} cy={yFor(point.value)} r="3.2" fill="#1D4ED8" />
           ))}
+          <text x={12} y={14} fontSize="10" fill="#64748B">
+            Homes
+          </text>
         </svg>
       </div>
       <div className="flex items-center justify-between text-xs text-gray-600">
@@ -12227,19 +12372,11 @@ export default function BuildFlow() {
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <Card>
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-semibold">Community Progress Leaderboard</h3>
-                  <span className="text-xs text-gray-500">Avg % complete (active lots)</span>
+                  <h3 className="font-semibold">Community Progress Scorecard</h3>
+                  <span className="text-xs text-gray-500">Progress + delay concentration</span>
                 </div>
                 <div className="mt-3">
-                  <ExecutiveRankBars
-                    items={executiveAnalytics.communityProgress.map((entry) => ({
-                      id: entry.id,
-                      label: `${entry.label} (${entry.activeLots} active${entry.delayedLots ? `, ${entry.delayedLots} delayed` : ''})`,
-                      value: entry.value,
-                    }))}
-                    valueSuffix="%"
-                    barClassName="bg-blue-600"
-                  />
+                  <ExecutiveCommunityScorecard rows={executiveAnalytics.communityProgress} />
                 </div>
               </Card>
 
@@ -12251,7 +12388,7 @@ export default function BuildFlow() {
                 <div className="mt-3">
                   <ExecutiveRankBars
                     items={executiveAnalytics.delayedByTrade}
-                    valueSuffix="d"
+                    rightLabelFormatter={(item, value) => `${formatCount(value)}d • ${formatCount(item?.events ?? 0)} issues`}
                     barClassName="bg-rose-500"
                   />
                 </div>
@@ -12262,16 +12399,16 @@ export default function BuildFlow() {
               <Card>
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Homes Assigned by Builder</h3>
-                  <span className="text-xs text-gray-500">Workload distribution</span>
+                  <span className="text-xs text-gray-500">Portfolio ownership mix</span>
                 </div>
                 <div className="mt-3">
-                  <ExecutiveRankBars
+                  <ExecutiveDonutBreakdown
                     items={executiveAnalytics.builderLoad.map((entry) => ({
-                      id: entry.id,
+                      ...entry,
                       label: `${entry.label} (${formatCount(entry.activeLots)} active)`,
-                      value: entry.value,
                     }))}
-                    barClassName="bg-indigo-600"
+                    centerLabel="Total Assigned"
+                    centerValue={formatCount(executiveAnalytics.builderLoad.reduce((sum, row) => sum + Number(row?.value ?? 0), 0))}
                   />
                 </div>
               </Card>
@@ -12279,18 +12416,10 @@ export default function BuildFlow() {
               <Card>
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Vendor Analysis (Subs)</h3>
-                  <span className="text-xs text-gray-500">On-time task completion</span>
+                  <span className="text-xs text-gray-500">Execution reliability leaderboard</span>
                 </div>
                 <div className="mt-3">
-                  <ExecutiveRankBars
-                    items={executiveAnalytics.subPerformance.map((entry) => ({
-                      id: entry.id,
-                      label: `${entry.label} (${formatCount(entry.totalTasks)} tasks, ${formatCount(entry.delayDays)} delay days)`,
-                      value: entry.value,
-                    }))}
-                    valueSuffix="%"
-                    barClassName="bg-emerald-600"
-                  />
+                  <ExecutiveSubPerformanceTable rows={executiveAnalytics.subPerformance} />
                 </div>
               </Card>
             </div>
