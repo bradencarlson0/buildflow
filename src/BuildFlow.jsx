@@ -818,6 +818,14 @@ const buildExecutiveDemoAnalytics = (todayIso = '') => {
       { id: 'cabinets', label: 'Cabinets', value: 16, events: 4 },
       { id: 'paint', label: 'Paint', value: 13, events: 3 },
     ],
+    delayedByTask: [
+      { id: 'task-framing-inspection', label: 'Framing Inspection Corrections', value: 18, events: 5 },
+      { id: 'task-plumbing-rough-in', label: 'Plumbing Rough-In', value: 16, events: 4 },
+      { id: 'task-electrical-trim', label: 'Electrical Trim', value: 14, events: 3 },
+      { id: 'task-drywall-hang', label: 'Drywall Hang / Finish', value: 13, events: 4 },
+      { id: 'task-cabinet-install', label: 'Cabinet Install', value: 11, events: 3 },
+      { id: 'task-paint-touchup', label: 'Paint Touch-Ups', value: 9, events: 2 },
+    ],
     builderLoad: [
       { id: 'b-black', label: 'B. Clark', value: 24, activeLots: 12 },
       { id: 'b-bb', label: 'BB', value: 22, activeLots: 10 },
@@ -1160,7 +1168,7 @@ const ExecutivePlanVsActualChart = ({ points = [] }) => {
   const padLeft = 44
   const padRight = 14
   const padTop = 16
-  const padBottom = 38
+  const padBottom = 30
   const maxRaw = Math.max(1, ...list.flatMap((p) => [Number(p?.actual ?? 0), Number(p?.planned ?? 0)]))
   const yStep = maxRaw <= 12 ? 2 : maxRaw <= 24 ? 4 : 5
   const yMax = Math.max(yStep * 3, Math.ceil(maxRaw / yStep) * yStep)
@@ -1173,28 +1181,45 @@ const ExecutivePlanVsActualChart = ({ points = [] }) => {
   const plannedTotal = list.reduce((sum, point) => sum + Number(point?.planned ?? 0), 0)
   const variance = actualTotal - plannedTotal
   const tickEvery = Math.max(1, Math.floor((list.length - 1) / 4))
+  const mobileMidIndex = Math.floor((list.length - 1) / 2)
+  const mobileYMid = Math.round((yMax / 2) / yStep) * yStep
 
   return (
     <div className="space-y-2">
       <div className="h-60 rounded-xl border border-gray-200 bg-white p-2">
+        <p className="px-1 text-[11px] text-gray-500">Homes per week</p>
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
           {yTicks.map((tick) => (
             <g key={`pva-y-${tick}`}>
               <line x1={padLeft} y1={yFor(tick)} x2={width - padRight} y2={yFor(tick)} stroke="#E2E8F0" strokeWidth="1" />
-              <text x={padLeft - 6} y={yFor(tick) + 4} textAnchor="end" fontSize="10" fill="#64748B">
+              <text className="hidden sm:block" x={padLeft - 6} y={yFor(tick) + 4} textAnchor="end" fontSize="10" fill="#64748B">
                 {tick}
               </text>
+              {tick === 0 || tick === yMax || tick === mobileYMid ? (
+                <text className="sm:hidden" x={padLeft - 6} y={yFor(tick) + 4} textAnchor="end" fontSize="10" fill="#64748B">
+                  {tick}
+                </text>
+              ) : null}
             </g>
           ))}
           {list.map((point, idx) => {
-            const showTick = idx === 0 || idx === list.length - 1 || idx % tickEvery === 0
-            if (!showTick) return null
+            const showDesktopTick = idx === 0 || idx === list.length - 1 || idx % tickEvery === 0
+            const showMobileTick = idx === 0 || idx === list.length - 1 || idx === mobileMidIndex
+            if (!showDesktopTick && !showMobileTick) return null
+            const anchor = idx === 0 ? 'start' : idx === list.length - 1 ? 'end' : 'middle'
             return (
               <g key={`pva-x-${point.key ?? idx}`}>
                 <line x1={xFor(idx)} y1={height - padBottom} x2={xFor(idx)} y2={height - padBottom + 4} stroke="#94A3B8" strokeWidth="1" />
-                <text x={xFor(idx)} y={height - 8} textAnchor="middle" fontSize="10" fill="#64748B">
-                  {point.label}
-                </text>
+                {showDesktopTick ? (
+                  <text className="hidden sm:block" x={xFor(idx)} y={height - 8} textAnchor={anchor} fontSize="10" fill="#64748B">
+                    {point.label}
+                  </text>
+                ) : null}
+                {showMobileTick ? (
+                  <text className="sm:hidden" x={xFor(idx)} y={height - 8} textAnchor={anchor} fontSize="10" fill="#64748B">
+                    {point.label}
+                  </text>
+                ) : null}
               </g>
             )
           })}
@@ -1207,12 +1232,6 @@ const ExecutivePlanVsActualChart = ({ points = [] }) => {
               <circle cx={xFor(idx)} cy={yFor(point.planned)} r="2.7" fill="#16A34A" />
             </g>
           ))}
-          <text x={12} y={14} fontSize="10" fill="#64748B">
-            Homes per week
-          </text>
-          <text x={(padLeft + (width - padRight)) / 2} y={height - 2} textAnchor="middle" fontSize="10" fill="#64748B">
-            Week starting date
-          </text>
         </svg>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -9074,6 +9093,26 @@ export default function BuildFlow() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 6)
 
+    const delayedByTask = Array.from(
+      active.reduce((map, lot) => {
+        for (const task of lot?.tasks ?? []) {
+          const status = String(task?.status ?? '').toLowerCase()
+          const delayDays = Number(task?.delay_days ?? 0) || 0
+          if (status !== 'delayed' && delayDays <= 0) continue
+          const rawLabel = String(task?.name ?? '').trim()
+          const label = rawLabel || 'Unspecified Task'
+          const key = rawLabel ? rawLabel.toLowerCase() : 'unspecified-task'
+          const entry = map.get(key) ?? { id: `task-${key.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'unspecified'}`, label, value: 0, events: 0 }
+          entry.value += Math.max(1, delayDays)
+          entry.events += 1
+          map.set(key, entry)
+        }
+        return map
+      }, new Map()).values(),
+    )
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 8)
+
     const delayReasonPareto = withParetoCumulative(
       Array.from(
         active.reduce((map, lot) => {
@@ -9230,6 +9269,7 @@ export default function BuildFlow() {
       lotTypeMix,
       communityProgress,
       delayedByTrade,
+      delayedByTask,
       delayReasonPareto,
       builderLoad,
       subPerformance,
@@ -12847,6 +12887,20 @@ export default function BuildFlow() {
               </Card>
 
               <Card>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">Delay Hotspots by Task</h3>
+                  <span className="text-xs text-gray-500">Top delayed task names</span>
+                </div>
+                <div className="mt-3">
+                  <ExecutiveRankBars
+                    items={executiveAnalytics.delayedByTask}
+                    rightLabelFormatter={(item, value) => `${formatCount(value)}d • ${formatCount(item?.events ?? 0)} issues`}
+                    barClassName="bg-orange-500"
+                  />
+                </div>
+              </Card>
+
+              <Card className="xl:col-span-2">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Inventory Type Mix</h3>
                   <span className="text-xs text-gray-500">Current portfolio composition</span>
